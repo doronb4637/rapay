@@ -58,16 +58,10 @@ class UdpConnection(FramedConnection):
     def _remember_peer(self, unit: str, addr) -> None:
         self._peers[unit] = addr
 
-    def _unit_from_port(self, port: int) -> str:
-        unit = self.config.unit_from_port(port)
-        if unit is None:
-            raise ValueError(f"no unit configured for port {port}; check config['units']")
-        return unit
-
     async def _do_start(self) -> None:
         loop = asyncio.get_running_loop()
-        for port in self.config.ports:
-            unit = self._unit_from_port(port)
+        for unit, endpoint in self.config.connections.items():
+            port = endpoint.port
             if self.config.side == Side.SERVER:
                 local_addr = (self.config.local_ip, port)
                 remote_addr = None
@@ -94,8 +88,20 @@ class UdpConnection(FramedConnection):
         peer = self._peers.get(unit_name)
         if peer is not None:
             transport.sendto(frame, peer)
-        else:
-            transport.sendto(frame)  # transport already has remote_addr bound
+            return
+        # No learned peer: only legal if the transport was created with a
+        # remote_addr (side=client). A server-side socket has neither, and
+        # calling sendto() without an address on an unconnected datagram
+        # transport corrupts its internal write buffer instead of raising
+        # anything useful -- so refuse explicitly. This is reachable purely
+        # by timing: a periodic/echo send may fire before the first inbound
+        # datagram has taught us where the peer lives.
+        if transport.get_extra_info("peername") is None:
+            raise ConnectionError(
+                f"UDP unit {unit_name!r}: no peer address known yet (nothing received from "
+                f"this unit, and no remote_addr configured) -- cannot send"
+            )
+        transport.sendto(frame)  # transport already has remote_addr bound
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:
         """Close only this unit's datagram endpoint (echo-timeout watchdog);

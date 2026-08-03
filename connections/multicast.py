@@ -63,16 +63,10 @@ class MulticastConnection(FramedConnection):
             self.can_send, self.can_receive = True, True
         self._transports: dict[str, asyncio.DatagramTransport] = {}
 
-    def _unit_from_port(self, port: int) -> str:
-        unit = self.config.unit_from_port(port)
-        if unit is None:
-            raise ValueError(f"no unit configured for port {port}; check config['units']")
-        return unit
-
     async def _do_start(self) -> None:
         loop = asyncio.get_running_loop()
-        for port in self.config.ports:
-            unit = self._unit_from_port(port)
+        for unit, endpoint in self.config.connections.items():
+            port = endpoint.port
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if hasattr(socket, "SO_REUSEPORT"):

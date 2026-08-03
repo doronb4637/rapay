@@ -31,17 +31,11 @@ class TcpConnection(FramedConnection):
         self._writers: dict[str, asyncio.StreamWriter] = {}  # unit_name -> active peer writer
         self._write_lock: asyncio.Lock | None = None
 
-    def _unit_from_port(self, port: int) -> str:
-        unit = self.config.unit_from_port(port)
-        if unit is None:
-            raise ValueError(f"no unit configured for port {port}; check config['units']")
-        return unit
-
     async def _do_start(self) -> None:
         self._write_lock = asyncio.Lock()
         if self.config.side == Side.SERVER:
-            for port in self.config.ports:
-                unit = self._unit_from_port(port)
+            for unit, endpoint in self.config.connections.items():
+                port = endpoint.port
                 server = await asyncio.start_server(
                     lambda r, w, unit=unit: asyncio.ensure_future(self._on_client(unit, r, w)),
                     host=self.config.local_ip,
@@ -50,8 +44,8 @@ class TcpConnection(FramedConnection):
                 self._servers.append(server)
                 logger.info("TCP server listening on %s:%s (unit=%s)", self.config.local_ip, port, unit)
         else:
-            for port in self.config.ports:
-                unit = self._unit_from_port(port)
+            for unit, endpoint in self.config.connections.items():
+                port = endpoint.port
                 # If local_ip is configured, explicitly bind the outgoing
                 # client socket to it (port 0 = let the OS pick an ephemeral
                 # source port) rather than letting the OS pick the source

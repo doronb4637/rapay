@@ -14,7 +14,7 @@ sockets, its own read loop, and its own lifecycle.
 """
 from __future__ import annotations
 
-from .base import Connection
+from .base import Connection, ReceiveCallback, TriggerFunction
 
 
 class CompositeUnit:
@@ -79,10 +79,28 @@ class CompositeUnit:
         opcode: int,
         unit_name: str | None = None,
         timeout: float | int | None = None,
+        trigger_function: TriggerFunction | None = None,
     ) -> tuple[str, bytes]:
         if self._receiver is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
-        return self._receiver.receive_message(opcode, unit_name, timeout)
+        return self._receiver.receive_message(opcode, unit_name, timeout, trigger_function)
+
+    def handle_on_receive(
+        self,
+        opcode: int,
+        callback_func: ReceiveCallback,
+        unit_name: str | None = None,
+    ) -> None:
+        """Standing on-receive handler, registered on the member that owns
+        this composite's inbound direction."""
+        if self._receiver is None:
+            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
+        self._receiver.handle_on_receive(opcode, callback_func, unit_name)
+
+    def stop_on_receive(self, opcode: int, unit_name: str | None = None) -> bool:
+        if self._receiver is None:
+            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
+        return self._receiver.stop_on_receive(opcode, unit_name)
 
     def periodic_sending(
         self,

@@ -47,14 +47,16 @@ def test_tcp_roundtrip():
         "side": "server",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
-        "ports": [15000, 15001], "units": {"15000": "RadarUnit", "15001": "TrackerUnit"},
+        "connections": {"RadarUnit": {"port": 15000, "unitCode": 7},
+                        "TrackerUnit": {"port": 15001, "unitCode": 8}},
     }
     client_cfg = {
         "protocol": "tcp",
         "side": "client",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
-        "ports": [15000, 15001], "units": {"15000": "RadarUnit", "15001": "TrackerUnit"},
+        "connections": {"RadarUnit": {"port": 15000, "unitCode": 7},
+                        "TrackerUnit": {"port": 15001, "unitCode": 8}},
     }
     server = mgr.create("tcp_server", server_cfg)
     client = mgr.create("tcp_client", client_cfg)
@@ -89,17 +91,17 @@ def test_tcp_roundtrip():
 
 
 def test_udp_single_unit():
-    print("\n=== UDP round trip (single unit, explicit unit_map) ===")
+    print("\n=== UDP round trip (single unit, explicit connections block) ===")
     PING_OPCODE, PONG_OPCODE = 10, 11
     mgr = ConnectionManager()
 
     server_cfg = {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [16000], "units": {"16000": "PingClient"},
+        "connections": {"PingClient": {"port": 16000, "unitCode": 1}},
     }
     client_cfg = {
         "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [16000], "units": {"16000": "PingServer"},
+        "connections": {"PingServer": {"port": 16000, "unitCode": 1}},
     }
     server = mgr.create("udp_server", server_cfg)
     client = mgr.create("udp_client", client_cfg)
@@ -139,8 +141,7 @@ def test_composite_unit():
         "side": "client",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
-        "ports": 17100,
-        "units": {17100: "BeaconUnit"},
+        "connections": {"BeaconUnit": {"port": 17100, "unitCode": 3}},
         "mode": "send_only",
     }
     inbound_cfg = {
@@ -148,19 +149,18 @@ def test_composite_unit():
         "side": "server",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
-        "ports": [17101],
-        "units": {17101: "BeaconUnit"},
+        "connections": {"BeaconUnit": {"port": 17101, "unitCode": 4}},
         "mode": "receive_only",
     }
     beacon = mgr.create_composite("BeaconUnit", {"transport": outbound_cfg, "receive": inbound_cfg})
 
     peer_listen_cfg = {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [17100], "units": {"17100": "BeaconUnit"}, "mode": "receive_only",
+        "connections": {"BeaconUnit": {"port": 17100, "unitCode": 3}}, "mode": "receive_only",
     }
     peer_reply_cfg = {
         "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [17101], "units": {"17101": "BeaconUnit"},
+        "connections": {"BeaconUnit": {"port": 17101, "unitCode": 4}},
     }
     peer_listener = mgr.create("peer_listener", peer_listen_cfg)
     peer_replier = mgr.create("peer_replier", peer_reply_cfg)
@@ -198,11 +198,11 @@ def test_message_filtering():
 
     server_cfg = {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [18000], "units": {"18000": "FilterUnit"},
+        "connections": {"FilterUnit": {"port": 18000, "unitCode": 5}},
     }
     client_cfg = {
         "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [18000], "units": {"18000": "FilterUnit"},
+        "connections": {"FilterUnit": {"port": 18000, "unitCode": 5}},
     }
     server = mgr.create("filter_server", server_cfg)
     client = mgr.create("filter_client", client_cfg)
@@ -225,22 +225,22 @@ def test_message_filtering():
     print("Message filtering connections fully torn down")
 
 
-def test_automatic_echo():
-    print("\n=== Automatic echo handling (distinct request/reply opcodes) ===")
-    ECHO_REQUEST_OPCODE, ECHO_REPLY_OPCODE = 99, 100
+def test_echo_is_consumed():
+    print("\n=== Inbound echo is consumed: liveness only, never delivered ===")
+    ECHO_IN_OPCODE, ECHO_OUT_OPCODE = 99, 100
     mgr = ConnectionManager()
 
     server_cfg = {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [19000], "units": {"19000": "EchoUnit"},
-        "recv_echo_opcode": ECHO_REQUEST_OPCODE, "send_echo_opcode": ECHO_REPLY_OPCODE,
-        # Long interval/timeout: this test is about the auto-REPLY path, so
-        # keep the periodic sender out of the way.
+        "connections": {"EchoUnit": {"port": 19000, "unitCode": 6}},
+        "recv_echo_opcode": ECHO_IN_OPCODE, "send_echo_opcode": ECHO_OUT_OPCODE,
+        # Long interval/timeout: this test is about what happens to an
+        # INBOUND echo, so keep the periodic sender out of the way.
         "EchoInterval": 30, "EchoTimeout": 60,
     }
     client_cfg = {
         "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [19000], "units": {"19000": "EchoUnit"},
+        "connections": {"EchoUnit": {"port": 19000, "unitCode": 6}},
     }
     server = mgr.create("echo_server", server_cfg)
     client = mgr.create("echo_client", client_cfg)
@@ -248,26 +248,131 @@ def test_automatic_echo():
     client.start()
     time.sleep(0.1)
 
-    # Client subscribes to the echo REPLY opcode before sending the request.
-    results = {}
-    t1 = _receive_in_background(client, ECHO_REPLY_OPCODE, "EchoUnit", 3, results, "echo")
-    client.send_message(b"ping-me", ECHO_REQUEST_OPCODE)
-    t1.join(timeout=4)
-    assert results["echo"] == ("EchoUnit", b"ping-me")
-    print(f"client automatically received echo reply: {results['echo'][1]!r}")
+    before = server._last_echo_at["EchoUnit"]
+    client.send_message(b"heartbeat", ECHO_IN_OPCODE)
+    time.sleep(0.3)
 
-    # The original request must NEVER be visible via receive_message() on
-    # the server -- automatic echo handling intercepts it before
-    # subscribe-or-drop even runs, regardless of whether anything would
-    # have been subscribed to it.
+    # 1. It refreshed liveness, which is the entire job of an inbound echo.
+    after = server._last_echo_at["EchoUnit"]
+    assert after > before, "inbound echo did not refresh the liveness timestamp"
+    print(f"inbound echo refreshed liveness (+{after - before:.3f}s)")
+
+    # 2. It is never visible to the application: echo consumption happens
+    #    before subscribe-or-drop even runs, so being subscribed to that
+    #    exact opcode changes nothing.
     try:
-        server.receive_message(ECHO_REQUEST_OPCODE, timeout=0.5)
-        raise AssertionError("echo request should have been intercepted, not delivered")
+        server.receive_message(ECHO_IN_OPCODE, timeout=0.5)
+        raise AssertionError("echo should have been consumed, not delivered")
     except asyncio.TimeoutError:
-        print("confirmed: echo request was handled automatically and never reached the app")
+        print("confirmed: echo was consumed and never reached the app")
+
+    # 3. No reply was generated: the periodic sender owns the outbound
+    #    direction, so an inbound echo must not trigger an extra send.
+    try:
+        client.receive_message(ECHO_OUT_OPCODE, timeout=0.5)
+        raise AssertionError("an inbound echo must not trigger a reply")
+    except asyncio.TimeoutError:
+        print("confirmed: no reply echo was sent (periodic sender owns that direction)")
 
     mgr.shutdown_all()
     print("Echo-handling connections fully torn down")
+
+
+def test_trigger_function_and_callback():
+    print("\n=== trigger_function + handle_on_receive (request/response) ===")
+    REQUEST_OPCODE, REPLY_OPCODE = 80, 81
+    mgr = ConnectionManager()
+
+    responder = mgr.create("responder", {
+        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"AskUnit": {"port": 24000, "unitCode": 13}},
+    })
+    asker = mgr.create("asker", {
+        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"AskUnit": {"port": 24000, "unitCode": 13}},
+    })
+    mgr.start_all()
+
+    # The callback calls back into the connection's own SYNC API. That only
+    # works because callbacks run on an executor thread -- doing this on the
+    # event-loop thread would deadlock, since send_message marshals onto that
+    # very thread and waits for it.
+    def on_request(payload):
+        responder.send_message(b"re:" + payload, REPLY_OPCODE, unit_name="AskUnit")
+
+    responder.handle_on_receive(REQUEST_OPCODE, on_request, unit_name="AskUnit")
+
+    # trigger_function fires AFTER the subscription is armed, so the reply
+    # cannot outrun it -- no background thread, no sleep-before-send needed.
+    unit, payload = asker.receive_message(
+        REPLY_OPCODE,
+        timeout=3,
+        trigger_function=lambda: asker.send_message(b"ping", REQUEST_OPCODE),
+    )
+    assert payload == b"re:ping", payload
+    print(f"request/response completed in one call: {payload!r}")
+
+    # The handler is standing, not one-shot: it answers every request.
+    for i in range(3):
+        _unit, payload = asker.receive_message(
+            REPLY_OPCODE,
+            timeout=3,
+            trigger_function=lambda i=i: asker.send_message(f"n{i}".encode(), REQUEST_OPCODE),
+        )
+        assert payload == f"re:n{i}".encode(), payload
+    print("standing callback answered 3 further requests")
+
+    # A route is either polled or handled, never both.
+    try:
+        responder.handle_on_receive(REQUEST_OPCODE, on_request, unit_name="AskUnit")
+        raise AssertionError("registering a second callback should be refused")
+    except RuntimeError as exc:
+        print(f"confirmed: duplicate callback refused ({exc})")
+
+    assert responder.stop_on_receive(REQUEST_OPCODE, unit_name="AskUnit") is True
+    assert responder.stop_on_receive(REQUEST_OPCODE, unit_name="AskUnit") is False
+    time.sleep(0.2)
+    try:
+        asker.receive_message(
+            REPLY_OPCODE, timeout=1.0,
+            trigger_function=lambda: asker.send_message(b"after-stop", REQUEST_OPCODE),
+        )
+        raise AssertionError("callback should no longer be registered")
+    except asyncio.TimeoutError:
+        print("confirmed: stop_on_receive() removed the handler")
+
+    mgr.shutdown_all()
+    print("Trigger/callback connections fully torn down")
+
+
+def test_trigger_function_failure_releases_route():
+    print("\n=== A raising trigger_function releases the subscription ===")
+    OPCODE = 82
+    mgr = ConnectionManager()
+    conn = mgr.create("trigger_fail", {
+        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"SoloUnit": {"port": 24500, "unitCode": 14}},
+    })
+    conn.start()
+
+    def boom():
+        raise ValueError("trigger blew up")
+
+    try:
+        conn.receive_message(OPCODE, timeout=1, trigger_function=boom)
+        raise AssertionError("the trigger's exception should propagate")
+    except ValueError as exc:
+        print(f"confirmed: trigger exception propagated unchanged ({exc})")
+
+    # The route must not still be claimed by the abandoned subscription.
+    try:
+        conn.receive_message(OPCODE, timeout=0.3)
+        raise AssertionError("expected a clean timeout, not a stale-route error")
+    except asyncio.TimeoutError:
+        print("confirmed: route was released and can be subscribed again")
+
+    mgr.shutdown_all()
+    print("Trigger-failure connection fully torn down")
 
 
 def test_single_opcode_heartbeat():
@@ -279,10 +384,8 @@ def test_single_opcode_heartbeat():
         "protocol": "udp", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "echo_opcode": HEARTBEAT_OPCODE, "EchoInterval": 0.3, "EchoTimeout": 5.0,
     }
-    peer_a = mgr.create("hb_a", {**common, "side": "server", "ports": [21000],
-                                 "units": {"21000": "PeerB"}})
-    peer_b = mgr.create("hb_b", {**common, "side": "client", "ports": [21000],
-                                 "units": {"21000": "PeerA"}})
+    peer_a = mgr.create("hb_a", {**common, "side": "server", "connections": {"PeerB": {"port": 21000, "unitCode": 9}}})
+    peer_b = mgr.create("hb_b", {**common, "side": "client", "connections": {"PeerA": {"port": 21000, "unitCode": 9}}})
 
     # Count actual sends per peer. With a shared opcode, auto-replying on
     # receipt would make each peer answer the other's answer forever; the
@@ -326,7 +429,7 @@ def test_echo_timeout_disconnect():
     # Points at a port where nothing is listening, so no echo ever comes back.
     lonely = mgr.create("lonely", {
         "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [21500], "units": {"21500": "GhostUnit"},
+        "connections": {"GhostUnit": {"port": 21500, "unitCode": 10}},
         "echo_opcode": HEARTBEAT_OPCODE, "EchoInterval": 0.2, "EchoTimeout": 0.6,
     })
     lonely.start()
@@ -352,11 +455,11 @@ def test_periodic_sending():
 
     server = mgr.create("tick_server", {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [22000], "units": {"22000": "TickClient"},
+        "connections": {"TickClient": {"port": 22000, "unitCode": 11}},
     })
     client = mgr.create("tick_client", {
         "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [22000], "units": {"22000": "TickServer"},
+        "connections": {"TickServer": {"port": 22000, "unitCode": 11}},
     })
     mgr.start_all()
 
@@ -395,7 +498,7 @@ def test_single_subscription_per_route():
 
     server = mgr.create("busy_server", {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "ports": [23000], "units": {"23000": "BusyUnit"},
+        "connections": {"BusyUnit": {"port": 23000, "unitCode": 12}},
     })
     server.start()
 
@@ -417,7 +520,9 @@ if __name__ == "__main__":
     test_udp_single_unit()
     test_composite_unit()
     test_message_filtering()
-    test_automatic_echo()
+    test_echo_is_consumed()
+    test_trigger_function_and_callback()
+    test_trigger_function_failure_releases_route()
     test_single_opcode_heartbeat()
     test_echo_timeout_disconnect()
     test_periodic_sending()

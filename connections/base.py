@@ -4,11 +4,11 @@ Core abstractions shared by every protocol implementation:
   * `_EventLoopThread` -- the single sync <-> async bridge for the whole
     process (see its docstring for the rationale).
   * `Connection` -- the ABC every protocol (TCP/UDP/Multicast/DDS) implements.
-    It owns unit-name/unit-code resolution, the echo lifecycle (auto-reply,
-    periodic sending, liveness timeout), subscribe-or-drop message filtering,
-    periodic application sends, task tracking for absolute teardown, and the
-    sync-facing start/stop/send_message/receive_message surface, so concrete
-    subclasses only ever have to write async code plus a single call into
+    It owns unit-name/unit-code resolution, the echo lifecycle (periodic
+    sending + liveness watchdog), subscribe-or-drop message filtering,
+    on-receive callbacks, periodic application sends, task tracking for
+    absolute teardown, and the sync-facing public API, so concrete subclasses
+    only ever have to write async code plus a single call into
     `_dispatch_incoming()` per parsed message.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Coroutine
+from typing import Any, Callable, Coroutine
 
 from .config import ConnectionConfig, EchoSettings
 
@@ -30,8 +30,16 @@ logger = logging.getLogger("connmgr")
 #: *numeric* unit code that actually travels in the wire header, never the
 #: human-facing unit name. Names are a configuration-level convenience; the
 #: code is the identity the protocol itself uses, so keying on it means the
-#: subscription table and the bytes on the wire can never disagree.
+#: routing tables and the bytes on the wire can never disagree.
 RouteKey = tuple[int, int]
+
+#: A no-argument callable run to solicit the message a receive_message() call
+#: is waiting for -- see `Connection.receive_message`.
+TriggerFunction = Callable[[], Any]
+
+#: Invoked with one message payload per matching inbound message -- see
+#: `Connection.handle_on_receive`.
+ReceiveCallback = Callable[[bytes], Any]
 
 
 class _EventLoopThread:
@@ -116,9 +124,9 @@ class Connection(ABC):
     dead unit without touching the healthy ones.
 
     Everything else -- unit resolution, the echo lifecycle, subscribe-or-drop
-    filtering, periodic sending, the sync/async marshalling, and
-    absolute-teardown task bookkeeping -- lives here so subclasses stay
-    small and protocol-specific.
+    filtering, on-receive callbacks, periodic sending, the sync/async
+    marshalling, and absolute-teardown task bookkeeping -- lives here so
+    subclasses stay small and protocol-specific.
     """
 
     #: Whether this connection instance is capable of sending / receiving.
@@ -133,24 +141,28 @@ class Connection(ABC):
         self._tasks: set[asyncio.Task[Any]] = set()
         self._started = False
 
-        # unit name -> numeric unit code, resolved and validated once at
-        # construction. Every routing table below keys off the code, and
-        # `_dispatch_incoming` sits on the hot path, so we never want to be
-        # walking `unit_map` per message to work it out.
-        self._unit_codes: dict[str, int] = self._build_unit_codes()
+        # unit name -> numeric unit code. Snapshotted from the (immutable)
+        # config once, because `_dispatch_incoming` sits on the hot path and
+        # should never walk the connections table per message.
+        self._unit_codes: dict[str, int] = config.unit_codes
 
         # Subscribe-or-drop delivery model (see _dispatch_incoming): keyed by
         # (unit_code, opcode) -> the single asyncio.Future belonging to the
         # in-flight receive_message() call waiting for exactly that pair. A
-        # given (unit, opcode) is subscribed by at most one caller at a time,
-        # so this is one future, not a queue of them. Nothing is buffered here
-        # on spec -- if there's no waiter when a message arrives,
+        # given route is subscribed by at most one caller at a time, so this
+        # is one future, not a queue of them. Nothing is buffered here on
+        # spec -- if there's no waiter when a message arrives,
         # _dispatch_incoming discards it immediately.
         self._subscriptions: dict[RouteKey, asyncio.Future[bytes]] = {}
 
+        # Standing on-receive callbacks registered by handle_on_receive(),
+        # keyed by the same route key. Where a subscription is consumed by
+        # the first matching message, a callback stays until removed.
+        self._callbacks: dict[RouteKey, ReceiveCallback] = {}
+
         # Background repeat-senders started by periodic_sending(), keyed by
-        # the same (unit_code, opcode) route key: one repeating send per
-        # route, so starting a second one replaces the first.
+        # the same route key: one repeating send per route, so starting a
+        # second one replaces the first.
         self._periodic_tasks: dict[RouteKey, asyncio.Task[None]] = {}
 
         # Echo lifecycle, parsed from config.extra (see config.EchoSettings).
@@ -168,49 +180,8 @@ class Connection(ABC):
         self._echo_tasks: dict[str, list[asyncio.Task[None]]] = {}
 
     # ------------------------------------------------------------------ #
-    # Unit codes
+    # Unit resolution
     # ------------------------------------------------------------------ #
-    def _build_unit_codes(self) -> dict[str, int]:
-        """
-        Resolve every configured unit name to the numeric unit code used in
-        the wire header and in every routing key.
-
-        Codes come from `config.extra["unit_codes"]` when given, otherwise
-        default to the low byte of the unit's port -- simple and
-        deterministic, but only unambiguous if the resulting codes are
-        distinct, which is exactly what this method enforces. Two units
-        sharing a code would collapse into one subscription slot and silently
-        deliver one unit's traffic to the other's waiter, so it is rejected
-        here rather than debugged later.
-        """
-        explicit: dict[str, Any] = self.config.extra.get("unit_codes") or {}
-        codes: dict[str, int] = {}
-        code_owner: dict[int, str] = {}
-
-        for port, unit_name in self.config.unit_map.items():
-            if unit_name in codes:
-                raise ValueError(
-                    f"unit {unit_name!r} is mapped to more than one port in config['units']; "
-                    f"each unit name must identify exactly one port"
-                )
-            if unit_name in explicit:
-                code = int(explicit[unit_name])
-            else:
-                code = port & 0xFF
-            if not 0 <= code <= 0xFF:
-                raise ValueError(
-                    f"unit code {code} for {unit_name!r} does not fit in the uint8 UnitCode field"
-                )
-            if code in code_owner:
-                raise ValueError(
-                    f"units {code_owner[code]!r} and {unit_name!r} both resolve to unit code "
-                    f"{code}; give them distinct codes via config['unit_codes']"
-                )
-            codes[unit_name] = code
-            code_owner[code] = unit_name
-
-        return codes
-
     def _unit_code_for(self, unit_name: str) -> int:
         code = self._unit_codes.get(unit_name)
         if code is None:
@@ -219,79 +190,6 @@ class Connection(ABC):
             )
         return code
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
-    def start(self) -> None:
-        """Sync entrypoint: boots this connection's async machinery on the
-        shared background loop and blocks until it's actually listening /
-        connected."""
-        if self._started:
-            return
-        self._loop_thread.run_coro(self._startup_all())
-        self._started = True
-
-    async def _startup_all(self) -> None:
-        await self._do_start()
-        # Only once the transport is actually up, so the first echo can't
-        # race the socket into existence.
-        self._start_echo_machinery()
-
-    def stop(self, timeout: float | int | None = 5.0) -> None:
-        """
-        Sync entrypoint for an ABSOLUTE teardown:
-
-          1. `_do_stop()` closes every socket/transport/server this
-             connection owns, so no new inbound connection or datagram can
-             ever be accepted again.
-          2. Every background task this connection ever spawned via
-             `_track()` (read loops, echo senders, echo watchdogs, periodic
-             senders, auto-echo replies) is explicitly cancelled and
-             *awaited*, so nothing is left running on the shared loop thread
-             after this call returns.
-          3. Any receive_message() call still parked waiting on a
-             subscription is released (its future is cancelled) instead of
-             being left to hang forever.
-        """
-        if not self._started:
-            return
-        self._loop_thread.run_coro(self._shutdown_all(), timeout=timeout)
-        self._started = False
-
-    async def _shutdown_all(self) -> None:
-        await self._do_stop()
-        # _periodic_tasks / _echo_tasks hold the same Task objects that
-        # _track() registered in _tasks, so cancelling _tasks covers them
-        # all; the dedicated dicts are just cleared of their stale entries.
-        self._periodic_tasks.clear()
-        self._echo_tasks.clear()
-        self._last_echo_at.clear()
-
-        pending = [t for t in self._tasks if not t.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        self._tasks.clear()
-
-        for future in self._subscriptions.values():
-            if not future.done():
-                future.cancel()
-        self._subscriptions.clear()
-
-    def _track(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
-        """Subclass helper: schedule a background coroutine (e.g. a
-        connection's read loop, or an automatic echo reply) and register it
-        so `stop()` can guarantee it's cancelled and awaited -- no orphaned
-        tasks, ever."""
-        task = self._loop_thread.loop.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
-
-    # ------------------------------------------------------------------ #
-    # Unit resolution
-    # ------------------------------------------------------------------ #
     def _resolve_unit(self, unit_name: str | None) -> str:
         units = self.config.connected_units
         if unit_name is not None:
@@ -311,6 +209,84 @@ class Connection(ABC):
         (unit_code, opcode) key every internal table is keyed by."""
         unit = self._resolve_unit(unit_name)
         return unit, (self._unit_code_for(unit), opcode)
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
+    def start(self) -> None:
+        """
+        Boot this connection's async machinery on the shared background loop
+        and block until it is actually listening / connected.
+
+        Idempotent: calling it on an already-started connection is a no-op
+        rather than a second set of sockets. The echo machinery is armed only
+        after `_do_start()` returns, so the first heartbeat can never race the
+        transport into existence.
+        """
+        if self._started:
+            return
+        self._loop_thread.run_coro(self._startup_all())
+        self._started = True
+
+    async def _startup_all(self) -> None:
+        await self._do_start()
+        self._start_echo_machinery()
+
+    def stop(self, timeout: float | int | None = 5.0) -> None:
+        """
+        Sync entrypoint for an ABSOLUTE teardown:
+
+          1. `_do_stop()` closes every socket/transport/server this
+             connection owns, so no new inbound connection or datagram can
+             ever be accepted again.
+          2. Every background task this connection ever spawned via
+             `_track()` (read loops, echo senders, echo watchdogs, periodic
+             senders, in-flight on-receive callbacks) is explicitly cancelled
+             and *awaited*, so nothing is left running on the shared loop
+             thread after this call returns.
+          3. Any receive_message() call still parked waiting on a
+             subscription is released (its future is cancelled) instead of
+             being left to hang forever, and every standing callback is
+             dropped.
+
+        Idempotent, and safe to call on a connection that was never started.
+        """
+        if not self._started:
+            return
+        self._loop_thread.run_coro(self._shutdown_all(), timeout=timeout)
+        self._started = False
+
+    async def _shutdown_all(self) -> None:
+        await self._do_stop()
+        # _periodic_tasks / _echo_tasks hold the same Task objects that
+        # _track() registered in _tasks, so cancelling _tasks covers them
+        # all; the dedicated dicts are just cleared of their stale entries.
+        self._periodic_tasks.clear()
+        self._echo_tasks.clear()
+        self._last_echo_at.clear()
+        self._callbacks.clear()
+
+        pending = [t for t in self._tasks if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._tasks.clear()
+
+        for future in self._subscriptions.values():
+            if not future.done():
+                future.cancel()
+        self._subscriptions.clear()
+
+    def _track(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+        """Subclass helper: schedule a background coroutine (e.g. a
+        connection's read loop, or an on-receive callback) and register it
+        so `stop()` can guarantee it's cancelled and awaited -- no orphaned
+        tasks, ever."""
+        task = self._loop_thread.loop.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     # ------------------------------------------------------------------ #
     # Echo lifecycle: periodic sending + liveness watchdog
@@ -344,6 +320,10 @@ class Connection(ABC):
             self._echo_tasks[unit_name] = unit_tasks
 
     async def _echo_sender_loop(self, unit_name: str) -> None:
+        """Transmit the echo opcode to `unit_name` every EchoInterval, for as
+        long as the connection lives. Unconditional by design: this is the
+        only thing keeping the remote watchdog quiet, so it must not depend
+        on having received anything."""
         assert self._send_echo_opcode is not None
         while True:
             # Sleep first: _do_start() has returned, but a TCP server may not
@@ -356,22 +336,37 @@ class Connection(ABC):
                 raise
             except Exception as exc:  # noqa: BLE001 - a failed echo must not kill the loop
                 # Deliberately non-fatal: the peer may simply not be connected
-                # yet. If it stays unreachable, the peer's own watchdog is the
-                # thing that reacts -- this loop just keeps trying.
+                # yet. If it stays unreachable, the watchdog is the thing that
+                # reacts -- this loop just keeps trying.
                 logger.warning("echo send to unit %s failed: %s", unit_name, exc)
 
     async def _echo_watchdog_loop(self, unit_name: str) -> None:
-        # Poll finer than the timeout so detection latency is a fraction of
-        # EchoTimeout rather than a whole extra period of it.
-        poll_interval = max(min(self._echo_interval, self._echo_timeout) / 2.0, 0.05)
+        """
+        Disconnect `unit_name` once EchoTimeout seconds have passed with no
+        echo from it.
+
+        Rather than polling on a fixed tick, each iteration sleeps until this
+        unit's *deadline* -- `last echo + EchoTimeout`. Waking any earlier
+        only to find the deadline hasn't passed is wasted work, and waking on
+        a fixed EchoTimeout tick instead would push worst-case detection out
+        to nearly 2x EchoTimeout (an echo landing just before a tick resets
+        the clock, but the next check is still a full timeout away). Sleeping
+        to the deadline wakes at most once per timeout period AND detects the
+        death at the deadline itself.
+
+        Each pass re-reads `_last_echo_at`, so an echo arriving mid-sleep
+        simply pushes the deadline out and the next pass sleeps again.
+        """
         while True:
-            await asyncio.sleep(poll_interval)
             last_seen = self._last_echo_at.get(unit_name)
             if last_seen is None:
-                continue
+                # Unit already gone (disconnected by another path).
+                return
+            remaining = (last_seen + self._echo_timeout) - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue  # re-check: an echo may have moved the deadline
             elapsed = time.monotonic() - last_seen
-            if elapsed < self._echo_timeout:
-                continue
             logger.warning(
                 "no echo from unit %s for %.2fs (EchoTimeout=%.2fs) -- disconnecting it",
                 unit_name, elapsed, self._echo_timeout,
@@ -388,20 +383,23 @@ class Connection(ABC):
 
         # 1. Stop repeating sends aimed at the dead unit -- they would only
         #    log a failure once per interval, forever.
-        for route_key in [k for k in self._periodic_tasks if k[0] == unit_code]:
+        for route_key in [key for key in self._periodic_tasks if key[0] == unit_code]:
             task = self._periodic_tasks.pop(route_key)
             if not task.done():
                 task.cancel()
 
         # 2. Fail any parked receive_message() for that unit right away
         #    rather than making the caller sit out its full timeout on a link
-        #    we already know is dead.
-        for route_key in [k for k in self._subscriptions if k[0] == unit_code]:
+        #    we already know is dead, and drop its standing callbacks -- they
+        #    can never fire again.
+        for route_key in [key for key in self._subscriptions if key[0] == unit_code]:
             future = self._subscriptions.pop(route_key)
             if not future.done():
                 future.set_exception(
                     ConnectionError(f"unit {unit_name!r} disconnected: echo timeout")
                 )
+        for route_key in [key for key in self._callbacks if key[0] == unit_code]:
+            del self._callbacks[route_key]
 
         # 3. Stop echoing at it. The watchdog calling us is itself in this
         #    list and is about to return on its own, so skip cancelling it.
@@ -418,7 +416,7 @@ class Connection(ABC):
             logger.exception("error disconnecting unit %s", unit_name)
 
     # ------------------------------------------------------------------ #
-    # Incoming message dispatch: automatic echo handling + subscribe-or-drop
+    # Incoming message dispatch
     # ------------------------------------------------------------------ #
     def _dispatch_incoming(self, unit_name: str, opcode: int, payload: bytes) -> None:
         """
@@ -426,53 +424,109 @@ class Connection(ABC):
         shared event-loop thread) whenever a complete inbound message has
         been parsed. This is the single choke point implementing:
 
-          1. Automatic echo handling -- if `opcode` matches the configured
-             "receive echo" opcode, the message is consumed here: it refreshes
-             this unit's liveness timestamp (satisfying the watchdog) and, in
-             the request/reply configuration, fires off the reply itself. The
-             message never reaches the public API / any receive_message()
-             caller, no matter what is or isn't subscribed.
-          2. Subscribe-or-drop filtering -- otherwise, the message is
-             delivered ONLY if some in-flight receive_message() call is
-             currently subscribed to this exact (unit_code, opcode) route.
-             If nothing is subscribed, the message is discarded immediately;
-             it is never buffered for a hypothetical future call.
+          1. Echo consumption -- if `opcode` matches the configured "receive
+             echo" opcode, the message is consumed here: it refreshes this
+             unit's liveness timestamp, satisfying the watchdog, and goes no
+             further. It is never visible to the application, no matter what
+             is or isn't subscribed. No reply is sent: the periodic sender
+             already transmits on its own schedule, so answering an inbound
+             echo would be pure duplication -- and with a single shared
+             echo_opcode it would have both peers answering each other's
+             answers without end.
+          2. Subscribe-or-drop filtering -- otherwise, the message goes to
+             whoever owns this exact (unit_code, opcode) route: a parked
+             receive_message() future if one is in flight, else a standing
+             handle_on_receive() callback. If neither exists, the message is
+             discarded immediately; it is never buffered for a hypothetical
+             future call.
         """
         if self._echo_enabled and opcode == self._recv_echo_opcode:
             self._last_echo_at[unit_name] = time.monotonic()
-            # Symmetric heartbeat (one shared echo_opcode): the periodic
-            # sender already answers for us, and replying here would have both
-            # peers answering each other's answers without end. See
-            # EchoSettings.single_opcode.
-            if not self._echo.single_opcode:
-                assert self._send_echo_opcode is not None
-                self._track(self._do_send(unit_name, payload, self._send_echo_opcode))
             return
 
-        sub_key: RouteKey = (self._unit_code_for(unit_name), opcode)
-        future = self._subscriptions.get(sub_key)
-        if future is None or future.done():
-            return  # nobody subscribed to this route right now -- drop it
-        # Consume the subscription: it belongs to exactly one receive_message()
-        # call and is satisfied now.
-        del self._subscriptions[sub_key]
-        future.set_result(payload)
+        route_key: RouteKey = (self._unit_code_for(unit_name), opcode)
 
-    async def _wait_for_message(self, sub_key: RouteKey, timeout: float | int | None) -> bytes:
-        existing = self._subscriptions.get(sub_key)
+        # A one-shot subscription wins: the caller is actively blocked on it.
+        # By construction (see _subscribe / _register_callback) a route never
+        # has both a subscription and a callback at the same time.
+        future = self._subscriptions.get(route_key)
+        if future is not None and not future.done():
+            del self._subscriptions[route_key]
+            future.set_result(payload)
+            return
+
+        callback = self._callbacks.get(route_key)
+        if callback is not None:
+            self._track(self._run_callback(callback, payload, unit_name, opcode))
+            return
+        # Nobody owns this route right now -- drop it.
+
+    async def _run_callback(
+        self, callback: ReceiveCallback, payload: bytes, unit_name: str, opcode: int
+    ) -> None:
+        """
+        Run one on-receive callback off the event-loop thread.
+
+        Callbacks are ordinary synchronous user code: they may block, and
+        they may call back into this connection's sync API (`send_message`,
+        `receive_message`). Running them inline on the loop thread would
+        stall every other connection in the process, and any sync API call
+        from there would deadlock -- that call marshals onto the loop thread
+        and waits for it, but the loop thread is what's running the callback.
+        Handing them to the default executor avoids both.
+        """
+        try:
+            await self._loop_thread.loop.run_in_executor(None, callback, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a bad callback must not kill the read loop
+            logger.exception(
+                "on-receive callback for unit %s opcode %s raised", unit_name, opcode
+            )
+
+    # ------------------------------------------------------------------ #
+    # Subscription internals (all run on the loop thread)
+    # ------------------------------------------------------------------ #
+    async def _subscribe(self, route_key: RouteKey) -> asyncio.Future[bytes]:
+        """
+        Register the future that makes this route "subscribed", and return it
+        without awaiting.
+
+        Split out from the await so `receive_message` can run a trigger
+        function in between: by the time the trigger fires, the future is
+        already in `_subscriptions`, so a reply that arrives immediately --
+        even before the caller gets as far as awaiting -- is captured by the
+        future rather than dropped as unsubscribed.
+        """
+        if route_key in self._callbacks:
+            raise RuntimeError(
+                f"route (unit_code={route_key[0]}, opcode={route_key[1]}) already has an "
+                f"on-receive callback; call stop_on_receive() before receive_message()"
+            )
+        existing = self._subscriptions.get(route_key)
         if existing is not None and not existing.done():
             # One subscriber per route, by design. Silently replacing the
             # earlier future would strand that caller forever, so say so.
             raise RuntimeError(
-                f"already subscribed to (unit_code={sub_key[0]}, opcode={sub_key[1]}): "
+                f"already subscribed to (unit_code={route_key[0]}, opcode={route_key[1]}): "
                 f"only one receive_message() may be in flight per route"
             )
 
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bytes] = loop.create_future()
-        # Registering the future here IS "subscribing" -- _dispatch_incoming
-        # only ever delivers a message if it finds a future under this key.
-        self._subscriptions[sub_key] = future
+        # Deliberately the explicitly-tracked loop rather than
+        # asyncio.get_running_loop(): this coroutine's future outlives it and
+        # is awaited by a *different* coroutine (_await_subscription), so the
+        # future's loop must be the connection's loop as a matter of record,
+        # not merely whichever loop happened to be running at this instant.
+        # They are the same loop today -- everything here is marshalled
+        # through _loop_thread -- which is exactly why naming it explicitly
+        # costs nothing and documents the invariant.
+        future: asyncio.Future[bytes] = self._loop_thread.loop.create_future()
+        self._subscriptions[route_key] = future
+        return future
+
+    async def _await_subscription(
+        self, route_key: RouteKey, future: asyncio.Future[bytes], timeout: float | int | None
+    ) -> bytes:
         try:
             if timeout is None:
                 return await future
@@ -484,8 +538,16 @@ class Connection(ABC):
             # check matters: on the delivery path _dispatch_incoming already
             # removed this future, and a later subscriber may have claimed
             # the slot in the meantime; we must only ever remove our own.
-            if self._subscriptions.get(sub_key) is future:
-                del self._subscriptions[sub_key]
+            if self._subscriptions.get(route_key) is future:
+                del self._subscriptions[route_key]
+
+    async def _unsubscribe(self, route_key: RouteKey, future: asyncio.Future[bytes]) -> None:
+        """Release a subscription that will never be awaited (the trigger
+        function raised), so the route doesn't stay claimed."""
+        if self._subscriptions.get(route_key) is future:
+            del self._subscriptions[route_key]
+        if not future.done():
+            future.cancel()
 
     # ------------------------------------------------------------------ #
     # Public sync API
@@ -495,7 +557,7 @@ class Connection(ABC):
         Send `data` tagged with `opcode` to `unit_name` (or the sole
         connected unit if omitted). `opcode` is mandatory: every message
         must declare what kind of message it is so the receiving side's
-        subscribe-or-drop filtering and automatic echo handling can work.
+        subscribe-or-drop filtering and echo handling can work.
         """
         unit = self._resolve_unit(unit_name)
         self._loop_thread.run_coro(self._do_send(unit, data, opcode))
@@ -505,6 +567,7 @@ class Connection(ABC):
         opcode: int,
         unit_name: str | None = None,
         timeout: float | int | None = None,
+        trigger_function: TriggerFunction | None = None,
     ) -> tuple[str, bytes]:
         """
         Blocking, synchronous receive. Returns (unit_name, payload) for the
@@ -513,21 +576,89 @@ class Connection(ABC):
         Calling this function is what "subscribes" the connection to that
         exact route -- nothing is delivered, and nothing is buffered, until a
         matching receive_message() call is in flight. Only one call may be
-        subscribed to a given (unit, opcode) at a time.
+        subscribed to a given (unit, opcode) at a time, and a route that has
+        a standing `handle_on_receive` callback cannot also be polled.
 
         If `unit_name` is omitted and this connection has exactly one
-        connected unit (per `config.unit_map`), that unit is used
+        connected unit (per `config.connections`), that unit is used
         automatically; otherwise `unit_name` must be given explicitly.
+
+        `trigger_function` is for the request/response case: pass the call
+        that *solicits* the message being waited for (typically a
+        `send_message`) and it runs AFTER the subscription is registered but
+        BEFORE this call starts blocking. That ordering is the whole point --
+        soliciting first and subscribing second would drop a reply that beat
+        the subscription into place, which under subscribe-or-drop is gone
+        for good. It runs in the caller's own thread, so it may freely use
+        this connection's sync API, and if it raises, the subscription is
+        released and the exception propagates unchanged.
         """
-        unit, sub_key = self._resolve_route(unit_name, opcode)
-        # Outer timeout is deliberately looser than the inner one so the
-        # inner asyncio.wait_for is what actually fires, giving callers a
-        # clean TimeoutError instead of a bridge-level one.
+        unit, route_key = self._resolve_route(unit_name, opcode)
+
+        # Step 1: arm the subscription. Returns as soon as the future is in
+        # the table -- it does not wait for a message.
+        future: asyncio.Future[bytes] = self._loop_thread.run_coro(self._subscribe(route_key))
+
+        # Step 2: solicit the message, now that we are guaranteed to catch it.
+        if trigger_function is not None:
+            try:
+                trigger_function()
+            except BaseException:
+                self._loop_thread.run_coro(self._unsubscribe(route_key, future))
+                raise
+
+        # Step 3: block until it lands. The outer timeout is deliberately
+        # looser than the inner one so the inner asyncio.wait_for is what
+        # actually fires, giving callers a clean TimeoutError instead of a
+        # bridge-level one.
         wait_timeout = timeout + 1 if timeout is not None else None
         payload: bytes = self._loop_thread.run_coro(
-            self._wait_for_message(sub_key, timeout), timeout=wait_timeout
+            self._await_subscription(route_key, future, timeout), timeout=wait_timeout
         )
         return unit, payload
+
+    def handle_on_receive(
+        self,
+        opcode: int,
+        callback_func: ReceiveCallback,
+        unit_name: str | None = None,
+    ) -> None:
+        """
+        Register a standing handler for a route instead of polling it.
+
+        Where `receive_message` subscribes, takes ONE message and unsubscribes,
+        this registers `callback_func` permanently: every subsequent inbound
+        message matching `opcode` and the resolved unit invokes
+        `callback_func(payload)`, until `stop_on_receive()` or `stop()`.
+        Messages arriving while a callback is still running are dispatched
+        too, so a slow callback may run concurrently with itself -- keep it
+        cheap, or serialize inside it.
+
+        The callback runs on an executor thread, never on the event loop, so
+        it is free to block and to call back into this connection's sync API
+        (`send_message`, `receive_message` on some other route). An exception
+        raised inside it is logged and swallowed rather than killing the read
+        loop.
+
+        A route can have a callback or an in-flight `receive_message`, never
+        both -- registering over either raises `RuntimeError` rather than
+        silently deciding which one wins.
+        """
+        if not callable(callback_func):
+            raise TypeError(f"callback_func must be callable, got {callback_func!r}")
+        _unit, route_key = self._resolve_route(unit_name, opcode)
+        self._loop_thread.run_coro(self._register_callback(route_key, callback_func))
+
+    def stop_on_receive(self, opcode: int, unit_name: str | None = None) -> bool:
+        """
+        Remove the standing callback registered for this route by
+        `handle_on_receive`. Returns True if one was registered, False if
+        there was nothing to remove. Callbacks already running are left to
+        finish.
+        """
+        _unit, route_key = self._resolve_route(unit_name, opcode)
+        removed: bool = self._loop_thread.run_coro(self._unregister_callback(route_key))
+        return removed
 
     def periodic_sending(
         self,
@@ -565,6 +696,24 @@ class Connection(ABC):
         _unit, route_key = self._resolve_route(unit_name, opcode)
         stopped: bool = self._loop_thread.run_coro(self._stop_periodic(route_key))
         return stopped
+
+    # -- callback internals (all run on the loop thread) ------------------ #
+    async def _register_callback(self, route_key: RouteKey, callback: ReceiveCallback) -> None:
+        existing = self._subscriptions.get(route_key)
+        if existing is not None and not existing.done():
+            raise RuntimeError(
+                f"route (unit_code={route_key[0]}, opcode={route_key[1]}) has a "
+                f"receive_message() in flight; a route cannot be polled and handled at once"
+            )
+        if route_key in self._callbacks:
+            raise RuntimeError(
+                f"route (unit_code={route_key[0]}, opcode={route_key[1]}) already has an "
+                f"on-receive callback; call stop_on_receive() first"
+            )
+        self._callbacks[route_key] = callback
+
+    async def _unregister_callback(self, route_key: RouteKey) -> bool:
+        return self._callbacks.pop(route_key, None) is not None
 
     # -- periodic sending internals (all run on the loop thread) ---------- #
     async def _start_periodic(
@@ -621,14 +770,22 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     @abstractmethod
     async def _do_start(self) -> None:
+        """Open every socket/transport/server this connection owns. Must not
+        return until inbound traffic can actually be accepted."""
         ...
 
     @abstractmethod
     async def _do_stop(self) -> None:
+        """Close everything `_do_start()` opened. Called first during
+        teardown, before any task cancellation, so no read loop can be woken
+        by traffic while it is being cancelled."""
         ...
 
     @abstractmethod
     async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
+        """Frame (if applicable) and transmit one message to `unit_name`.
+        Raise `ConnectionError` if the unit currently has no usable peer --
+        the periodic and echo senders treat that as retryable."""
         ...
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:
@@ -655,5 +812,8 @@ class FramedConnection(Connection):
     """
 
     def _frame(self, unit_name: str, data: bytes, opcode: int) -> bytes:
+        """Build the wire bytes for one message: the 5-byte header carrying
+        this unit's code, the opcode and the payload length, then the payload
+        itself."""
         from .framing import pack_message
         return pack_message(self._unit_code_for(unit_name), opcode, data)
