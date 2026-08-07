@@ -508,11 +508,18 @@ class Connection(ABC):
 
         try:
             message = self._decode(unit_code, opcode, payload)
-        except Exception as exc:  # noqa: BLE001 - one bad message, not a dead link
-            logger.warning(
-                "dropping unparseable message (unit=%s, opcode=%s): %s", unit_name, opcode, exc
+        except Exception:  # noqa: BLE001 - one bad message, not a dead link
+            # IRS is strict: an unregistered (unit, opcode) or a payload that
+            # doesn't fit its layout raises. That is a real problem and gets a
+            # full traceback -- but it is this message's problem, not the
+            # link's, so the raw payload is delivered and the read loop goes on.
+            # Byte-oriented units, which register no layouts at all, ride this
+            # same path and are unaffected by it.
+            logger.exception(
+                "IRS could not parse this message (unit=%s, opcode=%s); "
+                "delivering the raw payload and keeping the link up", unit_name, opcode
             )
-            return
+            message = payload
 
         if future is not None and not future.done():
             del self._subscriptions[route_key]

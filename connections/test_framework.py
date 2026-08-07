@@ -856,14 +856,15 @@ def test_irs_parser_roundtrip():
         print(f"confirmed: opcode {OPCODE} parsed as TrackReport from unit {CLIENT_CODE} and as "
               f"TrackAck from unit {SERVER_CODE} -- the sender's code selects the layout")
 
-        # A message the parser rejects is logged and dropped -- the link lives.
-        # One byte where TrackReport's first field alone needs two.
+        # A payload the parser rejects is logged with a traceback and handed
+        # over raw -- one byte where TrackReport's first field alone needs two.
+        # It must not become an object, and it must not kill the read loop.
         results2 = {}
-        t = _receive_in_background(server, OPCODE, None, 1, results2, "bad")
+        t = _receive_in_background(server, OPCODE, None, 2, results2, "bad")
         client.send_message(b"\x01", OPCODE)
         t.join(timeout=3)
-        assert results2["bad"] is asyncio.TimeoutError, results2
-        print("confirmed: a payload too short for its layout was dropped, not delivered")
+        assert results2["bad"] == ("Peer", b"\x01"), results2
+        print("confirmed: a payload too short for its layout arrived raw, not as an object")
 
         after = _track_report(9, "SURFACE", 45)
         results3 = {}

@@ -56,8 +56,8 @@ DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0
 
 #: Every json key defined
-#PROTOCOL_KEYS = frozenset(("protocol", ""))
-UNIT_CODE_KEYS = frozenset(("UnitCode", "unitCode", "unit_code"))
+UNIT_CODE_KEYS = ("UnitCode", "unitCode", "unit_code")
+LOCAL_IP_KEYS = ("local_ip", "localIp")
 
 ECHO_OPCODE_KEYS = ("echo_opcode", "EchoOpcode", "echoOpcode")
 RECV_ECHO_OPCODE_KEYS = ("recv_echo_opcode", "RecvEchoOpcode", "recvEchoOpcode")
@@ -293,28 +293,17 @@ class ConnectionConfig:
         unit code out of range, two units claiming the same unit code, or a
         malformed echo block at either level of the hierarchy.
         """
-        own_code_raw = _lookup(data, "unitCode", "unit_code")
-        if own_code_raw is None:
-            raise ValueError(
-                "config['unitCode'] is required: it is this connection's OWN unit code, "
-                "stamped into every message it sends. The codes inside 'connections' "
-                "identify the REMOTE units and cannot stand in for it"
-            )
-        own_unit_code = _as_unit_code(own_code_raw, "unitCode")
-
+        own_unitCode_raw = _lookup(data, *UNIT_CODE_KEYS)
+        if own_unitCode_raw is None:
+            raise ValueError("config['unitCode'] is required: it is this connection's OWN unit code")
+        own_unit_code = _as_unit_code(own_unitCode_raw, "unitCode")
         connections_raw = data.get("connections")
         if not connections_raw:
             raise ValueError(
                 "config['connections'] is required and must map every connection name "
-                "to {'port': int, 'unitCode': int} -- there is no implicit/'default' unit"
-            )
-
-        # `extra` is built before the units are, because each unit's echo block
-        # resolves against it (EchoSettings.resolve).
-        known_keys = {"protocol", "side", "ip", "local_ip", "connections",
-                      "unitCode", "unit_code"}
-        extra = {k: v for k, v in data.items() if k not in known_keys}
-
+                "to {'port': int, 'unitCode': int}")
+        required_keys = {"protocol", "side", "ip", *LOCAL_IP_KEYS, "connections", *UNIT_CODE_KEYS}
+        extra = {key: value for key, value in data.items() if key not in required_keys}
         connections: dict[str, UnitEndpoint] = {}
         code_owner: dict[int, str] = {}
         for name, spec in connections_raw.items():
