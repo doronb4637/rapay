@@ -30,8 +30,7 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
             logger.warning("dropping malformed UDP datagram from %s (unit=%s)", addr, self._unit)
             return
         self._owner._remember_peer(self._unit, addr)
-        # Safe to call directly here: this callback always runs on the
-        # connection's owning event loop thread, same as _dispatch_incoming.
+        # Safe to call directly: this callback runs on the owning loop thread.
         self._owner._dispatch_incoming(self._unit, header.opcode, payload)
 
     def error_received(self, exc: Exception) -> None:
@@ -57,6 +56,10 @@ class UdpConnection(FramedConnection):
 
     def _remember_peer(self, unit: str, addr) -> None:
         self._peers[unit] = addr
+        # A UDP unit is "connected" once it has an address to send to -- for
+        # a server, the first inbound datagram. Before that an echo has
+        # nowhere to go.
+        self._mark_unit_connected(unit)
 
     async def _do_start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -77,6 +80,8 @@ class UdpConnection(FramedConnection):
             )
             self._transports[unit] = transport
             logger.info("UDP %s bound for unit %s on %s", self.config.side.value, unit, local_addr)
+            if remote_addr is not None:
+                self._mark_unit_connected(unit)  # target known up front
 
     async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
         if not self.can_send:
@@ -89,13 +94,9 @@ class UdpConnection(FramedConnection):
         if peer is not None:
             transport.sendto(frame, peer)
             return
-        # No learned peer: only legal if the transport was created with a
-        # remote_addr (side=client). A server-side socket has neither, and
-        # calling sendto() without an address on an unconnected datagram
-        # transport corrupts its internal write buffer instead of raising
-        # anything useful -- so refuse explicitly. This is reachable purely
-        # by timing: a periodic/echo send may fire before the first inbound
-        # datagram has taught us where the peer lives.
+        # No learned peer: only legal if the transport has a remote_addr
+        # (side=client). On an unconnected socket sendto() without an address
+        # corrupts the write buffer instead of raising, so refuse explicitly.
         if transport.get_extra_info("peername") is None:
             raise ConnectionError(
                 f"UDP unit {unit_name!r}: no peer address known yet (nothing received from "
@@ -112,6 +113,7 @@ class UdpConnection(FramedConnection):
         logger.warning("UDP unit %s: closing endpoint after echo timeout", unit_name)
         transport.close()
         self._peers.pop(unit_name, None)
+        self._mark_unit_disconnected(unit_name)
 
     async def _do_stop(self) -> None:
         for transport in self._transports.values():

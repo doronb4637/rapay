@@ -2,9 +2,9 @@
 import struct
 from enum import IntEnum, EnumType
 from typing import Any, Callable
-from irs.buffers import BinaryReader, BinaryWriter
-from irs.fields import BaseField
-from irs.constants import *
+from IRS.buffers import BinaryReader, BinaryWriter
+from IRS.fields import BaseField
+from IRS.constants import *
 
 
 def baseType(base_type: int, endian = "<") -> Callable[[type], type]:

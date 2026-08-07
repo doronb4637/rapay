@@ -9,6 +9,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from tools.file_functions import readUnitConfig
+from tools.general import import_modules
+
 from .base import Connection
 from .composite import CompositeUnit
 from .config import ConnectionConfig, Protocol
@@ -16,6 +19,10 @@ from .config import ConnectionConfig, Protocol
 logger = logging.getLogger("connmgr.manager")
 
 ManagedUnit = Connection | CompositeUnit
+#: What `create()` accepts in place of a config: either the JSON dict itself,
+#: or the name of a unit configuration for `tools.file_functions.readUnitConfig`
+#: to load from config/Units.
+UnitConfigSource = str | dict[str, Any]
 
 
 class ConnectionManager:
@@ -27,11 +34,13 @@ class ConnectionManager:
 
     Concretely, `ConnectionManager` is two things bolted together:
 
-    1. A **factory**: `create()` takes a JSON config dict, turns it into a
-       typed `ConnectionConfig`, looks up which concrete `Connection`
+    1. A **factory**: `create()` takes a unit configuration name (loaded from
+       config/Units by `tools.file_functions.readUnitConfig`) or a JSON config
+       dict, turns it into a typed `ConnectionConfig`, imports any message
+       libraries the config declares, looks up which concrete `Connection`
        subclass implements that config's `protocol` (via the `_registry`
        described below), instantiates it, and hands it back.
-       `create_composite()` does the same for several JSON configs at once
+       `create_composite()` does the same for several configs at once
        and wraps the results in a `CompositeUnit` (see composite.py), so
        asymmetric, multi-protocol "Units" are built exactly the same way as
        everything else.
@@ -47,10 +56,10 @@ class ConnectionManager:
     Typical usage:
 
         mgr = ConnectionManager()
-        radar = mgr.create("radar", {...tcp json...})
+        radar = mgr.create("radar", "TcpServer")   # config/Units/TcpServer.json
         beacon = mgr.create_composite("beacon", {
-            "transport": {...multicast send-only json...},
-            "receive":   {...udp receive-only json...},
+            "transport": "MulticastSender",
+            "receive":   "UdpReciver",
         })
         mgr.start_all()
         ...
@@ -59,21 +68,12 @@ class ConnectionManager:
 
     # Maps each Protocol enum value (tcp/udp/multicast/dds) to the concrete
     # Connection subclass that implements it. This indirection is the heart
-    # of the factory pattern here: `create()` never has a hardcoded
-    # if/elif chain over protocol names -- it just looks the class up in
-    # this dict. That means adding a brand new protocol implementation
-    # anywhere in the codebase (or in a third-party plugin) is a single
-    # `ConnectionManager.register(Protocol.X, MyConnectionClass)` call, with
-    # zero changes required inside ConnectionManager itself. Without this
-    # registry, every new protocol would require editing `create()` directly
-    # -- exactly the kind of tight coupling the factory pattern exists to
-    # avoid.
+    # of the factory pattern here
     _registry: dict[Protocol, type[Connection]] = {}
 
     def __init__(self) -> None:
         self._connections: dict[str, ManagedUnit] = {}
 
-    # -- protocol plug-in registration -----------------------------------
     @classmethod
     def register(cls, protocol: Protocol, impl: type[Connection]) -> None:
         """
@@ -90,22 +90,86 @@ class ConnectionManager:
         cls._registry[protocol] = impl
 
     # -- construction ------------------------------------------------------
-    def create(self, name: str, json_config: dict[str, Any]) -> Connection:
-        config = ConnectionConfig.from_json(json_config)
-        impl_cls = self._registry.get(config.protocol)
+    @staticmethod
+    def _load_config(config: UnitConfigSource) -> dict[str, Any]:
+        """
+        Normalise whatever the caller passed into a raw JSON config dict.
+
+        A `str` is a unit configuration NAME, resolved through
+        `tools.file_functions.readUnitConfig` -- that function owns the
+        config/Units directory layout and the `.json` suffix, so this module
+        never builds a config path itself and a change in where unit configs
+        live stays a change in one place. A `dict` is taken as an
+        already-loaded config and used as-is, which is what callers that
+        assemble configs programmatically (and the test suite) rely on.
+        """
+        if isinstance(config, str):
+            return readUnitConfig(config)
+        if isinstance(config, dict):
+            return config
+        raise TypeError(
+            f"config must be a unit configuration name (str) or a JSON config "
+            f"dict, got {type(config).__name__}"
+        )
+
+    def create(self, name: str, config: UnitConfigSource) -> Connection:
+        """
+        Build one connection, registered under `name`.
+
+        `config` is either a unit configuration name (loaded by
+        `readUnitConfig`) or the JSON dict itself:
+
+            mgr.create("radar", "TcpServer")     # config/Units/TcpServer.json
+            mgr.create("radar", {...json...})    # already-loaded config
+        """
+        config_json = self._load_config(config)
+        connection_config = ConnectionConfig.from_json(config_json)
+        self._import_config_libs(name, connection_config)
+        impl_cls = self._registry.get(connection_config.protocol)
         if impl_cls is None:
-            raise ValueError(f"No connection implementation registered for protocol {config.protocol}")
-        connection = impl_cls(config)
+            raise ValueError(
+                f"No connection implementation registered for protocol {connection_config.protocol}"
+            )
+        connection = impl_cls(connection_config)
         self._connections[name] = connection
         return connection
 
-    def create_composite(self, name: str, members: dict[str, dict[str, Any]]) -> CompositeUnit:
+    @staticmethod
+    def _import_config_libs(name: str, config: ConnectionConfig) -> None:
         """
-        `members` maps a short member label -> JSON config, e.g.:
+        Import the message libraries a config declares under `libs_path`, via
+        `tools.general.import_modules`.
+
+        This is the step that populates `IRS.REGISTRY`: a message module
+        registers its types by *being imported* (`register_message` /
+        `register_pair` run at module level), so `IRS.parse_irs` can only
+        resolve a (unitCode, opCode) pair whose module something has already
+        imported. Doing it here, in the factory, ties it to the one moment
+        every connection passes through and puts it strictly before the
+        connection object exists -- so a link can never come up able to
+        receive messages it has no layouts for.
+
+            "libs_path": ["messages.radar", "messages.tracker"]
+
+        Absent, it is simply a no-op: a byte-oriented deployment needs no
+        registry at all.
+        """
+        libs_path = config.extra.get("libs_path")
+        if libs_path is None:
+            return
+        logger.info("connection %s: importing message libraries %s", name, libs_path)
+        import_modules(libs_path)
+
+    def create_composite(
+        self, name: str, members: dict[str, UnitConfigSource]
+    ) -> CompositeUnit:
+        """
+        `members` maps a short member label -> config, e.g.:
+            {"transport": "MulticastSender", "receive": "UdpReciver"}
             {"transport": multicast_send_only_json, "receive": udp_receive_only_json}
         Each member is built through the same `create()` factory (so it
-        benefits from the same protocol registry) and then wrapped in a
-        CompositeUnit registered under `name`.
+        benefits from the same protocol registry, config loading and library
+        importing) and then wrapped in a CompositeUnit registered under `name`.
         """
         built: list[Connection] = []
         for member_name, cfg in members.items():
@@ -126,7 +190,7 @@ class ConnectionManager:
         individual failures so one bad actor can't leave the rest hanging."""
         for name, connection in reversed(list(self._connections.items())):
             try:
-                connection.stop(timeout=timeout)
+                connection.close(timeout=timeout)
             except Exception:
                 logger.exception("error stopping connection %s", name)
         self._connections.clear()

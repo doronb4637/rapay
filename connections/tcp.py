@@ -46,32 +46,43 @@ class TcpConnection(FramedConnection):
         else:
             for unit, endpoint in self.config.connections.items():
                 port = endpoint.port
-                # If local_ip is configured, explicitly bind the outgoing
-                # client socket to it (port 0 = let the OS pick an ephemeral
-                # source port) rather than letting the OS pick the source
-                # interface too.
+                # Bind the source interface explicitly when local_ip is set
+                # (port 0 = OS picks the ephemeral source port).
                 local_addr = (self.config.local_ip, 0) if self.config.local_ip else None
                 reader, writer = await asyncio.open_connection(
                     self.config.ip, port, local_addr=local_addr
                 )
                 self._writers[unit] = writer
-                self._track(self._read_loop(unit, reader))
+                self._track(self._read_loop(unit, reader, writer))
                 logger.info("TCP client connected to %s:%s (unit=%s)", self.config.ip, port, unit)
+                # The dial succeeded, so this unit has a peer right now.
+                self._mark_unit_connected(unit)
 
     async def _on_client(self, unit: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # The newest inbound client on a unit's port becomes the active send
-        # target for that unit. (A fan-out server that must address many
-        # simultaneous clients per unit would extend this to a list/dict
-        # keyed by peer address -- left simple here per the stated scope.)
+        # The newest inbound client on a unit's port becomes that unit's send
+        # target. A fan-out server would key a dict by peer address instead.
         peer = writer.get_extra_info("peername")
         logger.info("TCP unit %s: client connected from %s", unit, peer)
+        previous = self._writers.get(unit)
         self._writers[unit] = writer
-        self._track(self._read_loop(unit, reader))
+        if previous is not None and previous is not writer:
+            # Superseded peer: drop the unit first so its echo is rebuilt
+            # around the new socket, not left aimed at the old one.
+            self._mark_unit_disconnected(unit)
+        self._track(self._read_loop(unit, reader, writer))
+        # A server-side unit becomes reachable here -- and so does its echo,
+        # including on a reconnect after an earlier peer dropped.
+        self._mark_unit_connected(unit)
 
-    async def _read_loop(self, unit: str, reader: asyncio.StreamReader) -> None:
+    async def _read_loop(
+        self, unit: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         """Parses the (UnitCode,OpCode,DataLength) header out of the TCP
         byte-stream, then reads exactly that many payload bytes -- correctly
-        handling the fact that TCP gives no message boundaries of its own."""
+        handling the fact that TCP gives no message boundaries of its own.
+
+        Owns the unit's "still connected" claim for the lifetime of `writer`:
+        when this loop ends, that peer is gone."""
         try:
             while True:
                 header_bytes = await reader.readexactly(HEADER_SIZE)
@@ -82,8 +93,24 @@ class TcpConnection(FramedConnection):
             logger.info("TCP peer for unit %s closed the connection", unit)
         except asyncio.CancelledError:
             raise  # let stop()'s gather() see the cancellation cleanly
+        except OSError as exc:
+            # A peer that vanishes instead of closing politely (RST, killed
+            # process, interface down) is routine, so report it like the
+            # graceful close above -- not as a traceback.
+            logger.info("TCP peer for unit %s went away: %s", unit, exc)
         except Exception:
             logger.exception("TCP read loop for unit %s failed", unit)
+        finally:
+            self._on_peer_lost(unit, writer)
+
+    def _on_peer_lost(self, unit: str, writer: asyncio.StreamWriter) -> None:
+        """Retire `writer` as `unit`'s peer -- unless a newer one already
+        replaced it, in which case this loop is just the old socket finishing
+        and the unit is still very much connected."""
+        if self._writers.get(unit) is not writer:
+            return
+        del self._writers[unit]
+        self._mark_unit_disconnected(unit)
 
     async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
         writer = self._writers.get(unit_name)
@@ -110,19 +137,13 @@ class TcpConnection(FramedConnection):
             pass
 
     async def _do_stop(self) -> None:
-        # 1. Stop ACCEPTING new connections immediately. server.close() alone
-        #    already achieves this -- no new client can complete a handshake
-        #    on this listening socket from this point on.
+        # 1. Stop accepting immediately; server.close() alone does that.
         for server in self._servers:
             server.close()
 
-        # 2. Close every open peer socket next, *before* awaiting
-        #    wait_closed() below. This ordering matters: on Python <=3.12,
-        #    asyncio.Server.wait_closed() blocks until BOTH the listening
-        #    socket is closed AND every connection it ever accepted has
-        #    finished -- so awaiting it while a peer writer is still open
-        #    deadlocks forever. Closing peers first guarantees wait_closed()
-        #    can actually complete.
+        # 2. Close peer sockets BEFORE awaiting wait_closed() below: on
+        #    Python <=3.12 it waits for every accepted connection too, so
+        #    awaiting it with a peer writer still open deadlocks forever.
         for unit, writer in list(self._writers.items()):
             writer.close()
             try:

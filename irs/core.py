@@ -1,11 +1,11 @@
 # logic/core.py
-from typing import Any
+from typing import Any, Type
 from enum import IntEnum
 from beartype.door import is_bearable
 
-from irs.buffers import BinaryReader, BinaryWriter
-from irs.bitfields import BitField
-from irs.fields import BaseField, Field, EnumField
+from IRS.buffers import BinaryReader, BinaryWriter
+from IRS.bitfields import BitField
+from IRS.fields import BaseField, Field, EnumField
 
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)
@@ -149,3 +149,5 @@ class Message(Structure):
         if is_root: writer = BinaryWriter()
         super().to_bytes(writer, value)
         if is_root: return writer.get_bytes()
+
+

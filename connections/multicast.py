@@ -91,6 +91,9 @@ class MulticastConnection(FramedConnection):
                 lambda unit=unit: _MulticastProtocol(self, unit), sock=sock
             )
             self._transports[unit] = transport
+            # Multicast has no handshake: joining the group (or having a group
+            # to send to) is as connected as a unit ever gets here.
+            self._mark_unit_connected(unit)
 
     async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
         if not self.can_send:
@@ -112,6 +115,7 @@ class MulticastConnection(FramedConnection):
             return
         logger.warning("multicast unit %s: leaving group after echo timeout", unit_name)
         transport.close()
+        self._mark_unit_disconnected(unit_name)
 
     async def _do_stop(self) -> None:
         for transport in self._transports.values():

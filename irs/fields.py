@@ -2,8 +2,8 @@
 import struct
 from enum import IntEnum
 from typing import Any
-from irs.buffers import BinaryReader, BinaryWriter
-from irs.constants import *
+from IRS.buffers import BinaryReader, BinaryWriter
+from IRS.constants import *
 
 class BaseField:
     __slots__ = ('name',)

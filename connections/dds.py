@@ -357,6 +357,11 @@ class DdsConnection(Connection):
                 self._readers[unit] = reader
                 self._track(self._read_loop(unit, reader))
 
+            # Discovery is asynchronous and peer-driven, so there is no
+            # handshake to wait on: a unit is usable here once its own
+            # reader/writer exist.
+            self._mark_unit_connected(unit)
+
     async def _read_loop(self, unit: str, reader: Any) -> None:
         """Feed every inbound sample for `unit` into the framework's single
         dispatch point. Recent Connext Python releases expose an async
@@ -400,6 +405,7 @@ class DdsConnection(Connection):
             reader.close()
         if writer is not None:
             writer.close()
+        self._mark_unit_disconnected(unit_name)
 
     async def _do_stop(self) -> None:
         """Close every DDS entity, innermost first: readers and writers

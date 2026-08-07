@@ -12,12 +12,15 @@ naturally would (one polling, one firing whenever it's ready).
 Run directly: python3 test_framework.py
 """
 import asyncio
+import logging
 import sys
 import threading
 import time
 
 sys.path.insert(0, ".")
 
+from connections.config import ConnectionConfig
+from connections.framing import unpack_header
 from connections.manager import ConnectionManager
 
 
@@ -41,9 +44,9 @@ def test_tcp_roundtrip():
     print("\n=== TCP round trip (multi-unit, mandatory opcode) ===")
     RADAR_OPCODE, TRACKER_OPCODE, ACK_OPCODE = 1, 2, 3
     mgr = ConnectionManager()
-
     server_cfg = {
         "protocol": "tcp",
+        "unitCode": 100,
         "side": "server",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
@@ -52,6 +55,7 @@ def test_tcp_roundtrip():
     }
     client_cfg = {
         "protocol": "tcp",
+        "unitCode": 101,
         "side": "client",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
@@ -96,11 +100,11 @@ def test_udp_single_unit():
     mgr = ConnectionManager()
 
     server_cfg = {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"PingClient": {"port": 16000, "unitCode": 1}},
     }
     client_cfg = {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"PingServer": {"port": 16000, "unitCode": 1}},
     }
     server = mgr.create("udp_server", server_cfg)
@@ -138,6 +142,7 @@ def test_composite_unit():
     mgr = ConnectionManager()
     outbound_cfg = {
         "protocol": "udp",
+        "unitCode": 112,
         "side": "client",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
@@ -146,6 +151,7 @@ def test_composite_unit():
     }
     inbound_cfg = {
         "protocol": "udp",
+        "unitCode": 113,
         "side": "server",
         "ip": "127.0.0.1",
         "local_ip": "127.0.0.1",
@@ -155,11 +161,11 @@ def test_composite_unit():
     beacon = mgr.create_composite("BeaconUnit", {"transport": outbound_cfg, "receive": inbound_cfg})
 
     peer_listen_cfg = {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"BeaconUnit": {"port": 17100, "unitCode": 3}}, "mode": "receive_only",
     }
     peer_reply_cfg = {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"BeaconUnit": {"port": 17101, "unitCode": 4}},
     }
     peer_listener = mgr.create("peer_listener", peer_listen_cfg)
@@ -191,17 +197,86 @@ def test_composite_unit():
     print("Composite unit fully torn down (both members closed)")
 
 
+def test_composite_multicast_sender_udp_receiver():
+    print("\n=== Composite Unit: real Multicast sender + UDP receiver combined ===")
+    BEACON_OPCODE, ACK_OPCODE = 22, 23
+    GROUP_IP = "239.1.1.5"
+    mgr = ConnectionManager()
+
+    multicast_send_cfg = {
+        "protocol": "multicast",
+        "unitCode": 120,
+        "side": "sender",
+        "ip": GROUP_IP,
+        "local_ip": "127.0.0.1",
+        "connections": {"BeaconUnit": {"port": 17200, "unitCode": 5}},
+    }
+    udp_receive_cfg = {
+        "protocol": "udp",
+        "unitCode": 113,
+        "side": "server",
+        "ip": "127.0.0.1",
+        "local_ip": "127.0.0.1",
+        "connections": {"BeaconUnit": {"port": 17201, "unitCode": 6}},
+        "mode": "receive_only",
+    }
+    beacon = mgr.create_composite("McastBeaconUnit", {"transport": multicast_send_cfg, "receive": udp_receive_cfg})
+
+    peer_listen_cfg = {
+        "protocol": "multicast",
+        "unitCode": 121,
+        "side": "receiver",
+        "ip": GROUP_IP,
+        "local_ip": "127.0.0.1",
+        "connections": {"BeaconUnit": {"port": 17200, "unitCode": 5}},
+    }
+    peer_reply_cfg = {
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"BeaconUnit": {"port": 17201, "unitCode": 6}},
+    }
+
+    try:
+        peer_listener = mgr.create("mcast_peer_listener", peer_listen_cfg)
+        peer_replier = mgr.create("mcast_peer_replier", peer_reply_cfg)
+        mgr.start_all()
+    except OSError as exc:
+        print(f"skipping: multicast routing unavailable in this environment ({exc})")
+        mgr.shutdown_all()
+        return
+
+    try:
+        results = {}
+        t1 = _receive_in_background(peer_listener, BEACON_OPCODE, "BeaconUnit", 3, results, "beacon")
+        beacon.send_message(b"mcast-beacon-out", BEACON_OPCODE)
+        t1.join(timeout=4)
+        if results.get("beacon") is asyncio.TimeoutError:
+            print("skipping: no multicast delivery observed in this environment")
+            return
+        assert results["beacon"][1] == b"mcast-beacon-out"
+        print(f"peer received over multicast: {results['beacon'][1]!r}")
+
+        results2 = {}
+        t2 = _receive_in_background(beacon, ACK_OPCODE, "BeaconUnit", 3, results2, "ack")
+        peer_replier.send_message(b"mcast-beacon-ack", ACK_OPCODE, unit_name="BeaconUnit")
+        t2.join(timeout=4)
+        assert results2["ack"][1] == b"mcast-beacon-ack"
+        print(f"McastBeaconUnit received ack via its UDP receive-only member: {results2['ack'][1]!r}")
+    finally:
+        mgr.shutdown_all()
+        print("Multicast composite unit fully torn down (both members closed)")
+
+
 def test_message_filtering():
     print("\n=== Message filtering: unsubscribed messages are dropped, not queued ===")
     UNSUBSCRIBED_OPCODE = 77
     mgr = ConnectionManager()
 
     server_cfg = {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"FilterUnit": {"port": 18000, "unitCode": 5}},
     }
     client_cfg = {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"FilterUnit": {"port": 18000, "unitCode": 5}},
     }
     server = mgr.create("filter_server", server_cfg)
@@ -231,7 +306,7 @@ def test_echo_is_consumed():
     mgr = ConnectionManager()
 
     server_cfg = {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"EchoUnit": {"port": 19000, "unitCode": 6}},
         "recv_echo_opcode": ECHO_IN_OPCODE, "send_echo_opcode": ECHO_OUT_OPCODE,
         # Long interval/timeout: this test is about what happens to an
@@ -239,7 +314,7 @@ def test_echo_is_consumed():
         "EchoInterval": 30, "EchoTimeout": 60,
     }
     client_cfg = {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"EchoUnit": {"port": 19000, "unitCode": 6}},
     }
     server = mgr.create("echo_server", server_cfg)
@@ -248,14 +323,17 @@ def test_echo_is_consumed():
     client.start()
     time.sleep(0.1)
 
-    before = server._last_echo_at["EchoUnit"]
+    # A UDP server has no peer address -- and so no liveness clock, and no
+    # echo of its own -- until something actually arrives from that unit.
+    assert "EchoUnit" not in server._last_echo_at, "liveness tracked before any peer existed"
+    before = time.monotonic()
     client.send_message(b"heartbeat", ECHO_IN_OPCODE)
     time.sleep(0.3)
 
     # 1. It refreshed liveness, which is the entire job of an inbound echo.
     after = server._last_echo_at["EchoUnit"]
-    assert after > before, "inbound echo did not refresh the liveness timestamp"
-    print(f"inbound echo refreshed liveness (+{after - before:.3f}s)")
+    assert after >= before, "inbound echo did not refresh the liveness timestamp"
+    print(f"inbound echo refreshed liveness (+{after - before:.3f}s after the send)")
 
     # 2. It is never visible to the application: echo consumption happens
     #    before subscribe-or-drop even runs, so being subscribed to that
@@ -284,11 +362,11 @@ def test_trigger_function_and_callback():
     mgr = ConnectionManager()
 
     responder = mgr.create("responder", {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"AskUnit": {"port": 24000, "unitCode": 13}},
     })
     asker = mgr.create("asker", {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"AskUnit": {"port": 24000, "unitCode": 13}},
     })
     mgr.start_all()
@@ -350,7 +428,7 @@ def test_trigger_function_failure_releases_route():
     OPCODE = 82
     mgr = ConnectionManager()
     conn = mgr.create("trigger_fail", {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"SoloUnit": {"port": 24500, "unitCode": 14}},
     })
     conn.start()
@@ -381,7 +459,7 @@ def test_single_opcode_heartbeat():
     mgr = ConnectionManager()
 
     common = {
-        "protocol": "udp", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 130, "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "echo_opcode": HEARTBEAT_OPCODE, "EchoInterval": 0.3, "EchoTimeout": 5.0,
     }
     peer_a = mgr.create("hb_a", {**common, "side": "server", "connections": {"PeerB": {"port": 21000, "unitCode": 9}}})
@@ -428,7 +506,7 @@ def test_echo_timeout_disconnect():
 
     # Points at a port where nothing is listening, so no echo ever comes back.
     lonely = mgr.create("lonely", {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"GhostUnit": {"port": 21500, "unitCode": 10}},
         "echo_opcode": HEARTBEAT_OPCODE, "EchoInterval": 0.2, "EchoTimeout": 0.6,
     })
@@ -454,11 +532,11 @@ def test_periodic_sending():
     mgr = ConnectionManager()
 
     server = mgr.create("tick_server", {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"TickClient": {"port": 22000, "unitCode": 11}},
     })
     client = mgr.create("tick_client", {
-        "protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"TickServer": {"port": 22000, "unitCode": 11}},
     })
     mgr.start_all()
@@ -497,7 +575,7 @@ def test_single_subscription_per_route():
     mgr = ConnectionManager()
 
     server = mgr.create("busy_server", {
-        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"BusyUnit": {"port": 23000, "unitCode": 12}},
     })
     server.start()
@@ -515,16 +593,463 @@ def test_single_subscription_per_route():
     print("Subscription connections fully torn down")
 
 
+class _WarningTrap(logging.Handler):
+    """Collects framework warnings so a test can assert on what was NOT logged."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+    def __enter__(self):
+        logging.getLogger("connmgr").addHandler(self)
+        return self
+
+    def __exit__(self, *exc_info):
+        logging.getLogger("connmgr").removeHandler(self)
+
+
+def test_echo_follows_peer_connection():
+    print("\n=== Echo lifecycle follows the actual peer, per unit ===")
+    mgr = ConnectionManager()
+    common = {
+        "protocol": "tcp", "unitCode": 133, "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "echo_opcode": 99, "EchoInterval": 0.2, "EchoTimeout": 1.0,
+    }
+    server = mgr.create("echo_lifecycle_server", {
+        **common, "side": "server",
+        "connections": {"unit1": {"port": 18700, "unitCode": 41},
+                        "unit2": {"port": 18701, "unitCode": 42}},
+    })
+    client_cfg = {**common, "side": "client",
+                  "connections": {"unit1": {"port": 18700, "unitCode": 41}}}
+
+    # Count real send attempts per unit. Asserting on what was *logged* would
+    # be too weak: an echo aimed at a unit with no peer is now reported at
+    # INFO, so only the send count proves none was attempted at all.
+    attempts: dict[str, int] = {}
+    original_send = server._do_send
+
+    async def counting_send(unit_name, data, opcode):
+        attempts[unit_name] = attempts.get(unit_name, 0) + 1
+        return await original_send(unit_name, data, opcode)
+
+    server._do_send = counting_send
+
+    with _WarningTrap() as trap:
+        server.start()
+        # Nothing has connected, so nothing may be echoed at -- and nothing
+        # may be watchdogged into a disconnect either.
+        assert server.active_units == set(), server.active_units
+        assert server.wait_for_connected_units(1, timeout=0.8) is False
+        assert not attempts, f"echoes were sent before any peer connected: {attempts}"
+        assert not trap.messages, trap.messages
+        print("no echo attempted, and no unit dropped, while both units were unconnected")
+
+        client = mgr.create("echo_lifecycle_client", client_cfg)
+        client.start()
+        assert server.wait_for_connected_units("unit1", timeout=3) is True
+        assert server.active_units == {"unit1"}, server.active_units
+        assert server._echo_tasks.get("unit1"), "unit1's echo should be armed on connect"
+        assert not server._echo_tasks.get("unit2"), "unit2 has no peer; it must stay disarmed"
+
+        # Past EchoTimeout: the running heartbeat is what keeps unit1 up.
+        time.sleep(1.4)
+        assert server.active_units == {"unit1"}, "heartbeat failed to keep the unit alive"
+        assert attempts.get("unit1", 0) > 0, "unit1's heartbeat never ran"
+        assert "unit2" not in attempts, f"unit2 has no peer but was echoed at: {attempts}"
+        assert not trap.messages, trap.messages
+        print(f"unit1's echo armed on connect ({attempts['unit1']} sends); unit2 left alone")
+
+        client.close()
+        time.sleep(0.4)
+        assert server.active_units == set(), "a closed peer must mark its unit down"
+        assert not server._echo_tasks.get("unit1"), "echo must stop when the peer drops"
+        settled = dict(attempts)
+        time.sleep(0.6)  # 3 intervals during which nothing may be sent
+        assert attempts == settled, f"echoes continued after disconnect: {attempts} vs {settled}"
+        assert "unit2" not in attempts, attempts
+        print("echo stopped cleanly when the peer disconnected")
+
+        reconnected = mgr.create("echo_lifecycle_client2", client_cfg)
+        reconnected.start()
+        assert server.wait_for_connected_units("unit1", timeout=3) is True
+        time.sleep(1.4)  # past EchoTimeout again, on the resumed heartbeat
+        assert server.active_units == {"unit1"}, "echo did not resume on reconnect"
+        assert attempts["unit1"] > settled["unit1"], "echo did not resume on reconnect"
+        assert "unit2" not in attempts, attempts
+        print("echo resumed automatically on reconnect")
+
+    mgr.shutdown_all()
+    print("Echo-lifecycle connections fully torn down")
+
+
+def test_wait_for_connected_units():
+    print("\n=== wait_for_connected_units: int / str / list targets ===")
+    mgr = ConnectionManager()
+    common = {"protocol": "tcp", "unitCode": 131, "ip": "127.0.0.1", "local_ip": "127.0.0.1"}
+    units = {"AlphaUnit": {"port": 18800, "unitCode": 51},
+             "BetaUnit": {"port": 18801, "unitCode": 52}}
+    server = mgr.create("wait_server", {**common, "side": "server", "connections": units})
+    server.start()
+
+    assert server.wait_for_connected_units(0) is True  # trivially satisfied
+    assert server.wait_for_connected_units(1, timeout=0.3) is False
+    assert server.wait_for_connected_units("AlphaUnit", timeout=0.3) is False
+    print("confirmed: unmet targets time out and return False")
+
+    for bad, kind in ((5, "more units than configured"), ("NoSuchUnit", "unknown name"),
+                      (["AlphaUnit", "Ghost"], "unknown name in a list")):
+        try:
+            server.wait_for_connected_units(bad, timeout=0.1)
+            raise AssertionError(f"expected {kind} to be rejected")
+        except ValueError:
+            pass
+    print("confirmed: impossible targets are rejected up front, not waited on")
+
+    alpha = mgr.create("wait_alpha", {**common, "side": "client",
+                                      "connections": {"AlphaUnit": units["AlphaUnit"]}})
+    alpha.start()
+    assert server.wait_for_connected_units("AlphaUnit", timeout=3) is True
+    assert server.wait_for_connected_units(["AlphaUnit", "BetaUnit"], timeout=0.3) is False
+
+    # Block first, connect second: the waiter must be released by the event,
+    # having never polled for it.
+    results = {}
+    waiter = threading.Thread(
+        target=lambda: results.update(
+            both=server.wait_for_connected_units(["AlphaUnit", "BetaUnit"], timeout=3)
+        ),
+        daemon=True,
+    )
+    waiter.start()
+    time.sleep(0.3)
+    beta = mgr.create("wait_beta", {**common, "side": "client",
+                                    "connections": {"BetaUnit": units["BetaUnit"]}})
+    beta.start()
+    waiter.join(timeout=4)
+    assert results.get("both") is True, results
+    assert server.active_units == {"AlphaUnit", "BetaUnit"}, server.active_units
+    assert server.wait_for_connected_units(2) is True
+    print("a parked waiter was released the moment the last unit connected")
+
+    mgr.shutdown_all()
+    print("Wait-for-units connections fully torn down")
+
+
+def test_own_unit_code():
+    print("\n=== Own unitCode: required, and stamped into what we send ===")
+    base_cfg = {"protocol": "udp", "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+                "connections": {"ThemUnit": {"port": 19300, "unitCode": 21}}}
+    mgr = ConnectionManager()
+
+    try:
+        mgr.create("no_own_code", base_cfg)
+        raise AssertionError("a config without its own unitCode should be rejected")
+    except ValueError as exc:
+        print(f"confirmed: own unitCode is mandatory ({str(exc).splitlines()[0][:60]}...)")
+
+    for bad in (256, -1, "seven"):
+        try:
+            mgr.create("bad_own_code", {**base_cfg, "unitCode": bad})
+            raise AssertionError(f"unitCode={bad!r} should be rejected")
+        except ValueError:
+            pass
+    print("confirmed: own unitCode is range- and type-checked at load time")
+
+    conn = mgr.create("own_code", {**base_cfg, "unitCode": 77})
+    assert conn.config.unitCode == 77
+    assert conn.config.unit_code_for("ThemUnit") == 21  # theirs, untouched
+
+    # The header carries OUR code, not the destination unit's.
+    header = unpack_header(conn._frame("ThemUnit", b"payload", opcode=5))
+    assert header.unit_code == 77, f"expected our own code 77, got {header.unit_code}"
+    assert header.opcode == 5 and header.data_length == 7
+    print(f"confirmed: header stamps our code ({header.unit_code}), not the peer's (21)")
+
+    mgr.shutdown_all()
+
+
+#: Where the IRS message layouts for the test below live. Named by the configs
+#: under "libs_path", so ConnectionManager.create() is what imports it -- and
+#: importing it is what runs its register_message() calls.
+IRS_MESSAGE_LIB = "IRS.Structures.Test.test_messages"
+
+
+def _track_report(track_id, kind, heading):
+    """Build one IRS TrackReport. Imported lazily, because the whole point of
+    the test below is that the layouts arrive via the config's libs_path."""
+    from IRS.Structures.Test.test_messages import E_TrackKind, TrackReport
+    message = TrackReport()
+    message.trackId = track_id
+    message.kind = E_TrackKind[kind]
+    message.heading = heading
+    return message
+
+
+def test_irs_parser_roundtrip():
+    print("\n=== IRS parsing: registered messages in, bytes on the wire ===")
+    # These must match what IRS_MESSAGE_LIB registers: the module registers
+    # TrackReport under the client's code and TrackAck under the server's,
+    # both on this one opcode.
+    OPCODE = 60
+    SERVER_CODE, CLIENT_CODE = 22, 21
+    from IRS.REGISTRY import MESSAGE_REGISTRY
+
+    # Nothing has imported the message module yet, so IRS knows no layout for
+    # either peer -- whatever resolves below was resolved by the framework.
+    assert IRS_MESSAGE_LIB not in sys.modules, "message library was imported too early"
+    assert CLIENT_CODE not in MESSAGE_REGISTRY, MESSAGE_REGISTRY
+
+    mgr = ConnectionManager()
+    try:
+        common = {"protocol": "udp", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+                  "libs_path": IRS_MESSAGE_LIB}
+        # Each side declares its own code, and names the other's under the
+        # unit it talks to -- so "ours" and "theirs" are genuinely different.
+        server = mgr.create("irs_server", {
+            **common, "side": "server", "unitCode": SERVER_CODE,
+            "connections": {"Peer": {"port": 19200, "unitCode": CLIENT_CODE}}})
+        client = mgr.create("irs_client", {
+            **common, "side": "client", "unitCode": CLIENT_CODE,
+            "connections": {"Peer": {"port": 19200, "unitCode": SERVER_CODE}}})
+
+        # create() imported libs_path, whose register_message() calls populated
+        # the global registry -- before either connection could receive anything.
+        assert MESSAGE_REGISTRY[CLIENT_CODE][OPCODE].__name__ == "TrackReport", MESSAGE_REGISTRY
+        assert MESSAGE_REGISTRY[SERVER_CODE][OPCODE].__name__ == "TrackAck", MESSAGE_REGISTRY
+        print(f"libs_path registered both layouts on opcode {OPCODE}: "
+              f"unit {CLIENT_CODE}=TrackReport, unit {SERVER_CODE}=TrackAck")
+
+        from IRS.Structures.Test.test_messages import E_TrackKind, TrackAck, TrackReport
+        mgr.start_all()
+
+        report = _track_report(4097, "AIR", 270)
+        results = {}
+        t = _receive_in_background(server, OPCODE, None, 3, results, "obj")
+        client.send_message(report, OPCODE)
+        t.join(timeout=4)
+        unit, received = results["obj"]
+        assert unit == "Peer", results
+        assert isinstance(received, TrackReport), received
+        assert received.to_dict() == report.to_dict(), received.to_dict()
+        # 5 bytes of struct-packed IRS, not a repr: the object was rebuilt from
+        # the wire, not handed across in-process.
+        assert len(report.to_bytes()) == 5, report.to_bytes()
+        print(f"sent a TrackReport, received it back parsed: {received.to_dict()}")
+
+        # Reply path: SAME opcode, and only the sender's unit code differs --
+        # so getting a TrackAck back is proof the parser keyed on the sender's
+        # code (22) rather than on the receiver's own.
+        ack = TrackAck()
+        ack.trackId = 4097
+        ack.accepted = 1
+        results_r = {}
+        t = _receive_in_background(client, OPCODE, None, 3, results_r, "reply")
+        server.send_message(ack, OPCODE, unit_name="Peer")
+        t.join(timeout=4)
+        _unit, reply = results_r["reply"]
+        assert isinstance(reply, TrackAck), reply
+        assert reply.to_dict() == ack.to_dict(), reply.to_dict()
+        print(f"confirmed: opcode {OPCODE} parsed as TrackReport from unit {CLIENT_CODE} and as "
+              f"TrackAck from unit {SERVER_CODE} -- the sender's code selects the layout")
+
+        # A message the parser rejects is logged and dropped -- the link lives.
+        # One byte where TrackReport's first field alone needs two.
+        results2 = {}
+        t = _receive_in_background(server, OPCODE, None, 1, results2, "bad")
+        client.send_message(b"\x01", OPCODE)
+        t.join(timeout=3)
+        assert results2["bad"] is asyncio.TimeoutError, results2
+        print("confirmed: a payload too short for its layout was dropped, not delivered")
+
+        after = _track_report(9, "SURFACE", 45)
+        results3 = {}
+        t = _receive_in_background(server, OPCODE, None, 3, results3, "after")
+        client.send_message(after, OPCODE)
+        t.join(timeout=4)
+        assert results3["after"][1].to_dict() == after.to_dict(), results3
+        print("confirmed: the connection survived the malformed message")
+
+        # Standing callbacks and periodic sends use the same codec.
+        tick = _track_report(12, "UNKNOWN", 180)
+        received_msgs: list[TrackReport] = []
+        server.handle_on_receive(OPCODE, received_msgs.append)
+        client.periodic_sending(OPCODE, tick, 0.2)
+        time.sleep(0.7)
+        client.stop_periodic(OPCODE)
+        assert received_msgs, "no periodic messages arrived"
+        assert all(m.to_dict() == tick.to_dict() for m in received_msgs), \
+            [m.to_dict() for m in received_msgs]
+        assert all(m.kind is E_TrackKind.UNKNOWN for m in received_msgs), received_msgs
+        print(f"handle_on_receive + periodic_sending delivered "
+              f"{len(received_msgs)} parsed TrackReport objects")
+    finally:
+        mgr.shutdown_all()
+    print("IRS parsing connections fully torn down")
+
+
+def test_hierarchical_echo_config():
+    print("\n=== Echo config hierarchy: connection default, per-unit override ===")
+
+    # -- Part 1: resolution. No sockets involved; this is purely about what
+    #    ConnectionConfig.from_json produces for each unit.
+    base_cfg = {
+        "protocol": "tcp", "side": "server", "ip": "127.0.0.1", "unitCode": 3,
+        "echo_opcode": 99, "EchoInterval": 1.0, "EchoTimeout": 5.0,
+    }
+    cfg = ConnectionConfig.from_json({
+        **base_cfg,
+        "connections": {
+            # own opcode, inherited timings
+            "RadarUnit":   {"port": 15200, "unitCode": 7, "echo_opcode": 10},
+            # nothing of its own: pure fallback
+            "TrackerUnit": {"port": 15201, "unitCode": 8},
+            # explicit opt-out of a heartbeat everyone else has
+            "SilentUnit":  {"port": 15202, "unitCode": 9, "echo_opcode": None},
+            # asymmetric opcodes + one overridden timing, the rest inherited
+            "AsymUnit":    {"port": 15203, "unitCode": 11,
+                            "recv_echo_opcode": 20, "send_echo_opcode": 21,
+                            "EchoTimeout": 9.0},
+        },
+    })
+
+    radar = cfg.echo_for("RadarUnit")
+    assert (radar.recv_opcode, radar.send_opcode) == (10, 10), radar
+    assert (radar.interval, radar.timeout) == (1.0, 5.0), radar
+    tracker = cfg.echo_for("TrackerUnit")
+    assert (tracker.recv_opcode, tracker.send_opcode) == (99, 99), tracker
+    assert (tracker.interval, tracker.timeout) == (1.0, 5.0), tracker
+    assert not cfg.echo_for("SilentUnit").enabled, "explicit null must disable that unit"
+    asym = cfg.echo_for("AsymUnit")
+    assert (asym.recv_opcode, asym.send_opcode) == (20, 21), asym
+    assert (asym.interval, asym.timeout) == (1.0, 9.0), "tuning keys resolve individually"
+    print("per-unit opcodes override, unset units inherit, null opts out, timings still shared")
+
+    # The three opcode keys resolve as a GROUP: a unit naming one of them must
+    # not inherit the other direction from the connection level, which would
+    # build a link neither peer configured.
+    grouped = ConnectionConfig.from_json({
+        "protocol": "tcp", "side": "server", "ip": "127.0.0.1", "unitCode": 3,
+        "recv_echo_opcode": 99, "send_echo_opcode": 98,
+        "connections": {"U": {"port": 15210, "unitCode": 12, "echo_opcode": 10}},
+    })
+    resolved = grouped.echo_for("U")
+    assert (resolved.recv_opcode, resolved.send_opcode) == (10, 10), resolved
+    print("confirmed: a unit's opcodes replace the global set outright, never half of it")
+
+    # Absent at both levels -> that unit simply doesn't heartbeat.
+    bare = ConnectionConfig.from_json({
+        "protocol": "tcp", "side": "server", "ip": "127.0.0.1", "unitCode": 3,
+        "connections": {"U": {"port": 15211, "unitCode": 13}},
+    })
+    assert not bare.echo_for("U").enabled, "echo must stay off with no opcodes anywhere"
+
+    # A merge that produces an impossible config still fails at load time, and
+    # says which unit produced it.
+    try:
+        ConnectionConfig.from_json({
+            "protocol": "tcp", "side": "server", "ip": "127.0.0.1", "unitCode": 3,
+            "echo_opcode": 99, "EchoInterval": 1.0,
+            "connections": {"BadUnit": {"port": 15212, "unitCode": 14, "EchoTimeout": 0.5}},
+        })
+        raise AssertionError("a unit-level EchoTimeout <= EchoInterval should not load")
+    except ValueError as exc:
+        assert "BadUnit" in str(exc), exc
+        print(f"confirmed: bad per-unit echo fails at load, naming the unit ({str(exc)[:60]}...)")
+
+    # -- Part 2: behaviour. Two units on ONE connection, heartbeating on
+    #    different opcodes, must send and consume independently.
+    GLOBAL_ECHO, UNIT1_ECHO = 30, 31
+    mgr = ConnectionManager()
+    common = {"protocol": "tcp", "ip": "127.0.0.1", "local_ip": "127.0.0.1"}
+    server = mgr.create("hier_echo_server", {
+        **common, "side": "server", "unitCode": 160,
+        "connections": {"unit1": {"port": 18900, "unitCode": 61, "echo_opcode": UNIT1_ECHO},
+                        "unit2": {"port": 18901, "unitCode": 62}},
+        "echo_opcode": GLOBAL_ECHO, "EchoInterval": 0.2,
+        # Long timeout: the peers below never echo back, and the watchdog is
+        # not what this test is about.
+        "EchoTimeout": 30,
+    })
+
+    # Record the opcode of every echo the server actually puts on the wire.
+    sent: dict[str, set[int]] = {}
+    original_send = server._do_send
+
+    async def recording_send(unit_name, data, opcode):
+        sent.setdefault(unit_name, set()).add(opcode)
+        return await original_send(unit_name, data, opcode)
+
+    server._do_send = recording_send
+
+    # Clients carry no echo keys at all, so they stay silent and every echo
+    # observed below is unambiguously the server's.
+    client1 = mgr.create("hier_echo_client1", {
+        **common, "side": "client", "unitCode": 161,
+        "connections": {"unit1": {"port": 18900, "unitCode": 61}}})
+    client2 = mgr.create("hier_echo_client2", {
+        **common, "side": "client", "unitCode": 162,
+        "connections": {"unit2": {"port": 18901, "unitCode": 62}}})
+
+    try:
+        server.start()
+        client1.start()
+        client2.start()
+        assert server.wait_for_connected_units(["unit1", "unit2"], timeout=3) is True
+        time.sleep(0.7)  # a few intervals of both heartbeats
+
+        assert sent.get("unit1") == {UNIT1_ECHO}, f"unit1 echoed on {sent.get('unit1')}"
+        assert sent.get("unit2") == {GLOBAL_ECHO}, f"unit2 echoed on {sent.get('unit2')}"
+        print(f"each unit heartbeats on its own opcode: unit1={UNIT1_ECHO}, unit2={GLOBAL_ECHO}")
+
+        # Inbound: the same opcode is a heartbeat on one unit and an ordinary
+        # application message on the other, decided per unit.
+        results = {}
+        t = _receive_in_background(server, GLOBAL_ECHO, "unit1", 2, results, "app")
+        client1.send_message(b"not-an-echo", GLOBAL_ECHO, unit_name="unit1")
+        t.join(timeout=3)
+        assert results.get("app") == ("unit1", b"not-an-echo"), results
+        print("the global echo opcode is delivered as data on the unit that overrode it")
+
+        client1.send_message(b"heartbeat", UNIT1_ECHO, unit_name="unit1")
+        time.sleep(0.3)
+        try:
+            server.receive_message(UNIT1_ECHO, unit_name="unit1", timeout=0.5)
+            raise AssertionError("unit1's own echo opcode should have been consumed")
+        except asyncio.TimeoutError:
+            print("unit1's overridden opcode is consumed as an echo, never delivered")
+
+        client2.send_message(b"heartbeat", GLOBAL_ECHO, unit_name="unit2")
+        time.sleep(0.3)
+        try:
+            server.receive_message(GLOBAL_ECHO, unit_name="unit2", timeout=0.5)
+            raise AssertionError("unit2's inherited echo opcode should have been consumed")
+        except asyncio.TimeoutError:
+            print("unit2's inherited opcode is consumed as an echo on the same connection")
+    finally:
+        mgr.shutdown_all()
+    print("Hierarchical-echo connections fully torn down")
+
+
 if __name__ == "__main__":
     test_tcp_roundtrip()
     test_udp_single_unit()
     test_composite_unit()
+    test_composite_multicast_sender_udp_receiver()
     test_message_filtering()
     test_echo_is_consumed()
     test_trigger_function_and_callback()
     test_trigger_function_failure_releases_route()
     test_single_opcode_heartbeat()
     test_echo_timeout_disconnect()
+    test_echo_follows_peer_connection()
+    test_hierarchical_echo_config()
+    test_wait_for_connected_units()
+    test_own_unit_code()
+    test_irs_parser_roundtrip()
     test_periodic_sending()
     test_single_subscription_per_route()
     print("\nALL TESTS PASSED")

@@ -14,7 +14,11 @@ sockets, its own read loop, and its own lifecycle.
 """
 from __future__ import annotations
 
-from .base import Connection, ReceiveCallback, TriggerFunction
+import time
+
+import atexit
+
+from .base import ConnectedTarget, Connection, IrsMessage, ReceiveCallback, TriggerFunction
 
 
 class CompositeUnit:
@@ -49,15 +53,16 @@ class CompositeUnit:
     def start(self) -> None:
         for member in self._members:
             member.start()
+            atexit.register(member.close)
 
-    def stop(self, timeout: float | int | None = 5.0) -> None:
+    def close(self, timeout: float | int | None = 5.0) -> None:
         """Stops every member even if one of them raises, then re-raises so
         the caller still finds out something went wrong -- a partial
         teardown never passes silently."""
         errors: list[Exception] = []
         for member in self._members:
             try:
-                member.stop(timeout=timeout)
+                member.close(timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - deliberately broad: collect & continue
                 errors.append(exc)
         if errors:
@@ -69,10 +74,29 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     # Public API -- identical shape to Connection.send_message/receive_message
     # ------------------------------------------------------------------ #
-    def send_message(self, data: bytes, opcode: int, unit_name: str | None = None) -> None:
+    def send_message(self, data: IrsMessage, opcode: int, unit_name: str | None = None) -> None:
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
         self._sender.send_message(data, opcode, unit_name)
+
+    @property
+    def active_units(self) -> set[str]:
+        """Units connected on ANY member: a composite's Unit is reachable if
+        either half of it is."""
+        return set().union(*(member.active_units for member in self._members))
+
+    def wait_for_connected_units(
+        self, target: ConnectedTarget, timeout: float | int | None = None
+    ) -> bool:
+        """Wait for every member in turn, so the composite is only "connected"
+        once both directions are. `timeout` is the budget for the whole call,
+        not per member."""
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        for member in self._members:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if not member.wait_for_connected_units(target, remaining):
+                return False
+        return True
 
     def receive_message(
         self,
@@ -80,7 +104,7 @@ class CompositeUnit:
         unit_name: str | None = None,
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
-    ) -> tuple[str, bytes]:
+    ) -> tuple[str, IrsMessage]:
         if self._receiver is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         return self._receiver.receive_message(opcode, unit_name, timeout, trigger_function)
@@ -105,7 +129,7 @@ class CompositeUnit:
     def periodic_sending(
         self,
         opcode: int,
-        data: bytes,
+        data: IrsMessage,
         interval: int | float,
         unit_name: str | None = None,
     ) -> None:
