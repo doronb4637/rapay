@@ -146,6 +146,7 @@ def _as_positive_float(value: Any, field_name: str, default: float) -> float:
 @dataclass(frozen=True, slots=True)
 class EchoSettings:
     """
+    *Immutable class*
     Everything the echo lifecycle needs, parsed and validated once.
 
     Two ways to configure the opcodes:
@@ -264,7 +265,7 @@ class ConnectionConfig:
     #: Our unitCode
     unitCode: int
     connections: dict[str, UnitEndpoint]
-    #: protocol-specific opts (echo opcodes, ttl, mode, idl_file, qos_file, ...)
+    #: (Echo-Opcodes, Echo-Timeout, Echo-Intervals, Mode('send_only'/'receive_only'), IDL_file, QoS_file, local_ip, ...)
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -272,11 +273,7 @@ class ConnectionConfig:
         """
         Build a validated config from a raw JSON dict.
 
-        Every failure mode is raised here, at load time, rather than being
-        discovered when a socket refuses to open or a message routes to the
-        wrong unit: a missing own `unitCode`, missing `connections`, a port or
-        unit code out of range, two units claiming the same unit code, or a
-        malformed echo block at either level of the hierarchy.
+        Every failure mode is raised here, at load time.
         """
         own_unitCode_raw = _lookup(data, *UNIT_CODE_KEYS)
         if own_unitCode_raw is None:
@@ -285,54 +282,35 @@ class ConnectionConfig:
         connections_raw = data.get("connections")
         if not connections_raw:
             raise ValueError(
-                "config['connections'] is required and must map every connection name "
-                "to {'port': int, 'unitCode': int}")
+                "config['connections'] is required and must map every connection name to {'port': int, 'unitCode': int}")
         required_keys = {"protocol", "side", "ip", *LOCAL_IP_KEYS, "connections", *UNIT_CODE_KEYS}
         extra = {key: value for key, value in data.items() if key not in required_keys}
         connections: dict[str, UnitEndpoint] = {}
-        code_owner: dict[int, str] = {}
+        code_owner: dict[UnitCode, str] = {}
         for name, spec in connections_raw.items():
-            if not isinstance(spec, dict) or "port" not in spec:
+            if not isinstance(spec, dict) or "port" not in spec or all(unitCode_key not in spec for unitCode_key in UNIT_CODE_KEYS):
                 raise ValueError(
-                    f"config['connections'][{name!r}] must be an object with at least "
-                    f"a 'port' key, got {spec!r}"
-                )
+                    f"config['connections'][{name!r}] must be an object with at least a 'port' key, got {spec!r}")
             try:
                 port = int(spec["port"])
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"config['connections'][{name!r}]['port'] must be an integer, "
-                    f"got {spec['port']!r}"
-                ) from exc
+                    f"config['connections'][{name!r}]['port'] must be an integer, got {spec['port']!r}") from exc
             if not 0 <= port <= 0xFFFF:
                 raise ValueError(
-                    f"config['connections'][{name!r}]['port'] = {port} is not a valid port"
-                )
-
-            # The REMOTE unit's code. Optional -- defaults to the port's low
-            # byte -- but still range- and collision-checked below.
-            raw_code = spec.get("unitCode", spec.get("unit_code"))
-            code = (
-                port & 0xFF if raw_code is None
-                else _as_unit_code(raw_code, f"connections[{name!r}]['unitCode']")
-            )
-            if code in code_owner:
-                # Two units sharing a code would collapse into one route.
-                raise ValueError(
-                    f"connections {code_owner[code]!r} and {name!r} both use unitCode "
-                    f"{code}; unit codes must be unique within a connection"
-                )
-            code_owner[code] = name
-
+                    f"config['connections'][{name!r}]['port'] = {port} is not a valid port\n[*] Has to be between 0 - 65,535.")
+            raw_unitCode = _lookup(spec, *UNIT_CODE_KEYS)
+            unitCode = _as_unit_code(raw_unitCode, f"connections[{name!r}]['unitCode']")
+            if unitCode in code_owner:
+                raise ValueError(f"connections {code_owner[unitCode]!r} and {name!r} both use unitCode "
+                                 f"{unitCode}; unit codes must be unique within a connection")
+            code_owner[unitCode] = name
             # Per-unit echo wins, connection-level `extra` is the fallback.
-            # Re-raised with the unit named, because "EchoTimeout must be
-            # greater than EchoInterval" is unactionable on a config where
-            # three units each supply their own.
             try:
                 echo = EchoSettings.resolve(spec, extra)
             except ValueError as exc:
                 raise ValueError(f"config['connections'][{name!r}]: {exc}") from exc
-            connections[name] = UnitEndpoint(port=port, unitCode=code, echo=echo)
+            connections[name] = UnitEndpoint(port=port, unitCode=unitCode, echo=echo)
 
         config = cls(
             protocol=Protocol(str(data["protocol"]).lower()),
@@ -343,8 +321,7 @@ class ConnectionConfig:
             connections=connections,
             extra=extra,
         )
-        # Parse the echo block eagerly so a bad EchoInterval/opcode is a
-        # config-time error with a clear message, not a surprise at start().
+        # Parse the echo block at load-time.
         config.echo
         return config
 
@@ -374,26 +351,22 @@ class ConnectionConfig:
         return None if endpoint is None else endpoint.port
 
     def unit_code_for(self, unit_name: str) -> int:
-        """The wire-level unit code for `unit_name`. Raises if unknown."""
+        """The wire-level unit code for `unit_name`.
+         Raises ValueError if unknown."""
         return self.endpoint_for(unit_name).unitCode
 
     def echo_for(self, unit_name: str) -> EchoSettings:
-        """The echo settings `unit_name` actually heartbeats on -- its own
-        keys where it has them, this connection's `extra` block where it
-        doesn't, and disabled where neither supplies an opcode. Resolved at
-        load time; this is a lookup, not a re-parse."""
+        """The echo settings for `unit_name`."""
         return self.endpoint_for(unit_name).echo
 
     @property
     def unit_codes(self) -> dict[str, int]:
-        """unit name -> unit code, for callers that want the whole mapping."""
+        """returns {unit name: unit code}, for callers that want the whole mapping."""
         return {name: endpoint.unitCode for name, endpoint in self.connections.items()}
 
     @property
     def connected_units(self) -> list[str]:
-        """All logical unit names reachable through this connection instance,
-        derived directly from the explicit `connections` block -- there is no
-        "default"/anonymous-unit fallback."""
+        """All logical unit names reachable through this connection instance"""
         return list(self.connections)
 
     @property
@@ -405,12 +378,6 @@ class ConnectionConfig:
     def echo(self) -> EchoSettings:
         """This connection's echo block -- the shared default every unit falls
         back to, parsed straight out of `extra`.
-
-        Use `echo_for(unit)` to get what a *unit* actually runs on; this is
-        only the connection-level half of that. It stays a property because
-        `from_json` evaluates it once to force a load-time failure on a bad
-        `extra` block even when every unit overrides it.
-
         Recomputed per access rather than cached: `slots=True` leaves no
         instance `__dict__` for a `cached_property` to write into.
         """
