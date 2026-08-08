@@ -8,9 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from IRS.irs_parser import IRSDataError
+
 from .base import FramedConnection
 from .config import Side
-from .framing import unpack_message, IRSDataError
+from .framing import unpack_message
+
 
 logger = logging.getLogger("connmgr.udp")
 

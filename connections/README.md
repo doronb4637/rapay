@@ -469,7 +469,7 @@ beacon = mgr.create_composite("BeaconUnit", {
 })
 beacon.start()
 beacon.send_message(b"...", opcode=20)
-unit, payload = beacon.receive_message(opcode=21)
+unit, payload = beacon.receive_message(opCode=21)
 beacon.close()
 ```
 

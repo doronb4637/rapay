@@ -143,21 +143,6 @@ def _as_positive_float(value: Any, field_name: str, default: float) -> float:
     return number
 
 
-def _as_payload(value: Any) -> bytes:
-    """Echo payloads arrive from JSON, so allow the shapes JSON can express."""
-    if value is None:
-        return b""
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bytearray):
-        return bytes(value)
-    if isinstance(value, str):
-        return value.encode()
-    if isinstance(value, (list, tuple)):
-        return bytes(value)
-    raise ValueError(f"config['echo_payload'] must be str/bytes/list[int], got {value!r}")
-
-
 @dataclass(frozen=True, slots=True)
 class EchoSettings:
     """
@@ -235,7 +220,7 @@ class EchoSettings:
 
         To configure a unit to not have echo just define it's echo as 'null' value in the json config.
         """
-        merged = {k: v for k, v in global_extra.items() if k in ECHO_KEYS}
+        merged = {key: value for key, value in global_extra.items() if key in ECHO_KEYS}
         if any(unit_spec.get(key) is not None for key in ECHO_OPCODE_KEYS):
             for key in ECHO_OPCODE_KEYS:
                 merged.pop(key, None)

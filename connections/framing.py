@@ -13,15 +13,11 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from IRS.irs_parser import IRSDataError
 # "<" = little-endian, no padding. B = uint8, H = uint16, H = uint16.
-# Pre-compiled once at import time via struct.Struct rather than re-parsed
-# on every pack/unpack call: this framing sits on the hot path for every
-# single message sent or received, so paying the format-parse cost once
-# instead of per-call is a real (if small) win.
 _HEADER_STRUCT = struct.Struct("<BHH")
 
-HEADER_FORMAT = _HEADER_STRUCT.format  # kept for introspection/documentation
-HEADER_SIZE = _HEADER_STRUCT.size      # 5 bytes: 1 + 2 + 2
+HEADER_SIZE = _HEADER_STRUCT.size      # 5 bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,10 +25,6 @@ class MessageHeader:
     unit_code: int
     opcode: int
     data_length: int
-
-
-class IRSDataError(Exception):
-    """Raised when a header/payload cannot be built or parsed correctly."""
 
 
 def pack_message(unit_code: int, opcode: int, payload: bytes) -> bytes:

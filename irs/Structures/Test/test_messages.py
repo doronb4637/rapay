@@ -59,3 +59,20 @@ register_message(
     opCode=TRACK_OPCODE,
     message=TrackAck
 )
+
+
+class Text(Message):
+    """Opaque byte payload, consuming whatever the frame carries."""
+    data: list[int] = [Byte, None]
+
+
+#: The transport tests care that bytes arrived, not what they mean -- but
+#: receive_message() rejects unregistered routes, so each still needs a layout.
+TEXT_ROUTES = (
+    (1, 10), (1, 11), (3, 20), (4, 21), (5, 22), (5, 77), (6, 23), (6, 99), (6, 100),
+    (7, 1), (7, 3), (8, 2), (11, 60), (12, 70), (13, 80), (13, 81), (14, 82),
+    (61, 30), (61, 31), (62, 30),
+)
+
+for _unitCode, _opCode in TEXT_ROUTES:
+    register_message(unitCode=_unitCode, opCode=_opCode, message=Text)

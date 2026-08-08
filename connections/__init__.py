@@ -18,7 +18,6 @@ from IRS.irs_parser import irs_to_bytes, parse_irs
 
 from .config import ConnectionConfig, Protocol, Side
 from .framing import (
-    HEADER_FORMAT,
     HEADER_SIZE,
     MessageHeader,
     IRSDataError,
@@ -50,7 +49,7 @@ ConnectionManager.register(Protocol.MULTICAST, MulticastConnection)
 
 __all__ = [
     "ConnectionConfig", "Protocol", "Side",
-    "HEADER_FORMAT", "HEADER_SIZE", "MessageHeader", "IRSDataError",
+    "HEADER_SIZE", "MessageHeader", "IRSDataError",
     "pack_message", "unpack_message", "unpack_header",
     "Connection", "get_event_loop_thread",
     "ConnectedTarget", "IrsMessage", "irs_to_bytes", "parse_irs",

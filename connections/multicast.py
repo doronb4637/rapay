@@ -21,9 +21,11 @@ import logging
 import socket
 import struct as pystruct
 
+from IRS.irs_parser import IRSDataError
+
 from .base import FramedConnection
 from .config import ConnectionConfig, Side
-from .framing import unpack_message, IRSDataError
+from .framing import unpack_message
 
 logger = logging.getLogger("connmgr.multicast")
 

@@ -21,11 +21,11 @@ from asyncio import Event
 from typing import Any, Callable, Coroutine, Iterable
 
 from annotations import *
-from IRS.irs_parser import irs_to_bytes, parse_irs
+from IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs, is_irs_exist
 from tools.general import validated_opCode
 
 from .config import ConnectionConfig, EchoSettings
-from .framing import IRSDataError, pack_message
+from .framing import pack_message
 
 logger = logging.getLogger("connmgr")
 
@@ -463,7 +463,7 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Incoming message dispatch
     # ------------------------------------------------------------------ #
-    def _dispatch_incoming(self, unit_name: str, opcode: int, payload: bytes) -> None:
+    def _dispatch_incoming(self, unitName: str, opCode: int, payload: bytes) -> None:
         """
         Called by a subclass's read loop / datagram callback (always on the
         shared event-loop thread) whenever a complete inbound message has
@@ -489,44 +489,32 @@ class Connection(ABC):
              malformed input costs exactly that message: it is logged and
              dropped, and the read loop carries on.
         """
-        # Per-unit, so an opcode that is a heartbeat on one unit stays an
-        # ordinary application message on a unit that configured it that way.
-        echo = self._echo_for(unit_name)
-        if echo.enabled and opcode == echo.recv_opcode:
-            self._last_echo_at[unit_name] = time.monotonic()
+        echo = self._echo_for(unitName)
+        if echo.enabled and opCode == echo.recv_opcode:
+            self._last_echo_at[unitName] = time.monotonic()
             return
-
-        unit_code = self._unit_code_for(unit_name)
-        route_key: RouteKey = (unit_code, opcode)
-
-        # A subscription wins: its caller is actively blocked. By
-        # construction a route never has both a subscription and a callback.
+        unit_code = self._unit_code_for(unitName)
+        route_key: RouteKey = (unit_code, opCode)
         future = self._subscriptions.get(route_key)
         callback = self._callbacks.get(route_key)
+        # Checks for message subscription
         if (future is None or future.done()) and callback is None:
-            return  # nobody owns this route -- drop it before paying to decode
-
+            return
+        message, exception = None, None
         try:
-            message = self._decode(unit_code, opcode, payload)
-        except Exception:  # noqa: BLE001 - one bad message, not a dead link
-            # IRS is strict: an unregistered (unit, opcode) or a payload that
-            # doesn't fit its layout raises. That is a real problem and gets a
-            # full traceback -- but it is this message's problem, not the
-            # link's, so the raw payload is delivered and the read loop goes on.
-            # Byte-oriented units, which register no layouts at all, ride this
-            # same path and are unaffected by it.
+            message = self._decode(unit_code, opCode, payload)
+        except Exception as e:
             logger.exception(
-                "IRS could not parse this message (unit=%s, opcode=%s); "
-                "delivering the raw payload and keeping the link up", unit_name, opcode
-            )
-            message = payload
-
+                f"IRS could not parse this message (unit={unitName}, opcode={opCode}), for reason: {e};\nCanceling message subscription")
+            exception = BufferError(f"Failed while parsing message for reason: {e!r}")
         if future is not None and not future.done():
             del self._subscriptions[route_key]
-            future.set_result(message)
+            future.set_exception(exception) if message is None else future.set_result(message)
             return
         assert callback is not None
-        self._track(self._run_callback(callback, message, unit_name, opcode))
+        if message is None:
+            return
+        self._track(self._run_callback(callback, message, unitName, opCode))
 
     # ------------------------------------------------------------------ #
     # IRS codec boundary
@@ -747,11 +735,9 @@ class Connection(ABC):
         return True
 
     def receive_message(
-        self,
-        opcode: int,
-        unit_name: str | None = None,
+        self, opCode: int, unitName: str | None = None,
         timeout: float | int | None = None,
-        trigger_function: TriggerFunction | None = None,
+        trigger_function: TriggerFunction | None = None
     ) -> tuple[str, IrsMessage]:
         """
         Blocking, synchronous receive. Returns (unit_name, message) for the
@@ -778,7 +764,8 @@ class Connection(ABC):
         this connection's sync API, and if it raises, the subscription is
         released and the exception propagates unchanged.
         """
-        unit, route_key = self._resolve_route(unit_name, opcode)
+        unit, route_key = self._resolve_route(unitName, opCode)
+        validate_irs(*route_key)
         future: asyncio.Future[IrsMessage] = self._loop_thread.await_coroutine(self._subscribe(route_key))
         if trigger_function is not None:
             try:
@@ -823,6 +810,7 @@ class Connection(ABC):
         if not callable(callback_func):
             raise TypeError(f"callback_func must be callable, got {callback_func!r}")
         _unit, route_key = self._resolve_route(unit_name, opcode)
+        validate_irs(*route_key)
         self._loop_thread.await_coroutine(self._register_callback(route_key, callback_func))
 
     def stop_on_receive(self, opcode: int, unit_name: str | None = None) -> bool:

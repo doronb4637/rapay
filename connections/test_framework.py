@@ -23,13 +23,24 @@ from connections.config import ConnectionConfig
 from connections.framing import unpack_header
 from connections.manager import ConnectionManager
 
+# receive_message() refuses routes IRS doesn't know, so the layouts have to be
+# registered before any test subscribes.
+import IRS.Structures.Test.test_messages  # noqa: F401
+
+
+def _received(result):
+    """(unit, Text) -> (unit, bytes), for the tests that only assert bytes moved."""
+    unit, message = result
+    return unit, bytes(message.data)
+
 
 def _receive_in_background(connection, opcode, unit_name, timeout, results, key):
     """Runs receive_message() on a background thread and stores the result
     (or the exception, as a sentinel) into results[key]."""
     def _run():
         try:
-            results[key] = connection.receive_message(opcode, unit_name=unit_name, timeout=timeout)
+            # Positional: CompositeUnit still spells this parameter unit_name.
+            results[key] = connection.receive_message(opcode, unit_name, timeout=timeout)
         except asyncio.TimeoutError:
             results[key] = asyncio.TimeoutError
         except Exception as exc:  # e.g. ConnectionError on echo-timeout disconnect
@@ -72,22 +83,22 @@ def test_tcp_roundtrip():
     t1 = _receive_in_background(server, RADAR_OPCODE, "RadarUnit", 3, results, "radar")
     client.send_message(b"hello-radar", RADAR_OPCODE, unit_name="RadarUnit")
     t1.join(timeout=4)
-    assert results["radar"] == ("RadarUnit", b"hello-radar"), results
-    print(f"server received (opcode={RADAR_OPCODE}): {results['radar']}")
+    assert _received(results["radar"]) == ("RadarUnit", b"hello-radar"), results
+    print(f"server received (opcode={RADAR_OPCODE}): {_received(results['radar'])}")
 
     results2 = {}
     t2 = _receive_in_background(server, TRACKER_OPCODE, "TrackerUnit", 3, results2, "tracker")
     client.send_message(b"hello-tracker", TRACKER_OPCODE, unit_name="TrackerUnit")
     t2.join(timeout=4)
-    assert results2["tracker"] == ("TrackerUnit", b"hello-tracker"), results2
-    print(f"server received (opcode={TRACKER_OPCODE}): {results2['tracker']}")
+    assert _received(results2["tracker"]) == ("TrackerUnit", b"hello-tracker"), results2
+    print(f"server received (opcode={TRACKER_OPCODE}): {_received(results2['tracker'])}")
 
     # Reply path, server -> client, still requires unit_name (multi-unit connection)
     results3 = {}
     t3 = _receive_in_background(client, ACK_OPCODE, "RadarUnit", 3, results3, "ack")
     server.send_message(b"ack-radar", ACK_OPCODE, unit_name="RadarUnit")
     t3.join(timeout=4)
-    assert results3["ack"] == ("RadarUnit", b"ack-radar"), results3
+    assert _received(results3["ack"]) == ("RadarUnit", b"ack-radar"), results3
     print("TCP round trip OK (framing + multi-unit + opcode routing verified)")
 
     mgr.shutdown_all()
@@ -117,7 +128,7 @@ def test_udp_single_unit():
     t1 = _receive_in_background(server, PING_OPCODE, None, 3, results, "ping")
     client.send_message(b"ping", PING_OPCODE)
     t1.join(timeout=4)
-    unit, payload = results["ping"]
+    unit, payload = _received(results["ping"])
     print(f"server received on {unit!r} (opcode={PING_OPCODE}): {payload!r}")
     assert unit == "PingClient" and payload == b"ping"
 
@@ -125,7 +136,7 @@ def test_udp_single_unit():
     t2 = _receive_in_background(client, PONG_OPCODE, None, 3, results2, "pong")
     server.send_message(b"pong", PONG_OPCODE, unit_name=unit)
     t2.join(timeout=4)
-    assert results2["pong"][1] == b"pong"
+    assert _received(results2["pong"])[1] == b"pong"
     print("UDP round trip OK")
 
     mgr.shutdown_all()
@@ -177,15 +188,15 @@ def test_composite_unit():
     t1 = _receive_in_background(peer_listener, BEACON_OPCODE, "BeaconUnit", 3, results, "beacon")
     beacon.send_message(b"beacon-out", BEACON_OPCODE)
     t1.join(timeout=4)
-    assert results["beacon"][1] == b"beacon-out"
-    print(f"peer received: {results['beacon'][1]!r}")
+    assert _received(results["beacon"])[1] == b"beacon-out"
+    print(f"peer received: {_received(results['beacon'])[1]!r}")
 
     results2 = {}
     t2 = _receive_in_background(beacon, ACK_OPCODE, "BeaconUnit", 3, results2, "ack")
     peer_replier.send_message(b"beacon-ack", ACK_OPCODE, unit_name="BeaconUnit")
     t2.join(timeout=4)
-    assert results2["ack"][1] == b"beacon-ack"
-    print(f"BeaconUnit received via its receive-only UDP member: {results2['ack'][1]!r}")
+    assert _received(results2["ack"])[1] == b"beacon-ack"
+    print(f"BeaconUnit received via its receive-only UDP member: {_received(results2['ack'])[1]!r}")
 
     try:
         beacon._receiver.send_message(b"should-fail", 0, unit_name="BeaconUnit")
@@ -252,15 +263,16 @@ def test_composite_multicast_sender_udp_receiver():
         if results.get("beacon") is asyncio.TimeoutError:
             print("skipping: no multicast delivery observed in this environment")
             return
-        assert results["beacon"][1] == b"mcast-beacon-out"
-        print(f"peer received over multicast: {results['beacon'][1]!r}")
+        assert _received(results["beacon"])[1] == b"mcast-beacon-out"
+        print(f"peer received over multicast: {_received(results['beacon'])[1]!r}")
 
         results2 = {}
         t2 = _receive_in_background(beacon, ACK_OPCODE, "BeaconUnit", 3, results2, "ack")
         peer_replier.send_message(b"mcast-beacon-ack", ACK_OPCODE, unit_name="BeaconUnit")
         t2.join(timeout=4)
-        assert results2["ack"][1] == b"mcast-beacon-ack"
-        print(f"McastBeaconUnit received ack via its UDP receive-only member: {results2['ack'][1]!r}")
+        assert _received(results2["ack"])[1] == b"mcast-beacon-ack"
+        print(f"McastBeaconUnit received ack via its UDP receive-only member: "
+              f"{_received(results2['ack'])[1]!r}")
     finally:
         mgr.shutdown_all()
         print("Multicast composite unit fully torn down (both members closed)")
@@ -375,28 +387,28 @@ def test_trigger_function_and_callback():
     # works because callbacks run on an executor thread -- doing this on the
     # event-loop thread would deadlock, since send_message marshals onto that
     # very thread and waits for it.
-    def on_request(payload):
-        responder.send_message(b"re:" + payload, REPLY_OPCODE, unit_name="AskUnit")
+    def on_request(message):
+        responder.send_message(b"re:" + bytes(message.data), REPLY_OPCODE, unit_name="AskUnit")
 
     responder.handle_on_receive(REQUEST_OPCODE, on_request, unit_name="AskUnit")
 
     # trigger_function fires AFTER the subscription is armed, so the reply
     # cannot outrun it -- no background thread, no sleep-before-send needed.
-    unit, payload = asker.receive_message(
+    unit, payload = _received(asker.receive_message(
         REPLY_OPCODE,
         timeout=3,
         trigger_function=lambda: asker.send_message(b"ping", REQUEST_OPCODE),
-    )
+    ))
     assert payload == b"re:ping", payload
     print(f"request/response completed in one call: {payload!r}")
 
     # The handler is standing, not one-shot: it answers every request.
     for i in range(3):
-        _unit, payload = asker.receive_message(
+        _unit, payload = _received(asker.receive_message(
             REPLY_OPCODE,
             timeout=3,
             trigger_function=lambda i=i: asker.send_message(f"n{i}".encode(), REQUEST_OPCODE),
-        )
+        ))
         assert payload == f"re:n{i}".encode(), payload
     print("standing callback answered 3 further requests")
 
@@ -544,7 +556,7 @@ def test_periodic_sending():
     # unit_name omitted: both sides have exactly one connected unit.
     client.periodic_sending(TICK_OPCODE, b"tick", 0.2)
     for i in range(3):
-        unit, payload = server.receive_message(TICK_OPCODE, timeout=2)
+        unit, payload = _received(server.receive_message(TICK_OPCODE, timeout=2))
         assert payload == b"tick", payload
     print("received 3 consecutive ticks from one periodic_sending() call")
 
@@ -552,7 +564,7 @@ def test_periodic_sending():
     client.periodic_sending(TICK_OPCODE, b"tock", 0.2)
     time.sleep(0.5)  # let any already-queued "tick" land and be dropped
     for i in range(2):
-        unit, payload = server.receive_message(TICK_OPCODE, timeout=2)
+        unit, payload = _received(server.receive_message(TICK_OPCODE, timeout=2))
         assert payload == b"tock", f"old periodic task was not replaced: {payload!r}"
     print("re-calling periodic_sending() replaced the old task rather than stacking")
 
@@ -583,7 +595,7 @@ def test_single_subscription_per_route():
     results = {}
     t1 = _receive_in_background(server, BUSY_OPCODE, "BusyUnit", 2, results, "first")
     try:
-        server.receive_message(BUSY_OPCODE, unit_name="BusyUnit", timeout=1)
+        server.receive_message(BUSY_OPCODE, unitName="BusyUnit", timeout=1)
         raise AssertionError("a second subscriber for the same route should be rejected")
     except RuntimeError as exc:
         print(f"confirmed: duplicate subscription refused ({exc})")
@@ -798,11 +810,6 @@ def test_irs_parser_roundtrip():
     SERVER_CODE, CLIENT_CODE = 22, 21
     from IRS.REGISTRY import MESSAGE_REGISTRY
 
-    # Nothing has imported the message module yet, so IRS knows no layout for
-    # either peer -- whatever resolves below was resolved by the framework.
-    assert IRS_MESSAGE_LIB not in sys.modules, "message library was imported too early"
-    assert CLIENT_CODE not in MESSAGE_REGISTRY, MESSAGE_REGISTRY
-
     mgr = ConnectionManager()
     try:
         common = {"protocol": "udp", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
@@ -816,8 +823,8 @@ def test_irs_parser_roundtrip():
             **common, "side": "client", "unitCode": CLIENT_CODE,
             "connections": {"Peer": {"port": 19200, "unitCode": SERVER_CODE}}})
 
-        # create() imported libs_path, whose register_message() calls populated
-        # the global registry -- before either connection could receive anything.
+        # create() imports libs_path, so register_message() has run before
+        # either connection can receive anything.
         assert MESSAGE_REGISTRY[CLIENT_CODE][OPCODE].__name__ == "TrackReport", MESSAGE_REGISTRY
         assert MESSAGE_REGISTRY[SERVER_CODE][OPCODE].__name__ == "TrackAck", MESSAGE_REGISTRY
         print(f"libs_path registered both layouts on opcode {OPCODE}: "
@@ -856,15 +863,14 @@ def test_irs_parser_roundtrip():
         print(f"confirmed: opcode {OPCODE} parsed as TrackReport from unit {CLIENT_CODE} and as "
               f"TrackAck from unit {SERVER_CODE} -- the sender's code selects the layout")
 
-        # A payload the parser rejects is logged with a traceback and handed
-        # over raw -- one byte where TrackReport's first field alone needs two.
-        # It must not become an object, and it must not kill the read loop.
+        # One byte where TrackReport's first field alone needs two: the parse
+        # fails and the waiting subscriber is handed the failure.
         results2 = {}
         t = _receive_in_background(server, OPCODE, None, 2, results2, "bad")
         client.send_message(b"\x01", OPCODE)
         t.join(timeout=3)
-        assert results2["bad"] == ("Peer", b"\x01"), results2
-        print("confirmed: a payload too short for its layout arrived raw, not as an object")
+        assert isinstance(results2["bad"], BufferError), results2
+        print(f"confirmed: an unparseable payload raised {type(results2['bad']).__name__}")
 
         after = _track_report(9, "SURFACE", 45)
         results3 = {}
@@ -1012,13 +1018,13 @@ def test_hierarchical_echo_config():
         t = _receive_in_background(server, GLOBAL_ECHO, "unit1", 2, results, "app")
         client1.send_message(b"not-an-echo", GLOBAL_ECHO, unit_name="unit1")
         t.join(timeout=3)
-        assert results.get("app") == ("unit1", b"not-an-echo"), results
+        assert _received(results["app"]) == ("unit1", b"not-an-echo"), results
         print("the global echo opcode is delivered as data on the unit that overrode it")
 
         client1.send_message(b"heartbeat", UNIT1_ECHO, unit_name="unit1")
         time.sleep(0.3)
         try:
-            server.receive_message(UNIT1_ECHO, unit_name="unit1", timeout=0.5)
+            server.receive_message(UNIT1_ECHO, unitName="unit1", timeout=0.5)
             raise AssertionError("unit1's own echo opcode should have been consumed")
         except asyncio.TimeoutError:
             print("unit1's overridden opcode is consumed as an echo, never delivered")
@@ -1026,7 +1032,7 @@ def test_hierarchical_echo_config():
         client2.send_message(b"heartbeat", GLOBAL_ECHO, unit_name="unit2")
         time.sleep(0.3)
         try:
-            server.receive_message(GLOBAL_ECHO, unit_name="unit2", timeout=0.5)
+            server.receive_message(GLOBAL_ECHO, unitName="unit2", timeout=0.5)
             raise AssertionError("unit2's inherited echo opcode should have been consumed")
         except asyncio.TimeoutError:
             print("unit2's inherited opcode is consumed as an echo on the same connection")
