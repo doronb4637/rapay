@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from tools.file_functions import readUnitConfig
+from tools.file_functions import read_unit_config
 from tools.general import import_modules
 
 from .base import Connection
@@ -104,7 +104,7 @@ class ConnectionManager:
         assemble configs programmatically (and the test suite) rely on.
         """
         if isinstance(config, str):
-            return readUnitConfig(config)
+            return read_unit_config(config)
         if isinstance(config, dict):
             return config
         raise TypeError(
