@@ -1,0 +1,33 @@
+# PyCharm & JetBrains IDE
+.idea/
+*.iml
+
+# Python Virtual Environments
+venv/
+.venv/
+ENV/
+env/
+
+# Python Cache & Build Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+target/
+.eggs/
+*.egg
+
+# Testing & Coverage Logs
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+nosetests.xml
+coverage.xml
+
+# Environment Variables & Secrets
+.env
+.env.*
+*.log

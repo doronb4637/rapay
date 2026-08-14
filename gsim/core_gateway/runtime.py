@@ -1,0 +1,390 @@
+"""
+GSim's own connection registry, message logs, and the thread bridge that gets
+`core`'s callbacks out to the UI.
+
+Three things about `core` drive this design:
+
+1. **`Connection`'s public API is blocking and synchronous** -- `send_message`,
+   `start`, `close` each marshal onto core's single background event loop and
+   block the caller (`base._EventLoopThread.await_coroutine`). They must never
+   be awaited from the FastAPI event loop. Every route that touches this module
+   is therefore declared `def`, not `async def`, so Starlette runs it in its
+   threadpool.
+
+2. **Inbound callbacks arrive on executor threads.** `Connection._run_callback`
+   invokes handlers via `run_in_executor(...)`, so a callback body runs on an
+   arbitrary worker thread with no event loop. Publishing to WebSocket clients
+   therefore hops threads through `loop.call_soon_threadsafe`.
+
+3. **GSim owns the registry, `ConnectionManager` is used as a factory.** Core's
+   manager has `create`/`get`/`shutdown_all` but no per-connection removal, and
+   `_connections` is private. Rather than reach into it, GSim keeps its own
+   record dict as the UI's source of truth and lets the manager keep its entry
+   as an exit-time safety net -- `Connection.close()` is documented idempotent,
+   so `shutdown_all()` double-closing an already-deleted connection is a no-op.
+"""
+from __future__ import annotations
+
+import itertools
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from . import bootstrap  # noqa: F401
+
+from connections.manager import ConnectionManager
+
+from . import registry as message_registry
+
+#: Per-connection ring buffers. Bounded so a chatty link cannot grow without
+#: limit; the UI streams live events and only re-reads these on (re)connect.
+LOG_LIMIT = 2000
+
+
+@dataclass
+class LogEntry:
+    seq: int
+    direction: str          # "sent" | "received"
+    connection_id: str
+    connection_name: str    # which GSim connection owns this entry (the console is global)
+    unit_name: str          # OUR name when sent, the SENDER's configured name when received
+    unit_code: int          # the code the layout is registered under -- ours on send, theirs on receive
+    op_code: int
+    message_name: str
+    payload: dict[str, Any] | None
+    error: str | None
+    timestamp: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "seq": self.seq,
+            "direction": self.direction,
+            "connection_id": self.connection_id,
+            "connection_name": self.connection_name,
+            "unit_name": self.unit_name,
+            "unit_code": self.unit_code,
+            "op_code": self.op_code,
+            "op_code_hex": f"0x{self.op_code:04X}",
+            "message_name": self.message_name,
+            "payload": self.payload,
+            "error": self.error,
+            "timestamp": self.timestamp,
+            # What the log line renders as: "[name]: [message]"
+            "label": f"{self.unit_name}: {self.message_name}",
+        }
+
+
+class EventBus:
+    """Fan-out from any thread to any number of asyncio consumers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: list[tuple[Any, Any]] = []   # (asyncio.loop, asyncio.Queue)
+
+    def subscribe(self, loop, queue) -> None:
+        with self._lock:
+            self._subscribers.append((loop, queue))
+
+    def unsubscribe(self, queue) -> None:
+        with self._lock:
+            self._subscribers = [(l, q) for l, q in self._subscribers if q is not queue]
+
+    def publish(self, event: dict[str, Any]) -> None:
+        """Safe to call from core's executor threads, its loop thread, or the
+        API threadpool. Never raises into the caller: a dead subscriber must
+        not take down a read loop."""
+        with self._lock:
+            targets = list(self._subscribers)
+        for loop, queue in targets:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+            except RuntimeError:
+                # Loop already closed (client went away mid-publish).
+                self.unsubscribe(queue)
+
+
+@dataclass
+class ConnectionRecord:
+    id: str
+    name: str
+    config: dict[str, Any]
+    unit: Any                       # core Connection | CompositeUnit
+    running: bool = False
+    sent: deque = field(default_factory=lambda: deque(maxlen=LOG_LIMIT))
+    received: deque = field(default_factory=lambda: deque(maxlen=LOG_LIMIT))
+
+    @property
+    def own_unit_code(self) -> int:
+        return self.config["unitCode"]
+
+    def peers(self) -> dict[str, int]:
+        """Configured peer name -> that peer's unit code. This mapping is what
+        lets a received message be labelled with the SENDER's defined name."""
+        connections = self.config.get("connections", {})
+        return {name: connected_unit["unitCode"] for name, connected_unit in connections.items()}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "running": self.running,
+            "protocol": self.config.get("protocol"),
+            "side": self.config.get("side"),
+            "unit_code": self.own_unit_code,
+            "peers": [
+                {"name": name, "unit_code": code} for name, code in self.peers().items()
+            ],
+            "active_units": sorted(getattr(self.unit, "active_units", set()) or set()),
+            "config": self.config,
+        }
+
+
+class GSimRuntime:
+    """Process-wide singleton holding every GSim connection."""
+
+    #: How often to resample per-unit connectivity. See `_watch_unit_state`.
+    STATE_POLL_SECONDS = 0.5
+
+    def __init__(self) -> None:
+        self._manager = ConnectionManager()
+        self._conn_records: dict[str, ConnectionRecord] = {}
+        self._lock = threading.RLock()
+        self._ids = itertools.count(1)
+        self._seq = itertools.count(1)
+        self.events = EventBus()
+        self._watcher = threading.Thread(
+            target=self._watch_unit_state, name="gsim-unit-state", daemon=True
+        )
+        self._watcher.start()
+
+    def _watch_unit_state(self) -> None:
+        """Publish `connection.state` whenever a connection's set of live peers
+        changes.
+
+        Core signals this internally -- `_mark_unit_connected` /
+        `_mark_unit_disconnected` fire `_notify_state_change()` -- but that is
+        an `asyncio.Event` on core's own loop with no public subscription hook;
+        the only public surface is the `active_units` property. Without this,
+        GSim would only ever learn about connectivity at the moments it happens
+        to call `refresh()` (create/start/stop/delete), so a peer that connects
+        *after* start -- a TCP client dialling in, a UDP server's first inbound
+        datagram, an echo-timeout drop -- would leave the sidebar showing stale
+        "offline" dots until the user toggled the connection off and on.
+
+        Polling a public property is deliberate: subscribing to core's private
+        `_state_event` would mean reaching into its internals, which is the one
+        thing this package must not do.
+        """
+        previous: dict[str, set[str]] = {}
+        while True:
+            time.sleep(self.STATE_POLL_SECONDS)
+            with self._lock:
+                connection_records = list(self._conn_records.values())
+            existing_conn = set()
+            for conn_record in connection_records:
+                existing_conn.add(conn_record.id)
+                try:
+                    record_active_unit = set(conn_record.unit.active_units)
+                except Exception:  # a torn-down unit must not kill the watcher
+                    continue
+                if previous.get(conn_record.id) != record_active_unit:
+                    previous[conn_record.id] = record_active_unit
+                    self._publish_state(conn_record)
+            # Pop the id of a deleted connection config.
+            for deleted_conn in set(previous) - existing_conn:
+                previous.pop(deleted_conn, None)
+
+    # -- queries ---------------------------------------------------------
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [conn_record.as_dict() for conn_record in self._conn_records.values()]
+
+    def get(self, connection_id: str) -> ConnectionRecord:
+        with self._lock:
+            record = self._conn_records.get(connection_id)
+        if record is None:
+            raise KeyError(f"no connection with id {connection_id!r}")
+        return record
+
+    def logs(self, connection_id: str, direction: str) -> list[dict[str, Any]]:
+        record = self.get(connection_id)
+        source = record.sent if direction == "sent" else record.received
+        return [entry.as_dict() for entry in source]
+
+    def all_logs(self, direction: str) -> list[dict[str, Any]]:
+        """Every connection's log for one direction, in global order.
+
+        The console is deliberately process-wide: a send and the matching
+        receive are logged against DIFFERENT connections (the sender and the
+        recipient), so a per-connection view can only ever show half of any
+        exchange. Ordered by `seq` -- a single counter shared by every record,
+        which wall-clock timestamps could not be (entries originate on
+        different threads).
+        """
+        with self._lock:
+            conn_records = list(self._conn_records.values())
+        entries = [
+            entry
+            for record in conn_records
+            for entry in (record.sent if direction == "sent" else record.received)
+        ]
+        entries.sort(key=lambda entry: entry.seq)
+        return [entry.as_dict() for entry in entries]
+
+    # -- lifecycle -------------------------------------------------------
+    def create(self, name: str, config: dict[str, Any], autostart: bool = True,
+               connection_id: str | None = None) -> ConnectionRecord:
+        """Build a connection through core's factory and register it here.
+
+        `ConnectionManager.create()` validates the config, imports the
+        `Structures` modules (populating the GLOBAL REGISTRY) and instantiates
+        the protocol class -- all of it raising `ValueError` at this point
+        rather than at first I/O, which is what lets the modal report a bad
+        config inline.
+
+        `connection_id` is only passed by `replace()`, so an edit keeps its
+        identity; see the note there.
+        """
+        connection_id = connection_id or f"conn-{next(self._ids)}"
+        unit = self._manager.create(connection_id, config)
+        record = ConnectionRecord(id=connection_id, name=name, config=config, unit=unit)
+        with self._lock:
+            self._conn_records[connection_id] = record
+
+        self._install_receive_handlers(record)
+        if autostart:
+            self.start(connection_id)
+        else:
+            self._publish_state(record)
+        return record
+
+    def start(self, connection_id: str) -> ConnectionRecord:
+        record = self.get(connection_id)
+        record.unit.start()
+        record.running = True
+        self._publish_state(record)
+        return record
+
+    def stop(self, connection_id: str) -> ConnectionRecord:
+        record = self.get(connection_id)
+        record.unit.close()
+        record.running = False
+        self._publish_state(record)
+        return record
+
+    def delete(self, connection_id: str) -> None:
+        """Close the connection and drop GSim's record. Core's manager keeps
+        its own (now inert) entry -- harmless, because `close()` is idempotent,
+        so its eventual `shutdown_all()` is a no-op on this one."""
+        record = self.get(connection_id)
+        try:
+            record.unit.close()
+        finally:
+            with self._lock:
+                self._conn_records.pop(connection_id, None)
+            self.events.publish({"type": "connection.deleted", "connection_id": connection_id})
+
+    def replace(self, connection_id: str, name: str, config: dict[str, Any]) -> ConnectionRecord:
+        """'Edit' = delete + recreate. `ConnectionConfig` is `frozen=True` by
+        design (a live `Connection` caches state derived from it), so there is
+        no in-place mutation path and none should be invented.
+
+        The id is REUSED across the rebuild. Minting a new one would orphan
+        every reference the caller holds -- most visibly the UI's current
+        selection, which would silently point at a connection that no longer
+        exists, leaving its panels blank until the user clicked elsewhere and
+        back.
+        """
+        was_running = self.get(connection_id).running
+        self.delete(connection_id)
+        return self.create(name, config, autostart=was_running, connection_id=connection_id)
+
+    def shutdown(self) -> None:
+        self._manager.shutdown_all()
+        with self._lock:
+            self._conn_records.clear()
+
+    # -- messaging -------------------------------------------------------
+    def send(self, connection_id: str, unit_name: str, op_code: int,
+             payload: dict[str, Any]) -> dict[str, Any]:
+        """Encode + send, and log it. `payload` is a plain dict: core's
+        `_encode` hands any non-`bytes` to `irs_to_bytes`, which calls
+        `message_class.from_dict()` itself -- so no IRS object is built here."""
+        record = self.get(connection_id)
+        schema = message_registry.message_schema(record.own_unit_code, op_code)
+        record.unit.send_message(payload, op_code, unit_name)
+        entry = self._log(record, "sent", record.name, record.own_unit_code,
+                          op_code, schema["name"], payload, None)
+        return entry.as_dict()
+
+    # -- internals -------------------------------------------------------
+    def _install_receive_handlers(self, record: ConnectionRecord) -> None:
+        """Register one standing callback per (peer, opcode) that peer may send.
+
+        The opcode set comes from the GLOBAL REGISTRY keyed by the PEER's unit
+        code -- the same lookup `parse_irs` performs when decoding -- so every
+        route registered here is one core will accept (`handle_on_receive`
+        eagerly `validate_irs`-es and would raise otherwise).
+
+        `unit_name` is closed over rather than passed by core: callbacks are
+        invoked as `callback(message)` with no route context, and it is exactly
+        the sender's *configured* name the Received log must display.
+        """
+        for unit_name, peer_code in record.peers().items():
+            for summary in message_registry.list_messages(peer_code):
+                op_code = summary["op_code"]
+                record.unit.handle_on_receive(
+                    op_code,
+                    self._make_receive_callback(
+                        record, unit_name, peer_code, op_code, summary["name"]
+                    ),
+                    unit_name=unit_name,
+                )
+
+    def _make_receive_callback(self, record: ConnectionRecord, unit_name: str, peer_code: int,
+                               op_code: int, message_name: str) -> Callable[[Any], None]:
+        def _on_message(message: Any) -> None:
+            # Runs on a core executor thread. Must not raise: core logs and
+            # swallows, but a clean log entry is more useful than a traceback.
+            try:
+                payload = message.to_dict() if hasattr(message, "to_dict") else {"raw": repr(message)}
+                error = None
+            except Exception as exc:  # noqa: BLE001
+                payload, error = None, f"{type(exc).__name__}: {exc}"
+            self._log(record, "received", unit_name, peer_code, op_code, message_name, payload, error)
+        return _on_message
+
+    def _log(self, record: ConnectionRecord, direction: str, unit_name: str, unit_code: int,
+             op_code: int, message_name: str, payload: dict[str, Any] | None,
+             error: str | None) -> LogEntry:
+        entry = LogEntry(
+            seq=next(self._seq),
+            direction=direction,
+            connection_id=record.id,
+            connection_name=record.name,
+            unit_name=unit_name,
+            unit_code=unit_code,
+            op_code=op_code,
+            message_name=message_name,
+            payload=payload,
+            error=error,
+            timestamp=time.time(),
+        )
+        (record.sent if direction == "sent" else record.received).append(entry)
+        self.events.publish({"type": f"message.{direction}", "entry": entry.as_dict()})
+        return entry
+
+    def _publish_state(self, record: ConnectionRecord) -> None:
+        self.events.publish({"type": "connection.state", "connection": record.as_dict()})
+
+
+_runtime: GSimRuntime | None = None
+
+
+def get_runtime() -> GSimRuntime:
+    global _runtime
+    if _runtime is None:
+        _runtime = GSimRuntime()
+    return _runtime

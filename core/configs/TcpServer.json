@@ -1,0 +1,18 @@
+{
+  "protocol": "tcp",
+  "side": "server",
+  "ip": "127.0.0.1",
+  "local_ip": "127.0.0.1",
+  "connections": {
+    "RadarUnit": {
+      "Port": 15000,
+      "unitCode": 1
+    },
+    "TrackerUnit": {
+      "Port": 15001,
+      "unitCode": 2
+    }
+  }
+}
+
+
