@@ -9,18 +9,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import IRS
 from tools.file_functions import read_unit_config
 from tools.general import import_modules
 
 from .base import Connection
 from .composite import CompositeUnit
 from .config import ConnectionConfig, Protocol
+from .handlers import UnitHandler, install_handler
 
 logger = logging.getLogger("connmgr.manager")
 
 ManagedUnit = Connection | CompositeUnit
 #: What `create()` accepts in place of a config: either the JSON dict itself,
-#: or the name of a unit configuration for `tools.file_functions.readUnitConfig`
+#: or the name of a unit configuration for `tools.file_functions.read_unit_config`
 #: to load from config/Units.
 UnitConfigSource = str | dict[str, Any]
 
@@ -35,7 +37,7 @@ class ConnectionManager:
     Concretely, `ConnectionManager` is two things bolted together:
 
     1. A **factory**: `create()` takes a unit configuration name (loaded from
-       config/Units by `tools.file_functions.readUnitConfig`) or a JSON config
+       config/Units by `tools.file_functions.read_unit_config`) or a JSON config
        dict, turns it into a typed `ConnectionConfig`, imports any message
        libraries the config declares, looks up which concrete `Connection`
        subclass implements that config's `protocol` (via the `_registry`
@@ -96,7 +98,7 @@ class ConnectionManager:
         Normalise whatever the caller passed into a raw JSON config dict.
 
         A `str` is a unit configuration NAME, resolved through
-        `tools.file_functions.readUnitConfig` -- that function owns the
+        `tools.file_functions.read_unit_config` -- that function owns the
         config/Units directory layout and the `.json` suffix, so this module
         never builds a config path itself and a change in where unit configs
         live stays a change in one place. A `dict` is taken as an
@@ -112,15 +114,23 @@ class ConnectionManager:
             f"dict, got {type(config).__name__}"
         )
 
-    def create(self, name: str, config: UnitConfigSource) -> Connection:
+    def create(
+        self,
+        name: str,
+        config: UnitConfigSource,
+        handler_class: type[UnitHandler] | None = None,
+    ) -> Connection:
         """
         Build one connection, registered under `name`.
 
         `config` is either a unit configuration name (loaded by
-        `readUnitConfig`) or the JSON dict itself:
+        `read_unit_config`) or the JSON dict itself:
 
             mgr.create("radar", "TcpServer")     # config/Units/TcpServer.json
             mgr.create("radar", {...json...})    # already-loaded config
+
+        `handler_class`, if given, is installed via `handlers.install_handler`
+        before this connection is registered.
         """
         config_json = self._load_config(config)
         connection_config = ConnectionConfig.from_json(config_json)
@@ -131,51 +141,56 @@ class ConnectionManager:
                 f"No connection implementation registered for protocol {connection_config.protocol}"
             )
         connection = impl_cls(connection_config)
+        if handler_class is not None:
+            install_handler(connection, handler_class)
         self._connections[name] = connection
         return connection
 
     @staticmethod
     def _import_config_libs(name: str, config: ConnectionConfig) -> None:
         """
-        Import the message libraries a config declares under `libs_path`, via
+        Import the message libraries a config declares under `structures`, via
         `tools.general.import_modules`.
 
         This is the step that populates `IRS.REGISTRY`: a message module
-        registers its types by *being imported* (`register_message` /
-        `register_pair` run at module level), so `IRS.parse_irs` can only
-        resolve a (unitCode, opCode) pair whose module something has already
-        imported. Doing it here, in the factory, ties it to the one moment
-        every connection passes through and puts it strictly before the
-        connection object exists -- so a link can never come up able to
-        receive messages it has no layouts for.
+        registers its types by *being imported*
 
-            "libs_path": ["messages.radar", "messages.tracker"]
-
-        Absent, it is simply a no-op: a byte-oriented deployment needs no
-        registry at all.
+            "Structures": ["messages.radar", "messages.tracker"]
         """
-        libs_path = config.extra.get("libs_path")
-        if libs_path is None:
+        structures = config.extra.get("Structures")
+        if structures is None:
             return
-        logger.info("connection %s: importing message libraries %s", name, libs_path)
-        import_modules(libs_path)
+        logger.info("connection %s: importing message libraries %s", name, structures)
+        updated_structures = []
+        for structure in structures:
+            cleaned = structure.replace("/", ".").replace("\\", ".")
+            if not cleaned.startswith("IRS.Structures."):
+                cleaned = "IRS.Structures." + cleaned
+            updated_structures.append(cleaned)
+        import_modules(updated_structures)
 
     def create_composite(
-        self, name: str, members: dict[str, UnitConfigSource]
+        self,
+        name: str,
+        members: dict[str, UnitConfigSource],
+        handler_class: type[UnitHandler] | None = None,
     ) -> CompositeUnit:
         """
         `members` maps a short member label -> config, e.g.:
             {"transport": "MulticastSender", "receive": "UdpReciver"}
-            {"transport": multicast_send_only_json, "receive": udp_receive_only_json}
-        Each member is built through the same `create()` factory (so it
-        benefits from the same protocol registry, config loading and library
-        importing) and then wrapped in a CompositeUnit registered under `name`.
+        Each member is built through the same `create()` factory
+        and then wrapped in a CompositeUnit registered under `name`.
+
+        `handler_class`, if given, installs once against the assembled
+        composite.
         """
         built: list[Connection] = []
         for member_name, cfg in members.items():
             sub = self.create(f"{name}.{member_name}", cfg)
             built.append(sub)
         composite = CompositeUnit(name, built)
+        if handler_class is not None:
+            install_handler(composite, handler_class)
         self._connections[name] = composite
         return composite
 

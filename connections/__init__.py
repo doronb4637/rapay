@@ -27,6 +27,7 @@ from .framing import (
 )
 from .base import Connection, ConnectedTarget, IrsMessage, get_event_loop_thread
 from .composite import CompositeUnit
+from .handlers import UnitHandler, route
 from .manager import ConnectionManager
 
 from .tcp import TcpConnection
@@ -53,6 +54,6 @@ __all__ = [
     "pack_message", "unpack_message", "unpack_header",
     "Connection", "get_event_loop_thread",
     "ConnectedTarget", "IrsMessage", "irs_to_bytes", "parse_irs",
-    "CompositeUnit", "ConnectionManager",
+    "CompositeUnit", "UnitHandler", "route", "ConnectionManager",
     "TcpConnection", "UdpConnection", "MulticastConnection", "DdsConnection",
 ]

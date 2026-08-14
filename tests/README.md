@@ -1,0 +1,75 @@
+# `connections` test suite
+
+A `pytest` suite for the `connections` package (`config.py`, `base.py`,
+`handlers.py`, `manager.py`, `composite.py`, `framing.py`, `tcp.py`, `udp.py`),
+independent of `connections/test_framework.py` (that script stays as-is; this
+suite is the pytest-native counterpart, with its own fixtures and its own
+dedicated IRS message range so the two never collide).
+
+## Running
+
+```bash
+python -m pytest
+```
+
+from the repo root (`pytest.ini` sets `pythonpath = .` and `testpaths = tests`,
+so `connections`/`IRS`/`tools`/`annotations` resolve the same way they do for
+`connections/test_framework.py`, without an installed package).
+
+**Run this under Python 3.11, not whatever `python`/3.14 resolves to by
+default in this environment.** Under 3.14, `IRS`'s struct/buffer parsing
+decodes `Text.data` (and friends) as `str` instead of `list[int]`/bytes --
+this breaks `connections/test_framework.py` too, in exactly the same way,
+independent of anything in this suite or in `connections` itself. If a
+`python311`/venv alias isn't already on your PATH:
+
+```bash
+"C:\Users\<you>\AppData\Local\Programs\Python\Python311\python.exe" -m pytest
+```
+
+Skip the slower, real-timing echo tests during iteration:
+
+```bash
+python -m pytest -m "not slow"
+```
+
+DDS is out of scope (optional `rti.connext` dependency, not installed here --
+`connections/__init__.py` already self-disables `DdsConnection` when it's
+missing). True IP multicast is also out of scope: this sandbox's network
+namespace has no multicast routing, the same constraint
+`connections/test_framework.py` documents; `test_composite.py` uses two
+directional UDP links in its place, exactly like that script does.
+
+## Layout
+
+| file | covers |
+| --- | --- |
+| `conftest.py` | `manager` (auto-`shutdown_all()`), `free_port`/`free_ports`, `receive_in_background` |
+| `_messages.py` | This suite's own registered IRS layouts (unit codes 200-219 -- never overlaps `IRS.Structures.Test.test_messages`'s 1-162) |
+| `test_framing.py` | Pure header pack/unpack, no I/O |
+| `test_config.py` | `ConnectionConfig.from_json` validation/coercion, `EchoSettings` resolution -- pure, no event loop |
+| `test_handlers.py` | `route`/`UnitHandler` class-definition-time logic, `install_handler` wiring |
+| `test_manager.py` | `ConnectionManager` factory, lifecycle, `Structures` import normalization |
+| `test_dispatch.py` | Subscribe-or-drop, `handle_on_receive`, `trigger_function`, mutual exclusion, echo consumption, malformed-payload handling |
+| `test_echo.py` | Real periodic-sender/watchdog timing, per-unit hierarchy, isolated per-unit disconnect (marked `slow`) |
+| `test_tcp.py` | Multi-port server, stream reassembly, peer supersession, disconnect |
+| `test_udp.py` | Implicit single-unit, `mode` restriction, peer learning, malformed datagrams |
+| `test_composite.py` | Direction-limited member combination, construction validation, partial-teardown tolerance |
+
+## Fixture design notes
+
+- **`manager`** (function-scoped) always calls `shutdown_all()` on teardown,
+  even if the test raised mid-assertion -- no test can leak a live
+  socket/echo task into the next one, which matters more here than in
+  `test_framework.py`'s manual `try/finally`s because pytest runs the whole
+  suite in one process.
+- **`free_port`/`free_ports`** bind ephemeral sockets to grab real, currently-free
+  OS ports rather than hardcoding numbers -- avoids the whack-a-mole of picking
+  non-colliding literals across dozens of tests.
+- Two connections that both name the same logical peer (e.g. a UDP server and
+  its client, both calling it `"Peer"`) must declare the **same** `unitCode`
+  for that entry -- IRS selects a message layout by that value, not by
+  physical direction, so both ends have to agree on it even though each side
+  also has its own distinct top-level `unitCode` (what it stamps into
+  outgoing headers). Get this wrong and `validate_irs`/`parse_irs` raises
+  `IRSNotFoundError` on whichever side actually tries to decode.

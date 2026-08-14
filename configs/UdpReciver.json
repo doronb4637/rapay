@@ -1,0 +1,12 @@
+{
+  "protocol": "udp",
+  "side": "client",
+  "ip": "127.0.0.1",
+  "local_ip": "127.0.0.1",
+  "connections": {
+    "PingServer": {
+      "ports": 16000,
+      "unitCode": 12
+    }
+  }
+}

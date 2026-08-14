@@ -16,6 +16,7 @@ connection_framework/
   multicast.py    MulticastConnection (direction derived from config.side)
   dds.py          DdsConnection (RTI Connext; native payloads, no framing)
   composite.py    CompositeUnit -- combines direction-limited connections into one Unit
+  handlers.py     BaseUnitHandler/route -- class-based sugar over handle_on_receive
   manager.py      ConnectionManager -- factory + centralized absolute-shutdown
 ```
 
@@ -34,7 +35,7 @@ project's generic helpers do not, and are imported from their own packages:
   unit code in `config._as_unit_code`; `import_modules` loads a config's
   `libs_path` message libraries in `ConnectionManager`, which is what
   populates `IRS.REGISTRY` before any connection exists to use it.
-- **`tools.file_functions.readUnitConfig`** -- turns a unit configuration
+- **`tools.file_functions.read_unit_config`** -- turns a unit configuration
   *name* into its JSON, so `mgr.create("radar", "TcpServer")` reads
   `config/Units/TcpServer.json` and this package never builds a config path
   itself.
@@ -288,6 +289,45 @@ than the number of configured units -- raise `ValueError` immediately, in the
 caller's own thread, rather than becoming a wait that quietly expires.
 `CompositeUnit` forwards the call to each member in turn against one shared
 deadline, so a composite is "connected" only once both of its directions are.
+
+## 5d. Class-based handlers (`BaseUnitHandler`)
+
+`handlers.py` is declarative sugar over §5b: instead of calling
+`handle_on_receive()` by hand for every opcode a unit answers, subclass
+`BaseUnitHandler`, set `unitCode` to the *peer's* configured code (§3's
+"theirs" code), and tag each handling method with `@route(opCode=...)`:
+
+```python
+class TestHandler(BaseUnitHandler):
+    unitCode = 0x01
+
+    @route(opCode=0xFFFF)
+    def handle_message(self, message):
+        self.unitConnection.send_message(reply, REPLY_OPCODE)
+
+manager.create("unit_name", config_data, handler_class=TestHandler)
+```
+
+`@route` just tags the method with its opcode; `BaseUnitHandler.__init_subclass__`
+builds the real `dict[opcode, method_name]` once, at class-definition time, by
+walking the MRO -- so a subclass overriding and re-tagging a route method
+replaces it, and two methods claiming the same opcode is a `TypeError` right
+there, before any config is involved.
+
+`ConnectionManager.create(..., handler_class=...)` /
+`create_composite(..., handler_class=...)` install the handler immediately
+after building the `Connection`/`CompositeUnit`, before it's registered with
+the manager, so a bad `unitCode` or route fails atomically like any other
+load-time config error.
+
+The one thing worth knowing: installing a class handler does **nothing but**
+call `unit.handle_on_receive(opcode, bound_method, unit_name=...)` once per
+route -- an ordinary §5b callback, not a new dispatch path. It gets every
+existing rule for free: mutual exclusion with a live `receive_message()` on
+the same route, executor-thread execution (so a route method calls
+`self.unitConnection.send_message(...)` synchronously, no `async`/`await`),
+eager `validate_irs()`, and exceptions logged and swallowed rather than
+killing the read loop.
 
 ## 6. The echo lifecycle
 
@@ -583,6 +623,14 @@ shared profile.
   on a repeat call for the same route, and confirmed silence after stopping.
 - One subscriber per route: a second concurrent `receive_message()` for the
   same `(unit_code, opcode)` is rejected with `RuntimeError`.
+- Class-based handlers (`BaseUnitHandler`/`@route`): `ConnectionManager.create(...,
+  handler_class=...)` installs a class's routed methods as ordinary
+  `handle_on_receive` callbacks and answers a request end-to-end; a
+  class-routed opcode refuses a competing `receive_message()` exactly like a
+  hand-registered callback would, while an unrelated opcode on the same
+  connection is unaffected; a `handler_class.unitCode` matching no configured
+  unit fails `create()` atomically, before the connection is registered with
+  the manager.
 - Hierarchical echo config: per-unit opcodes override the connection-level
   ones, units without any inherit them, `null` opts a unit out, and the
   timing keys stay shared through all of it; a unit's opcode keys replace the

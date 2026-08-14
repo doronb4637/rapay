@@ -21,6 +21,7 @@ sys.path.insert(0, ".")
 
 from connections.config import ConnectionConfig
 from connections.framing import unpack_header
+from connections.handlers import UnitHandler, route
 from connections.manager import ConnectionManager
 
 # receive_message() refuses routes IRS doesn't know, so the layouts have to be
@@ -605,6 +606,104 @@ def test_single_subscription_per_route():
     print("Subscription connections fully torn down")
 
 
+def test_class_handler_routes_message():
+    print("\n=== handler_class installs @route methods via handle_on_receive ===")
+    REQUEST_OPCODE, REPLY_OPCODE = 30, 31  # registered for unitCode 61 (see test_messages.TEXT_ROUTES)
+    mgr = ConnectionManager()
+
+    class EchoBackHandler(UnitHandler):
+        unitCode = 61  # RouteUnit's code, as seen from the responder's config
+
+        @route(opCode=REQUEST_OPCODE)
+        def handle_request(self, message):
+            self.unitConnection.send_message(
+                b"re:" + bytes(message.data), REPLY_OPCODE, unit_name="RouteUnit"
+            )
+
+    responder = mgr.create("class_handler_responder", {
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"RouteUnit": {"port": 25000, "unitCode": 61}},
+    }, handler_class=EchoBackHandler)
+    asker = mgr.create("class_handler_asker", {
+        "protocol": "udp", "unitCode": 111, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"RouteUnit": {"port": 25000, "unitCode": 61}},
+    })
+    mgr.start_all()
+
+    unit, payload = _received(asker.receive_message(
+        REPLY_OPCODE,
+        timeout=3,
+        trigger_function=lambda: asker.send_message(b"ping", REQUEST_OPCODE),
+    ))
+    assert payload == b"re:ping", payload
+    print(f"class-routed handler answered: {payload!r}")
+
+    mgr.shutdown_all()
+    print("Class-handler connections fully torn down")
+
+
+def test_class_handler_route_exclusive_with_subscription():
+    print("\n=== A class-installed route occupies its slot like an ordinary callback ===")
+    ROUTE_OPCODE, OTHER_OPCODE = 30, 31  # registered for unitCode 61
+    mgr = ConnectionManager()
+
+    class NoopHandler(UnitHandler):
+        unitCode = 61
+
+        @route(opCode=ROUTE_OPCODE)
+        def handle_message(self, message):
+            pass
+
+    server = mgr.create("class_handler_exclusive", {
+        "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"RouteUnit": {"port": 25100, "unitCode": 61}},
+    }, handler_class=NoopHandler)
+
+    try:
+        server.receive_message(ROUTE_OPCODE, unitName="RouteUnit", timeout=1)
+        raise AssertionError("a route already claimed by a class handler should be refused")
+    except RuntimeError as exc:
+        print(f"confirmed: class-routed opcode refuses a second subscriber ({exc})")
+
+    try:
+        server.receive_message(OTHER_OPCODE, unitName="RouteUnit", timeout=0.5)
+        raise AssertionError("nothing was sent on OTHER_OPCODE; this should time out, not error")
+    except asyncio.TimeoutError:
+        print("confirmed: an unrelated opcode on the same connection is unaffected")
+
+    mgr.shutdown_all()
+    print("Class-handler-exclusivity connections fully torn down")
+
+
+def test_class_handler_unknown_unit_code_raises():
+    print("\n=== handler_class.unitCode with no matching configured unit fails atomically ===")
+    mgr = ConnectionManager()
+
+    class OrphanHandler(UnitHandler):
+        unitCode = 0xFE  # no configured connection ever uses this code
+
+        @route(opCode=30)
+        def handle_message(self, message):
+            pass
+
+    try:
+        mgr.create("orphan_handler_conn", {
+            "protocol": "udp", "unitCode": 110, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+            "connections": {"RouteUnit": {"port": 25200, "unitCode": 61}},
+        }, handler_class=OrphanHandler)
+        raise AssertionError("an unmatched handler unitCode should be rejected")
+    except ValueError as exc:
+        print(f"confirmed: unmatched handler unitCode refused ({exc})")
+
+    try:
+        mgr.get("orphan_handler_conn")
+        raise AssertionError("a connection that failed handler installation should not be registered")
+    except KeyError:
+        print("confirmed: the failed connection was never registered with the manager")
+
+    mgr.shutdown_all()
+
+
 class _WarningTrap(logging.Handler):
     """Collects framework warnings so a test can assert on what was NOT logged."""
 
@@ -1059,4 +1158,7 @@ if __name__ == "__main__":
     test_irs_parser_roundtrip()
     test_periodic_sending()
     test_single_subscription_per_route()
+    test_class_handler_routes_message()
+    test_class_handler_route_exclusive_with_subscription()
+    test_class_handler_unknown_unit_code_raises()
     print("\nALL TESTS PASSED")

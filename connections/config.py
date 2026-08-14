@@ -24,8 +24,9 @@ There are two kinds of unit code here, and the distinction is the whole point:
     wire. It is REQUIRED, and it is the value stamped into every message this
     connection sends, so a peer can tell who sent it.
   * Each `"connections"[name]["unitCode"]` is THEIR code -- the remote unit's
-    identity. It keys the routing tables and is the code handed to the parser
-    when decoding what that unit sent us.
+    identity. It is REQUIRED for every connection (no default/derived value),
+    and it keys the routing tables and is the code handed to the parser when
+    decoding what that unit sent us.
 
 `"connections"` is the single source of truth for unit routing: it maps each
 connection name (the logical unit) to the port it lives on and the numeric
@@ -56,20 +57,33 @@ DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0
 
 #: Every json key defined
+PROTOCOL_KEY = "protocol"
+SIDE_KEY = "side"
+IP_KEY = "ip"
+CONNECTIONS_KEY = "connections"
+PORT_KEY = "port"
 UNIT_CODE_KEYS = ("UnitCode", "unitCode", "unit_code")
 LOCAL_IP_KEYS = ("local_ip", "localIp")
 
+#: The symmetric "one opcode, both directions" spelling ONLY -- kept distinct
+#: from ALL_ECHO_OPCODE_KEYS below. `from_extra` looks up `shared` through
+#: this tuple specifically; using the union here would let a lone
+#: recv_echo_opcode/send_echo_opcode get misread as the shared value and leak
+#: into the direction that was never actually configured.
 ECHO_OPCODE_KEYS = ("echo_opcode", "EchoOpcode", "echoOpcode")
 RECV_ECHO_OPCODE_KEYS = ("recv_echo_opcode", "RecvEchoOpcode", "recvEchoOpcode")
 SEND_ECHO_OPCODE_KEYS = ("send_echo_opcode", "SendEchoOpcode", "sendEchoOpcode")
-ECHO_OPCODE_KEYS: tuple[str, ...] = (*ECHO_OPCODE_KEYS, *RECV_ECHO_OPCODE_KEYS, *SEND_ECHO_OPCODE_KEYS)
+#: All three opcode-key families combined -- for the places that mean "any
+#: spelling of any opcode key", e.g. `resolve()`'s "the opcode keys resolve as
+#: a group" check. NOT a substitute for ECHO_OPCODE_KEYS above.
+ALL_ECHO_OPCODE_KEYS: tuple[str, ...] = (*ECHO_OPCODE_KEYS, *RECV_ECHO_OPCODE_KEYS, *SEND_ECHO_OPCODE_KEYS)
 
 ECHO_INTERVAL_KEYS = ("echo_interval", "EchoInterval", "echoInterval")
 ECHO_TIMEOUT_KEYS = ("echo_timeout", "EchoTimeout", "echoTimeout")
 ECHO_PAYLOAD_KEYS = ("echo_payload", "EchoPayload", "echoPayload")
 ECHO_TUNING_KEYS: tuple[str, ...] = (*ECHO_INTERVAL_KEYS, *ECHO_TIMEOUT_KEYS, *ECHO_PAYLOAD_KEYS)
 
-ECHO_KEYS: frozenset[str] = frozenset(ECHO_OPCODE_KEYS + ECHO_TUNING_KEYS)
+ECHO_KEYS: frozenset[str] = frozenset(ALL_ECHO_OPCODE_KEYS + ECHO_TUNING_KEYS)
 
 
 class Protocol(str, Enum):
@@ -222,8 +236,8 @@ class EchoSettings:
         To configure a unit to not have echo just define it's echo as 'null' value in the json config.
         """
         merged = {key: value for key, value in global_extra.items() if key in ECHO_KEYS}
-        if any(unit_spec.get(key) is not None for key in ECHO_OPCODE_KEYS):
-            for key in ECHO_OPCODE_KEYS:
+        if any(unit_spec.get(key) is not None for key in ALL_ECHO_OPCODE_KEYS):
+            for key in ALL_ECHO_OPCODE_KEYS:
                 merged.pop(key, None)
         merged.update({k: v for k, v in unit_spec.items() if k in ECHO_KEYS})
         return cls.from_extra(merged)
@@ -279,26 +293,27 @@ class ConnectionConfig:
         if own_unitCode_raw is None:
             raise ValueError("config['unitCode'] is required: it is this connection's OWN unit code")
         own_unit_code = _as_unit_code(own_unitCode_raw, "unitCode")
-        connections_raw = data.get("connections")
+        connections_raw = data.get(CONNECTIONS_KEY)
         if not connections_raw:
             raise ValueError(
-                "config['connections'] is required and must map every connection name to {'port': int, 'unitCode': int}")
-        required_keys = {"protocol", "side", "ip", *LOCAL_IP_KEYS, "connections", *UNIT_CODE_KEYS}
+                f"config[{CONNECTIONS_KEY!r}] is required and must map every connection name to "
+                f"{{{PORT_KEY!r}: int, 'unitCode': int}}")
+        required_keys = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY, *UNIT_CODE_KEYS}
         extra = {key: value for key, value in data.items() if key not in required_keys}
         connections: dict[str, UnitEndpoint] = {}
         code_owner: dict[UnitCode, str] = {}
         for name, spec in connections_raw.items():
-            if not isinstance(spec, dict) or "port" not in spec or all(unitCode_key not in spec for unitCode_key in UNIT_CODE_KEYS):
+            if not isinstance(spec, dict) or PORT_KEY not in spec or all(unitCode_key not in spec for unitCode_key in UNIT_CODE_KEYS):
                 raise ValueError(
-                    f"config['connections'][{name!r}] must be an object with at least a 'port' key, got {spec!r}")
+                    f"config['connections'][{name!r}] must be an object with at least a {PORT_KEY!r} key, got {spec!r}")
             try:
-                port = int(spec["port"])
+                port = int(spec[PORT_KEY])
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"config['connections'][{name!r}]['port'] must be an integer, got {spec['port']!r}") from exc
+                    f"config['connections'][{name!r}][{PORT_KEY!r}] must be an integer, got {spec[PORT_KEY]!r}") from exc
             if not 0 <= port <= 0xFFFF:
                 raise ValueError(
-                    f"config['connections'][{name!r}]['port'] = {port} is not a valid port\n[*] Has to be between 0 - 65,535.")
+                    f"config['connections'][{name!r}][{PORT_KEY!r}] = {port} is not a valid port\n[*] Has to be between 0 - 65,535.")
             raw_unitCode = _lookup(spec, *UNIT_CODE_KEYS)
             unitCode = _as_unit_code(raw_unitCode, f"connections[{name!r}]['unitCode']")
             if unitCode in code_owner:
@@ -313,10 +328,10 @@ class ConnectionConfig:
             connections[name] = UnitEndpoint(port=port, unitCode=unitCode, echo=echo)
 
         config = cls(
-            protocol=Protocol(str(data["protocol"]).lower()),
-            side=Side(str(data["side"]).lower()),
-            ip=data["ip"],
-            local_ip=data.get("local_ip", "0.0.0.0"),
+            protocol=Protocol(str(data[PROTOCOL_KEY]).lower()),
+            side=Side(str(data[SIDE_KEY]).lower()),
+            ip=data[IP_KEY],
+            local_ip=_lookup(data, *LOCAL_IP_KEYS) or "0.0.0.0",
             unitCode=own_unit_code,
             connections=connections,
             extra=extra,
