@@ -4,10 +4,12 @@ time (`register_message` runs at module scope -- importing this module *is*
 the registration, same convention as `IRS.Structures.Test.test_messages`
 which `connections/test_framework.py` uses).
 
-Kept in its own unit-code/opcode range (200-219) so this suite can never
-collide with `IRS.Structures.Test.test_messages`'s range (1-162) if both
-ever get imported into the same process -- `IRS.REGISTRY.MESSAGE_REGISTRY`
-is a single global dict for the whole interpreter.
+Collision with `IRS.Structures.Test.test_messages` is prevented by the
+registry itself: layouts are keyed by the module that registered them, so
+this file's live under `tests._messages` and are reachable only by a lookup
+scoped there (or by an unscoped one, which raises if two modules genuinely
+disagree about a route). The distinct unit-code/opcode range (200-219 here,
+1-162 there) is now just tidiness, not the mechanism.
 
 Deliberately NOT `from __future__ import annotations`: `IRS.core.MessageMeta`
 reads `__annotations__` at class-body execution time and hands the real type

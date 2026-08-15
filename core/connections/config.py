@@ -10,8 +10,10 @@ Example JSON (a TCP server multiplexing two units over two ports):
   "local_ip": "127.0.0.1",
   "unitCode": 1,
   "connections": {
-    "RadarUnit":   {"port": 2000, "unitCode": 7, "echo_opcode": 10},
-    "TrackerUnit": {"port": 2001, "unitCode": 8}
+    "RadarUnit":   {"port": 2000, "unitCode": 7, "echo_opcode": 10,
+                    "Structures": ["Radar.radar_link"]},
+    "TrackerUnit": {"port": 2001, "unitCode": 8,
+                    "Structures": ["Tracker.tracker_link"]}
   },
   "echo_opcode": 99,
   "EchoInterval": 1.0,
@@ -43,6 +45,14 @@ an individual unit's dict (that unit's override). `EchoSettings.resolve()`
 merges the two, so in the example above RadarUnit heartbeats on opcode 10
 while TrackerUnit falls back to the connection-wide 99 -- both at the shared
 1.0s/5.0s timings.
+
+`Structures` is hierarchical in the same shape but with a stricter rule, because
+a structures file defines the IRS for ONE link (see connections/CLAUDE.md 2b):
+each unit names its own, and a connection-level list is only accepted when
+there is exactly one unit to apply it to -- or on multicast, where one sender
+genuinely does fan out to many receivers over a single shared IRS. Anything
+else is a load-time ValueError, since applying one list to several links is
+what let two files silently overwrite each other's layouts.
 """
 from __future__ import annotations
 
@@ -50,7 +60,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from tools.general import validated_opCode, validated_unitCode
+from tools.general import resolve_module_name, validated_opCode, validated_unitCode
 from annotations import *
 
 DEFAULT_ECHO_INTERVAL: float = 1.0
@@ -64,6 +74,10 @@ CONNECTIONS_KEY = "connections"
 PORT_KEY = "port"
 UNIT_CODE_KEYS = ("UnitCode", "unitCode", "unit_code")
 LOCAL_IP_KEYS = ("local_ip", "localIp")
+#: The IRS message layouts a link uses. Accepted at BOTH levels -- inside a
+#: unit's dict in `connections` (that link's own), and at the connection level,
+#: which is only legal when there is one link to be had (see `from_json`).
+STRUCTURES_KEYS = ("Structures", "structures")
 
 #: The symmetric "one opcode, both directions" spelling ONLY -- kept distinct
 #: from ALL_ECHO_OPCODE_KEYS below. `from_extra` looks up `shared` through
@@ -243,6 +257,47 @@ class EchoSettings:
         return cls.from_extra(merged)
 
 
+def _structures_from(source: Mapping[str, Any], field_name: str) -> tuple[str, ...] | None:
+    """The raw `Structures` list written at ONE config level, or None if absent.
+
+    A bare string is accepted as a one-element list, since `import_modules`
+    already takes that spelling. An explicit empty list is NOT None -- it means
+    "this level says: none", and overrides a connection-level default.
+    """
+    value = _lookup(source, *STRUCTURES_KEYS)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"config['{field_name}'] must be a list of IRS structures modules, got {value!r}")
+    cleaned = tuple(str(entry).strip() for entry in value if str(entry).strip())
+    return cleaned
+
+
+def resolve_structures(unit_spec: Mapping[str, Any],
+                       global_extra: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[Namespace, ...]]:
+    """
+    The structures ONE unit runs on: its own list if it declared one, the
+    connection-level list otherwise.
+
+    Resolves as a GROUP, not element-wise -- the same call `EchoSettings.resolve`
+    makes for its opcode keys, and for the same reason. A unit naming any
+    structures file is describing its whole link; half-inheriting a
+    connection-level module would scope it to a layout set neither peer
+    configured.
+
+    Returns `(raw spellings, resolved namespaces)`. Both are kept because a
+    filesystem path cannot be recovered from a namespace, and re-deriving the
+    namespace at every lookup is exactly the drift this design avoids.
+    """
+    raw = _structures_from(unit_spec, "connections[...]['Structures']")
+    if raw is None:
+        raw = _structures_from(global_extra, "Structures") or ()
+    return raw, tuple(resolve_module_name(entry) for entry in raw)
+
+
 @dataclass(frozen=True, slots=True)
 class UnitEndpoint:
     """
@@ -256,11 +311,20 @@ class UnitEndpoint:
 
     `echo` is this unit's OWN settings, already merged against the
     connection-level block by `EchoSettings.resolve` resolves at load time.
+
+    `structures` is this LINK's IRS layouts, resolved to module namespaces --
+    what scopes every encode/decode/validate for this unit. Empty means
+    unscoped: every registered module is searched, which is what a byte-oriented
+    unit (and every config written before per-link structures existed) gets.
+    `structures_raw` keeps the spellings as configured, because that is what
+    `ConnectionManager` hands to `import_modules`.
     """
 
     port: int
     unitCode: UnitCode
     echo: EchoSettings = field(default_factory=EchoSettings)
+    structures_raw: tuple[str, ...] = ()
+    structures: tuple[Namespace, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +364,12 @@ class ConnectionConfig:
                 f"{{{PORT_KEY!r}: int, 'unitCode': int}}")
         required_keys = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY, *UNIT_CODE_KEYS}
         extra = {key: value for key, value in data.items() if key not in required_keys}
+        # Parsed up here rather than at construction: the Structures rule below
+        # has to know the protocol to exempt multicast, and to name it if it
+        # rejects the config.
+        protocol = Protocol(str(data[PROTOCOL_KEY]).lower())
+        side = Side(str(data[SIDE_KEY]).lower())
+        connection_structures = _structures_from(extra, "Structures")
         connections: dict[str, UnitEndpoint] = {}
         code_owner: dict[UnitCode, str] = {}
         for name, spec in connections_raw.items():
@@ -323,21 +393,40 @@ class ConnectionConfig:
             # Per-unit echo wins, connection-level `extra` is the fallback.
             try:
                 echo = EchoSettings.resolve(spec, extra)
+                structures_raw, structures = resolve_structures(spec, extra)
             except ValueError as exc:
                 raise ValueError(f"config['connections'][{name!r}]: {exc}") from exc
-            connections[name] = UnitEndpoint(port=port, unitCode=unitCode, echo=echo)
+            connections[name] = UnitEndpoint(port=port, unitCode=unitCode, echo=echo,
+                                             structures_raw=structures_raw, structures=structures)
+
+        # A structures file defines ONE link, so a connection-level list is only
+        # meaningful when there is one link. With several units it would scope
+        # every one of them to the same namespace -- which is precisely how two
+        # files that share an opcode used to erase each other. Multicast is the
+        # sole exception: one sender fans out to many receivers over one IRS.
+        if connection_structures and len(connections) > 1 and protocol is not Protocol.MULTICAST:
+            raise ValueError(
+                f"config['Structures'] is a connection-level default and is only legal when the "
+                f"connection has exactly one unit; this {protocol.value} connection has "
+                f"{len(connections)} ({sorted(connections)}).\n"
+                f"[*] A structures file defines ONE server<->client link, so every unit here must "
+                f"declare its own 'Structures' inside its connections[<name>] entry.\n"
+                f"[*] Multicast is the sole exception: one sender fans out to many receivers over "
+                f"a single shared IRS.")
 
         config = cls(
-            protocol=Protocol(str(data[PROTOCOL_KEY]).lower()),
-            side=Side(str(data[SIDE_KEY]).lower()),
+            protocol=protocol,
+            side=side,
             ip=data[IP_KEY],
             local_ip=_lookup(data, *LOCAL_IP_KEYS) or "0.0.0.0",
             unitCode=own_unit_code,
             connections=connections,
             extra=extra,
         )
-        # Parse the echo block at load-time.
+        # Parse the echo and structures blocks at load-time, so a malformed key
+        # is a load failure rather than a link that silently misbehaves later.
         config.echo
+        config.structures
         return config
 
     # ------------------------------------------------------------------ #
@@ -374,6 +463,10 @@ class ConnectionConfig:
         """The echo settings for `unit_name`."""
         return self.endpoint_for(unit_name).echo
 
+    def structures_for(self, unit_name: str) -> tuple[Namespace, ...]:
+        """The IRS structures namespaces scoping this link. Empty == unscoped."""
+        return self.endpoint_for(unit_name).structures
+
     @property
     def unit_codes(self) -> dict[str, int]:
         """returns {unit name: unit code}, for callers that want the whole mapping."""
@@ -403,3 +496,30 @@ class ConnectionConfig:
         """unit name -> resolved echo settings, for callers that want the
         whole mapping (`base.Connection` caches exactly this at construction)."""
         return {name: endpoint.echo for name, endpoint in self.connections.items()}
+
+    @property
+    def structures(self) -> tuple[Namespace, ...]:
+        """This connection's own `Structures` block, resolved -- the fallback
+        for a unit the config never gave one. Recomputed per access rather than
+        cached, same as `echo`: `slots=True` leaves no instance `__dict__`."""
+        raw = _structures_from(self.extra, "Structures") or ()
+        return tuple(resolve_module_name(entry) for entry in raw)
+
+    @property
+    def unit_structures(self) -> dict[str, tuple[Namespace, ...]]:
+        """unit name -> resolved structures namespaces (`base.Connection`
+        caches exactly this at construction)."""
+        return {name: endpoint.structures for name, endpoint in self.connections.items()}
+
+    @property
+    def all_structures_raw(self) -> tuple[str, ...]:
+        """Every structures spelling this config references -- connection-level
+        plus every per-unit list -- de-duplicated in declaration order. This is
+        what `ConnectionManager` imports, so a per-unit list is never missed."""
+        seen: dict[str, None] = {}
+        for entry in _structures_from(self.extra, "Structures") or ():
+            seen[entry] = None
+        for endpoint in self.connections.values():
+            for entry in endpoint.structures_raw:
+                seen[entry] = None
+        return tuple(seen)

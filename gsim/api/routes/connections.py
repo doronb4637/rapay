@@ -40,7 +40,7 @@ def create_connection(request: ConnectionCreate) -> dict[str, Any]:
          dict, with `Structures` and any echo keys alongside.
       3. `runtime.create()` hands that dict to `ConnectionManager.create()`,
          which validates it (`ConnectionConfig.from_json`), imports the
-         `Structures` modules so the GLOBAL REGISTRY is populated *before* the
+         `Structures` modules (each under its own namespace) so the registry is populated *before* the
          connection object exists, and instantiates the protocol class.
       4. Receive handlers are registered per (peer, opcode) and, if requested,
          the connection is started.
@@ -61,6 +61,12 @@ def create_connection(request: ConnectionCreate) -> dict[str, Any]:
             status.HTTP_400_BAD_REQUEST,
             detail=f"structures module not found: {exc.name}",
         ) from exc
+    except ImportError as exc:
+        # A structures file that exists but blew up while executing. It is
+        # arbitrary user code -- and since it can be picked from a file dialog,
+        # often code nothing has imported before -- so the reason belongs in
+        # the modal, not in a 500 the user cannot see.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except OSError as exc:
         # autostart=True and the port is taken / address unusable.
         raise HTTPException(
@@ -86,6 +92,20 @@ def update_connection(connection_id: str, request: ConnectionUpdate) -> dict[str
         record = get_runtime().replace(connection_id, request.name, request.to_core_config())
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"structures module not found: {exc.name}",
+        ) from exc
+    except ImportError as exc:
+        # Same reasoning as create: a structures file is user code and its
+        # failure belongs in the modal (see create_connection).
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"could not reopen the connection: {exc}",
+        ) from exc
     return record.as_dict()
 
 

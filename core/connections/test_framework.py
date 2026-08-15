@@ -888,14 +888,15 @@ def test_own_unit_code():
 
 
 #: Where the IRS message layouts for the test below live. Named by the configs
-#: under "libs_path", so ConnectionManager.create() is what imports it -- and
-#: importing it is what runs its register_message() calls.
+#: under "Structures", so ConnectionManager.create() is what imports it -- and
+#: importing it is what runs its register_message() calls, under this module
+#: name as their namespace.
 IRS_MESSAGE_LIB = "IRS.Structures.Test.test_messages"
 
 
 def _track_report(track_id, kind, heading):
     """Build one IRS TrackReport. Imported lazily, because the whole point of
-    the test below is that the layouts arrive via the config's libs_path."""
+    the test below is that the layouts arrive via the config's Structures."""
     from IRS.Structures.Test.test_messages import E_TrackKind, TrackReport
     message = TrackReport()
     message.trackId = track_id
@@ -911,12 +912,12 @@ def test_irs_parser_roundtrip():
     # both on this one opcode.
     OPCODE = 60
     SERVER_CODE, CLIENT_CODE = 22, 21
-    from IRS.REGISTRY import MESSAGE_REGISTRY
+    from IRS.REGISTRY import messages_in
 
     mgr = ConnectionManager()
     try:
         common = {"protocol": "udp", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-                  "libs_path": IRS_MESSAGE_LIB}
+                  "Structures": [IRS_MESSAGE_LIB]}
         # Each side declares its own code, and names the other's under the
         # unit it talks to -- so "ours" and "theirs" are genuinely different.
         server = mgr.create("irs_server", {
@@ -926,11 +927,13 @@ def test_irs_parser_roundtrip():
             **common, "side": "client", "unitCode": CLIENT_CODE,
             "connections": {"Peer": {"port": 19200, "unitCode": SERVER_CODE}}})
 
-        # create() imports libs_path, so register_message() has run before
-        # either connection can receive anything.
-        assert MESSAGE_REGISTRY[CLIENT_CODE][OPCODE].__name__ == "TrackReport", MESSAGE_REGISTRY
-        assert MESSAGE_REGISTRY[SERVER_CODE][OPCODE].__name__ == "TrackAck", MESSAGE_REGISTRY
-        print(f"libs_path registered both layouts on opcode {OPCODE}: "
+        # create() imports the config's Structures, so register_message() has
+        # run before either connection can receive anything. Both layouts live
+        # in that module's namespace -- one file, one link, both directions.
+        registered = messages_in(IRS_MESSAGE_LIB)
+        assert registered[CLIENT_CODE][OPCODE].__name__ == "TrackReport", registered
+        assert registered[SERVER_CODE][OPCODE].__name__ == "TrackAck", registered
+        print(f"Structures registered both layouts on opcode {OPCODE}: "
               f"unit {CLIENT_CODE}=TrackReport, unit {SERVER_CODE}=TrackAck")
 
         from IRS.Structures.Test.test_messages import E_TrackKind, TrackAck, TrackReport

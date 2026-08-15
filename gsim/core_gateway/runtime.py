@@ -56,6 +56,11 @@ class LogEntry:
     payload: dict[str, Any] | None
     error: str | None
     timestamp: float
+    #: Which structures module this entry's layout came from. Carried so the
+    #: Inspector can re-fetch the schema for the SAME layout it was decoded
+    #: with -- (unit_code, op_code) alone is ambiguous once two modules define
+    #: it, which is the whole reason namespaces exist.
+    namespace: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +70,7 @@ class LogEntry:
             "connection_name": self.connection_name,
             "unit_name": self.unit_name,
             "unit_code": self.unit_code,
+            "namespace": self.namespace,
             "op_code": self.op_code,
             "op_code_hex": f"0x{self.op_code:04X}",
             "message_name": self.message_name,
@@ -124,6 +130,26 @@ class ConnectionRecord:
         lets a received message be labelled with the SENDER's defined name."""
         connections = self.config.get("connections", {})
         return {name: connected_unit["unitCode"] for name, connected_unit in connections.items()}
+
+    def structures_for(self, unit_name: str) -> list[str]:
+        """The IRS structures namespaces scoping ONE link's layouts.
+
+        Read from core's PARSED config rather than re-derived from the raw dict:
+        a structures spelling ("Test.messages", or a file path) is normalised to
+        a module name by `tools.general.resolve_module_name`, and GSim resolving
+        it a second time is exactly how the two would eventually disagree about
+        which module a link uses.
+
+        Empty means unscoped -- every registered module is searched, which is
+        what a connection with no `Structures` gets.
+        """
+        config = getattr(self.unit, "config", None)
+        if config is None:            # CompositeUnit has no config of its own
+            return []
+        try:
+            return list(config.structures_for(unit_name))
+        except ValueError:            # unit_name not configured on this connection
+            return []
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -239,7 +265,7 @@ class GSimRuntime:
         """Build a connection through core's factory and register it here.
 
         `ConnectionManager.create()` validates the config, imports the
-        `Structures` modules (populating the GLOBAL REGISTRY) and instantiates
+        `Structures` modules (each populating its own namespace) and instantiates
         the protocol class -- all of it raising `ValueError` at this point
         rather than at first I/O, which is what lets the modal report a bad
         config inline.
@@ -313,38 +339,48 @@ class GSimRuntime:
         `_encode` hands any non-`bytes` to `irs_to_bytes`, which calls
         `message_class.from_dict()` itself -- so no IRS object is built here."""
         record = self.get(connection_id)
-        schema = message_registry.message_schema(record.own_unit_code, op_code)
+        # Scoped by the DESTINATION: our own unit code is the same for every
+        # peer, so it alone cannot say which link's layout this opcode means.
+        structures = record.structures_for(unit_name)
+        schema = message_registry.message_schema(record.own_unit_code, op_code, structures)
         record.unit.send_message(payload, op_code, unit_name)
         entry = self._log(record, "sent", record.name, record.own_unit_code,
-                          op_code, schema["name"], payload, None)
+                          op_code, schema["name"], payload, None,
+                          namespace=schema.get("namespace"))
         return entry.as_dict()
 
     # -- internals -------------------------------------------------------
     def _install_receive_handlers(self, record: ConnectionRecord) -> None:
         """Register one standing callback per (peer, opcode) that peer may send.
 
-        The opcode set comes from the GLOBAL REGISTRY keyed by the PEER's unit
-        code -- the same lookup `parse_irs` performs when decoding -- so every
-        route registered here is one core will accept (`handle_on_receive`
-        eagerly `validate_irs`-es and would raise otherwise).
+        The opcode set comes from the registry keyed by the PEER's unit code and
+        scoped to THAT PEER's structures modules -- the same lookup `parse_irs`
+        performs when decoding -- so every route registered here is one core will
+        accept (`handle_on_receive` eagerly `validate_irs`-es and would raise
+        otherwise). Scoping matters beyond correctness of the layout: unscoped,
+        this registered every opcode any module had ever assigned to that unit
+        code, on every peer that happened to share it.
 
         `unit_name` is closed over rather than passed by core: callbacks are
         invoked as `callback(message)` with no route context, and it is exactly
         the sender's *configured* name the Received log must display.
         """
         for unit_name, peer_code in record.peers().items():
-            for summary in message_registry.list_messages(peer_code):
+            structures = record.structures_for(unit_name)
+            for summary in message_registry.list_messages(peer_code, structures):
                 op_code = summary["op_code"]
                 record.unit.handle_on_receive(
                     op_code,
                     self._make_receive_callback(
-                        record, unit_name, peer_code, op_code, summary["name"]
+                        record, unit_name, peer_code, op_code, summary["name"],
+                        summary.get("namespace"),
                     ),
                     unit_name=unit_name,
                 )
 
     def _make_receive_callback(self, record: ConnectionRecord, unit_name: str, peer_code: int,
-                               op_code: int, message_name: str) -> Callable[[Any], None]:
+                               op_code: int, message_name: str,
+                               namespace: str | None = None) -> Callable[[Any], None]:
         def _on_message(message: Any) -> None:
             # Runs on a core executor thread. Must not raise: core logs and
             # swallows, but a clean log entry is more useful than a traceback.
@@ -353,12 +389,13 @@ class GSimRuntime:
                 error = None
             except Exception as exc:  # noqa: BLE001
                 payload, error = None, f"{type(exc).__name__}: {exc}"
-            self._log(record, "received", unit_name, peer_code, op_code, message_name, payload, error)
+            self._log(record, "received", unit_name, peer_code, op_code, message_name,
+                      payload, error, namespace=namespace)
         return _on_message
 
     def _log(self, record: ConnectionRecord, direction: str, unit_name: str, unit_code: int,
              op_code: int, message_name: str, payload: dict[str, Any] | None,
-             error: str | None) -> LogEntry:
+             error: str | None, namespace: str | None = None) -> LogEntry:
         entry = LogEntry(
             seq=next(self._seq),
             direction=direction,
@@ -371,6 +408,7 @@ class GSimRuntime:
             payload=payload,
             error=error,
             timestamp=time.time(),
+            namespace=namespace,
         )
         (record.sent if direction == "sent" else record.received).append(entry)
         self.events.publish({"type": f"message.{direction}", "entry": entry.as_dict()})

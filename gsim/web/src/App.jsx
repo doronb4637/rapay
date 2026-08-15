@@ -33,8 +33,14 @@ export default function App() {
   const [modal, setModal] = useState(null);           // null | {} | connection
   const [online, setOnline] = useState(false);
   const [toast, setToast] = useState(null);
+  // Which peer we are composing TO. Chosen before the message list, because
+  // each link has its own IRS: the set of messages this connection can send
+  // genuinely differs per destination, so a single union list would offer rows
+  // that fail on send.
+  const [destination, setDestination] = useState(null);
 
   const selected = connections.find((c) => c.id === selectedId) ?? null;
+  const peers = selected?.peers ?? [];
 
   const refresh = useCallback(async () => {
     try {
@@ -69,6 +75,20 @@ export default function App() {
     setSelectedLog(null);
     setSelection(null);
   }, [selectedId]);
+
+  // Default to the first peer, and re-aim if the chosen one disappears (an
+  // edit can rename or remove peers under us).
+  useEffect(() => {
+    if (!peers.some((peer) => peer.name === destination)) {
+      setDestination(peers[0]?.name ?? null);
+    }
+  }, [peers, destination]);
+
+  // The message list is per-link, so switching destination invalidates
+  // whatever compose form is open against the old one.
+  useEffect(() => {
+    setSelection((current) => (current?.mode === 'compose' ? null : current));
+  }, [destination]);
 
   useEffect(
     () =>
@@ -164,6 +184,9 @@ export default function App() {
           <MessagesTable
             className="min-h-0 flex-[1.3]"
             connectionId={selectedId}
+            peers={peers}
+            destination={destination}
+            onDestinationChange={setDestination}
             activeOpCode={selection?.mode === 'compose' ? selection.opCode : null}
             onCompose={(opCode) => {
               setSelectedLog(null);
@@ -176,7 +199,8 @@ export default function App() {
           <Inspector
             connectionId={selectedId}
             selection={selection}
-            peers={selected?.peers ?? []}
+            peers={peers}
+            destination={destination}
             onSent={() => {}}
           />
         </main>
@@ -223,6 +247,8 @@ function toForm(connection) {
     unitCode: config.unitCode,
     peers: Object.entries(config.connections ?? {}).map(([name, spec]) => ({
       name, port: spec.port, unitCode: spec.unitCode,
+      // Each link carries its own layouts; core writes the canonical spelling.
+      structures: spec.Structures ?? spec.structures ?? [''],
     })),
     structures: config.Structures ?? [''],
     echo_opcode: config.echo_opcode ?? '',

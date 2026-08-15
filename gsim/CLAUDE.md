@@ -14,7 +14,12 @@ through a schema-driven form, and watch sent/received traffic in a live console.
 **`core/` is never modified.** Every file under `core/` is off-limits — no edits, no monkey-patches,
 no reaching into private attributes to "just fix" something. If a change to `core` would genuinely
 be the better fix for something GSim needs, that is a conversation to have with the user first, not
-a decision to make unilaterally. Everything GSim needs from `core` is obtained by importing it and
+a decision to make unilaterally.
+
+> That escape hatch has been used exactly once, with explicit user authorisation: making IRS
+> layouts per-link (namespaced by structures module, `Structures` declared per unit — see
+> `core/connections/CLAUDE.md` §2b). It could not be done from GSim, because the collision was in
+> `IRS.REGISTRY`'s own key shape. It is not a precedent for editing `core` without asking. Everything GSim needs from `core` is obtained by importing it and
 wrapping it, never by changing it. This is enforced structurally (see Architecture ยง1) and should be
 checked mechanically before any commit:
 
@@ -58,7 +63,7 @@ gsim/
   core_gateway/                THE ONLY PACKAGE THAT IMPORTS core
     bootstrap.py                puts <repo-root>/core on sys.path (must import first)
     schema.py                   IRS message class -> JSON form schema (recursive)
-    registry.py                 read-only view of the GLOBAL MESSAGE REGISTRY
+    registry.py                 read-only, namespace-scoped view of the IRS registry
     payloads.py                 zero-fill + counted-array sync before encoding
     runtime.py                  GSim's connection registry, message logs, thread bridge
   api/
@@ -91,7 +96,7 @@ gsim/
 | --- | --- |
 | `connections.manager.ConnectionManager` | `runtime.GSimRuntime` -- the factory GSim builds every connection through |
 | `connections.*` (`Connection`, `CompositeUnit`) | type hints only in `runtime.py`; never constructed directly |
-| `IRS.REGISTRY.{MESSAGE_REGISTRY,PAIR_REGISTRY}` | `registry.py` -- read-only, same lookup order `IRS.irs_parser._get_message_class` uses |
+| `IRS.irs_parser.{get_message_class,list_routes,known_unit_codes,IRSAmbiguousError}` | `registry.py` -- read-only. Namespace-scoped: the lookup/alias/ambiguity rules are **not** reimplemented here, they are called |
 | `IRS.core.{ArrayField,Structure}`, `IRS.bitfields.BitField`, `IRS.fields.{Field,EnumField,BaseField}` | `schema.py` -- introspects `Message._fields_` to build the form schema |
 | `IRS.constants` | `schema.py` -- reverse-maps struct format chars (`'H'`) back to dtype names (`UInt16`) |
 

@@ -21,7 +21,7 @@ from asyncio import Event
 from typing import Any, Callable, Coroutine, Iterable
 
 from annotations import *
-from IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs, is_irs_exist
+from IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
 from tools.general import validated_opCode
 
 from .config import ConnectionConfig, EchoSettings
@@ -168,6 +168,10 @@ class Connection(ABC):
         self._unit_echo: dict[UnitName, EchoSettings] = config.unit_echoes
         self._last_echo_at: dict[UnitName, float] = {}
         self._echo_tasks: dict[UnitName, list[Task[None]]] = {}
+        # Likewise per unit (see config.resolve_structures): which IRS
+        # structures modules scope this link's layouts.
+        self._structures: tuple[Namespace, ...] = config.structures
+        self._unit_structures: dict[UnitName, tuple[Namespace, ...]] = config.unit_structures
 
     # ------------------------------------------------------------------ #
     # Unit resolution
@@ -313,6 +317,19 @@ class Connection(ABC):
         validated at load time (`config.EchoSettings.resolve`), so this is a
         dict lookup on the connect and dispatch paths, not a re-parse."""
         return self._unit_echo.get(unit_name, self._echo)
+
+    def _structures_for(self, unit_name: UnitName) -> tuple[Namespace, ...]:
+        """The IRS structures namespaces scoping ONE unit's layouts -- its own
+        if the config gave it any, this connection's block otherwise. Resolved
+        at load time (`config.resolve_structures`), so this is a dict lookup on
+        the send and dispatch paths.
+
+        An empty result means UNSCOPED: every registered module is searched.
+        That is what a byte-oriented unit gets, and what every config written
+        before structures were per-link keeps getting -- the parser only
+        complains if two modules genuinely disagree about a route.
+        """
+        return self._unit_structures.get(unit_name) or self._structures
 
     def _start_unit_echo(self, unit_name: str) -> None:
         """
@@ -502,7 +519,7 @@ class Connection(ABC):
             return
         message, exception = None, None
         try:
-            message = self._decode(unit_code, opCode, payload)
+            message = self._decode(unit_code, opCode, payload, unitName)
         except Exception as e:
             logger.exception(
                 f"IRS could not parse this message (unit={unitName}, opcode={opCode}), for reason: {e};\nCanceling message subscription")
@@ -519,10 +536,16 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # IRS codec boundary
     # ------------------------------------------------------------------ #
-    def _encode(self, opcode: int, message: IrsMessage) -> Any:
+    def _encode(self, opcode: int, message: IrsMessage, unit_name: UnitName) -> Any:
         """
         Application message -> wire payload, stamped with OUR unit code: the
         receiver needs to know who sent this, not who it was sent to.
+
+        `unit_name` is REQUIRED even though it never reaches the wire, because
+        it is what selects the layout. Our own unit code is identical for every
+        peer on this connection, so it cannot distinguish two links that both
+        define this opcode -- the destination's structures are the only thing
+        that can, which is why this is not an optional convenience parameter.
 
         A no-op on connections whose payloads are native (DDS). Bytes are
         already wire form and pass straight through -- that is also how the
@@ -530,25 +553,30 @@ class Connection(ABC):
         """
         if not self.uses_irs_parser or isinstance(message, (bytes, bytearray, memoryview)):
             return message
+        structures = self._structures_for(unit_name)
         try:
-            return irs_to_bytes(self._own_unit_code, opcode, message)
+            return irs_to_bytes(self._own_unit_code, opcode, message, structures)
         except Exception as exc:
             raise IRSDataError(
-                f"irs_to_bytes(unitCode={self._own_unit_code}, opCode={opcode}) failed: {exc}"
+                f"irs_to_bytes(unitCode={self._own_unit_code}, opCode={opcode}, "
+                f"structures={list(structures) or 'any'}) failed: {exc}"
             ) from exc
 
-    def _decode(self, unit_code: int, opcode: int, payload: bytes) -> IrsMessage:
+    def _decode(self, unit_code: int, opcode: int, payload: bytes, unit_name: UnitName) -> IrsMessage:
         """
         Wire payload -> application message, parsed with THEIR unit code: the
-        sender's identity is what selects the message layout.
+        sender's identity is what selects the message layout, narrowed to the
+        structures modules this particular link declared.
         """
         if not self.uses_irs_parser:
             return payload
+        structures = self._structures_for(unit_name)
         try:
-            parsed = parse_irs(unit_code, opcode, payload)
+            parsed = parse_irs(unit_code, opcode, payload, structures)
         except Exception as exc:
             raise IRSDataError(
-                f"parse_irs(unitCode={unit_code}, opCode={opcode}) failed: {exc}"
+                f"parse_irs(unitCode={unit_code}, opCode={opcode}, "
+                f"structures={list(structures) or 'any'}) failed: {exc}"
             ) from exc
         if parsed is None:
             return payload  # template parser: nothing to convert
@@ -662,7 +690,7 @@ class Connection(ABC):
         """
         opcode = validated_opCode(opcode)
         unit = self._resolve_unit(unit_name)
-        payload = self._encode(opcode, data)
+        payload = self._encode(opcode, data, unit)
         self._loop_thread.await_coroutine(self._do_send(unit, payload, opcode))
 
     def wait_for_connected_units(
@@ -765,7 +793,7 @@ class Connection(ABC):
         released and the exception propagates unchanged.
         """
         unit, route_key = self._resolve_route(unitName, opCode)
-        validate_irs(*route_key)
+        validate_irs(*route_key, self._structures_for(unit))
         future: asyncio.Future[IrsMessage] = self._loop_thread.await_coroutine(self._subscribe(route_key))
         if trigger_function is not None:
             try:
@@ -809,8 +837,8 @@ class Connection(ABC):
         """
         if not callable(callback_func):
             raise TypeError(f"callback_func must be callable, got {callback_func!r}")
-        _unit, route_key = self._resolve_route(unit_name, opcode)
-        validate_irs(*route_key)
+        unit, route_key = self._resolve_route(unit_name, opcode)
+        validate_irs(*route_key, self._structures_for(unit))
         self._loop_thread.await_coroutine(self._register_callback(route_key, callback_func))
 
     def stop_on_receive(self, opcode: int, unit_name: str | None = None) -> bool:
@@ -858,7 +886,7 @@ class Connection(ABC):
         if interval_seconds <= 0:
             raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
         unit, route_key = self._resolve_route(unit_name, opcode)
-        payload = self._encode(opcode, data)
+        payload = self._encode(opcode, data, unit)
         self._loop_thread.await_coroutine(
             self._start_periodic(unit, route_key, payload, opcode, interval_seconds)
         )

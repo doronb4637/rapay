@@ -39,6 +39,14 @@ class PeerSpec(BaseModel):
     name: str = Field(min_length=1, description="Logical peer name; labels the Received log.")
     port: int = Field(ge=0, le=0xFFFF)
     unitCode: int = Field(ge=0, le=0xFF, description="THEIR unit code -- selects the parse layout.")
+    #: THIS LINK's IRS modules. A structures file defines the messages between
+    #: one specific pair of units, so it belongs to the peer, not the
+    #: connection -- see core/connections/CLAUDE.md 2b.
+    structures: list[str] | None = Field(
+        default=None,
+        description="IRS structure modules for this link, e.g. 'Test.test_messages'. "
+                    "Required on every peer of a multi-peer non-multicast connection.",
+    )
 
 
 class ConnectionCreate(BaseModel):
@@ -53,11 +61,15 @@ class ConnectionCreate(BaseModel):
 
     peers: list[PeerSpec] = Field(min_length=1)
 
-    #: MANDATORY in GSim, optional in core -- see module docstring.
+    #: Connection-level fallback. Only meaningful when there is ONE link to
+    #: apply it to (or multicast, one sender to many receivers over one IRS);
+    #: `_check_consistency` enforces that, mirroring core's own rule. GSim still
+    #: requires layouts SOMEWHERE -- without them the Messages panel is empty
+    #: and the Inspector has no form to render (see module docstring).
     structures: list[str] = Field(
-        min_length=1,
-        description="IRS structure modules to import, e.g. 'Test.test_messages'. "
-                    "Required by GSim: without them the Messages panel is empty.",
+        default_factory=list,
+        description="IRS structure modules for a single-peer or multicast connection. "
+                    "With several peers, each declares its own instead.",
     )
 
     echo_opcode: int | None = Field(default=None, ge=0, le=0xFFFF)
@@ -69,17 +81,41 @@ class ConnectionCreate(BaseModel):
 
     @field_validator("structures")
     @classmethod
-    def _no_blank_structures(cls, value: list[str]) -> list[str]:
-        cleaned = [item.strip() for item in value if item and item.strip()]
-        if not cleaned:
-            raise ValueError("at least one IRS structures module is required")
-        return cleaned
+    def _clean_structures(cls, value: list[str]) -> list[str]:
+        """Drop blanks (the modal always renders one empty row) but do not
+        require anything here -- whether a list is needed at all depends on the
+        peer count, which only `_check_consistency` can see."""
+        return [item.strip() for item in value if item and item.strip()]
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "ConnectionCreate":
         allowed = _SIDES_BY_PROTOCOL[self.protocol]
         if self.side not in allowed:
             raise ValueError(f"side {self.side!r} is not valid for {self.protocol}; use one of {sorted(allowed)}")
+
+        # A structures file defines the IRS for ONE link, so it belongs to a
+        # peer. Multicast is the exception core makes too: one sender fans out
+        # to many receivers over a single shared IRS.
+        fans_out = self.protocol == "multicast"
+        for peer in self.peers:
+            if peer.structures is not None:
+                peer.structures = [s.strip() for s in peer.structures if s and s.strip()]
+
+        if len(self.peers) > 1 and not fans_out:
+            if self.structures:
+                raise ValueError(
+                    "connection-level 'structures' is only allowed when the connection has "
+                    "exactly one connected unit, or is multicast; a structures file defines "
+                    "ONE link, so declare each connected unit's own 'structures' instead")
+            missing = [peer.name for peer in self.peers if not peer.structures]
+            if missing:
+                raise ValueError(
+                    f"connected units {missing} have no 'structures'; every unit on a "
+                    f"multi-unit {self.protocol} connection must declare its own")
+        elif not self.structures and not any(peer.structures for peer in self.peers):
+            # GSim is stricter than core here: with no layouts at all the
+            # Messages panel is empty and the Inspector has no form to build.
+            raise ValueError("at least one IRS structures module is required")
 
         names = [peer.name for peer in self.peers]
         if len(set(names)) != len(names):
@@ -114,12 +150,18 @@ class ConnectionCreate(BaseModel):
                 peer.name: {
                     "port": peer.port,
                     "unitCode": peer.unitCode,
-                    **peer.model_dump(exclude={"name", "port", "unitCode"}),
+                    # Canonical spelling, so core sees one key rather than both
+                    # its accepted spellings for the same thing.
+                    **({"Structures": peer.structures} if peer.structures else {}),
+                    **peer.model_dump(exclude={"name", "port", "unitCode", "structures"}),
                 }
                 for peer in self.peers
             },
-            "Structures": self.structures,
         }
+        if self.structures:
+            # Only when it is legal (single unit, or multicast) -- emitting it
+            # alongside several units is a load-time ValueError in core.
+            config["Structures"] = self.structures
         if self.echo_opcode is not None:
             config["echo_opcode"] = self.echo_opcode
         if self.echo_interval is not None:

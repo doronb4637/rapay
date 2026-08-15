@@ -33,8 +33,9 @@ project's generic helpers do not, and are imported from their own packages:
   the framework (`send_message`, `periodic_sending`, `stop_periodic`, and
   `config._as_opcode`); `validated_unitCode` does the same for both kinds of
   unit code in `config._as_unit_code`; `import_modules` loads a config's
-  `libs_path` message libraries in `ConnectionManager`, which is what
-  populates `IRS.REGISTRY` before any connection exists to use it.
+  `Structures` message libraries in `ConnectionManager`, which is what
+  populates `IRS.REGISTRY` before any connection exists to use it, and
+  `resolve_module_name` names the namespace each one registers under.
 - **`tools.file_functions.read_unit_config`** -- turns a unit configuration
   *name* into its JSON, so `mgr.create("radar", "TcpServer")` reads
   `config/Units/TcpServer.json` and this package never builds a config path

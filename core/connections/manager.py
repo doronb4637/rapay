@@ -149,19 +149,24 @@ class ConnectionManager:
     @staticmethod
     def _import_config_libs(name: str, config: ConnectionConfig) -> None:
         """
-        Import the message libraries a config declares under `structures`, via
+        Import the message libraries a config declares under `Structures`, via
         `tools.general.import_modules`.
 
         This is the step that populates `IRS.REGISTRY`: a message module
-        registers its types by *being imported*
+        registers its types by *being imported*, under its own module name as
+        the namespace.
 
-            "Structures": ["messages.radar", "messages.tracker"]
+            "connections": {"RadarUnit": {..., "Structures": ["messages.radar"]}}
+
+        Reads `all_structures_raw`, not `extra["Structures"]`: a structures file
+        describes ONE link, so most configs declare them per unit and a
+        connection-level-only read would import nothing at all.
         """
-        structures: list[str] = config.extra.get("Structures")
-        if structures is None:
+        structures = config.all_structures_raw
+        if not structures:
             return
-        logger.info("connection %s: importing message libraries %s", name, structures)
-        import_modules(structures)
+        logger.info("connection %s: importing message libraries %s", name, list(structures))
+        import_modules(list(structures))
 
     def create_composite(
         self,

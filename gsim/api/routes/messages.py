@@ -11,7 +11,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 
 from gsim.api.models import SendMessageRequest
-from gsim.core_gateway import build_payload, get_runtime, list_messages, message_schema
+from gsim.core_gateway import (
+    IRSAmbiguousError,
+    build_payload,
+    get_runtime,
+    list_messages,
+    message_schema,
+)
 
 router = APIRouter(prefix="/api/connections/{connection_id}", tags=["messages"])
 
@@ -33,40 +39,54 @@ def all_logs(direction: str) -> list[dict[str, Any]]:
 
 
 @registry_router.get("/schema/{unit_code}/{op_code}")
-def schema_by_unit(unit_code: int, op_code: int) -> dict[str, Any]:
+def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -> dict[str, Any]:
     """Form schema for an explicit (unitCode, opCode).
 
     The Inspector needs this for RECEIVED messages: a message is decoded with
     the SENDER's unit code (`parse_irs(their_code, ...)`), so rendering it
     against our own code would find the wrong layout -- or none at all.
+
+    `namespace` names the structures module the entry was decoded with. It is
+    required whenever two modules define the same route, which is why every log
+    entry carries it: (unitCode, opCode) alone stopped being a unique key the
+    moment structures became per-link.
     """
     try:
-        return message_schema(unit_code, op_code)
+        return message_schema(unit_code, op_code, [namespace] if namespace else None)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except IRSAmbiguousError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/messages")
-def connection_messages(connection_id: str) -> list[dict[str, Any]]:
-    """Every message this connection is permitted to SEND.
+def connection_messages(connection_id: str, unit_name: str | None = None) -> list[dict[str, Any]]:
+    """Every message this connection is permitted to SEND to `unit_name`.
 
-    Queries the GLOBAL REGISTRY with OUR unit code, because that is the code
-    `irs_to_bytes` is called with on the way out (`Connection._encode` passes
-    `self._own_unit_code`) -- so it is exactly the set of layouts that will
-    successfully encode from this connection.
+    Queries with OUR unit code, because that is the code `irs_to_bytes` is
+    called with on the way out (`Connection._encode` passes
+    `self._own_unit_code`) -- but scoped to the DESTINATION's structures,
+    because our own code is identical for every peer and therefore cannot say
+    which link's layouts an opcode belongs to. Omitting `unit_name` lists every
+    peer's messages, each row tagged with its namespace.
     """
     record = _record(connection_id)
-    return list_messages(record.own_unit_code)
+    structures = record.structures_for(unit_name) if unit_name else None
+    return list_messages(record.own_unit_code, structures)
 
 
 @router.get("/messages/{op_code}/schema")
-def message_form_schema(connection_id: str, op_code: int) -> dict[str, Any]:
-    """The recursive form schema the Inspector renders."""
+def message_form_schema(connection_id: str, op_code: int,
+                        unit_name: str | None = None) -> dict[str, Any]:
+    """The recursive form schema the Inspector renders, for one destination."""
     record = _record(connection_id)
+    structures = record.structures_for(unit_name) if unit_name else None
     try:
-        return message_schema(record.own_unit_code, op_code)
+        return message_schema(record.own_unit_code, op_code, structures)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except IRSAmbiguousError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/send")
@@ -80,9 +100,14 @@ def send_message(connection_id: str, request: SendMessageRequest) -> dict[str, A
     """
     record = _record(connection_id)
     try:
-        schema = message_schema(record.own_unit_code, request.op_code)
+        # Scoped by destination: the same opcode may mean different layouts on
+        # two links, and only the peer says which.
+        schema = message_schema(record.own_unit_code, request.op_code,
+                                record.structures_for(request.unit_name))
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except IRSAmbiguousError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     payload = build_payload(schema, request.payload)
     try:

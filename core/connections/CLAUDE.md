@@ -60,7 +60,8 @@ neither the payload codec nor the project's generic helpers:
 | `IRS.irs_parser.irs_to_bytes` / `parse_irs` | the payload codec, in `base.Connection._encode` / `_decode` (there is no local `irs_parser.py` any more; `connections/__init__.py` re-exports both names so `from connections import parse_irs` still works) |
 | `tools.general.validated_opCode` | every opcode entering the framework: `send_message`, `periodic_sending`, `stop_periodic`, and `config._as_opcode` |
 | `tools.general.validated_unitCode` | both kinds of unit code, in `config._as_unit_code` |
-| `tools.general.import_modules` | `ConnectionManager._import_config_libs` -- imports a config's `libs_path` so `IRS.REGISTRY` is populated before the connection exists |
+| `tools.general.import_modules` | `ConnectionManager._import_config_libs` -- imports every module in a config's `Structures` (connection-level plus per-unit) so `IRS.REGISTRY` is populated before the connection exists |
+| `tools.general.resolve_module_name` | `config.resolve_structures` -- the namespace a structures spelling registers under. Shared with `import_modules` so the two can never disagree |
 | `tools.file_functions.read_unit_config` | `ConnectionManager.create(name, "TcpServer")` -- loads `config/Units/TcpServer.json` |
 
 The split of labour with `tools` is consistent: `tools` answers *what an
@@ -129,8 +130,71 @@ so on those connections:
   2-tuple result is unwrapped to its second element (`parse_irs` returns
   `(message_name, message_object)`).
 
+Both codec calls are **scoped to the link** — see §2b. `_encode` takes the destination unit name
+for exactly that reason, even though the name never reaches the wire.
+
 `DdsConnection` leaves `uses_irs_parser = False`: its payloads are typed samples and both codec
 hooks become no-ops.
+
+### 2b. Structures are per-LINK, and layouts are namespaced by their module
+
+A structures file describes **one link** — one specific server to one specific client, usually both
+directions (`IRS/Structures/Tiful/tiful_to_dtu.py` registers unit `0x01` *and* `0x02`). Multicast is
+the sole exception: one sender fans out to many receivers over a single shared IRS.
+
+That matters because a process talking to two peers loads two structures files, and both register
+layouts under **our own** unit code — which is identical for every peer. Keyed by unit code alone,
+the second import silently erased the first wherever the two shared an opcode, and `_encode` had no
+way to tell the links apart even in principle. So `IRS.REGISTRY` keys by namespace first:
+
+```python
+STRUCTURE_REGISTRY: dict[Namespace, dict[UnitCode, dict[OpCode, IrsMessage]]]
+PAIR_REGISTRY:      dict[Namespace, dict[UnitCode, UnitCode]]
+```
+
+The namespace is the structures module's `__name__`, captured from the calling frame by
+`register_message`, so **no structures file needed a single edit** — importing one *is* the
+namespaced registration.
+
+Configs name the modules per unit:
+
+```json
+"unitCode": 22,
+"connections": {
+  "RadarUnit":   {"port": 2000, "unitCode": 7, "Structures": ["Radar.radar_link"]},
+  "TrackerUnit": {"port": 2001, "unitCode": 8, "Structures": ["Tracker.tracker_link"]}
+}
+```
+
+`ConnectionConfig` resolves each unit's list at load time (`resolve_structures`, the same
+connection-level-default/per-unit-override shape as `EchoSettings.resolve`, and resolving as a
+**group** for the same reason) and stores it on `UnitEndpoint.structures`. `Connection` caches the
+mapping and reads it through `_structures_for(unit_name)`, mirroring `_echo_for`. Every IRS call
+takes that scope: `irs_to_bytes`, `parse_irs`, and the eager `validate_irs` in `receive_message` /
+`handle_on_receive`.
+
+Three rules worth stating plainly:
+
+- **A connection-level `Structures` is only legal with exactly one configured unit**, or on
+  multicast. With several units it would scope all of them to one namespace, which is the bug
+  itself; `from_json` rejects it and says where to move the lists.
+- **An empty scope means unscoped**, not "no layouts": every registered module is searched. That is
+  what a byte-oriented unit gets, and what every config written before this existed keeps getting.
+- **An unscoped lookup that matches two different modules raises `IRSAmbiguousError`** naming both,
+  rather than picking the last import. It is deliberately *not* a subclass of `IRSNotFoundError` —
+  `is_irs_exist` swallows that one, and an ambiguous route reported as absent is the original silent
+  bug all over again.
+
+`PAIR_REGISTRY` is a **whole-unit** alias, namespaced the same way: a file written for the 1↔2 link
+can serve 1↔14 with `register_pair(2, 14)` (second argument is the alias), and a unit that has its
+own layouts is never redirected. Namespacing it matters — two files aliasing one code to different
+canonical units is the same collision in a different dress.
+
+`resolve_module_name` in `tools.general` is the single source of the namespace, used by both
+`ConnectionConfig` (before the import) and `import_modules` (during it), which is what stops a link
+being scoped to a namespace nothing ever registered under. It also gives a `.py` path *inside*
+`IRS/Structures` its ordinary dotted name, so picking a file through GSim's browser and typing its
+dotted spelling are one namespace, not two.
 
 ### 3. Unit routing: ours vs theirs
 

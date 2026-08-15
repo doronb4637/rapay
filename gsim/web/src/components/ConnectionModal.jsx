@@ -29,11 +29,19 @@ const SIDES = {
 // rather than offered and ignored.
 const ECHO_PROTOCOLS = new Set(['tcp', 'udp']);
 
+// A structures file defines the IRS for ONE link, so it belongs to a peer.
+// Multicast is the exception core makes too: one sender fans out to many
+// receivers over a single shared IRS, so a connection-level list is legal.
+const FANS_OUT = new Set(['multicast']);
+const sharedStructures = (form) => form.peers.length === 1 || FANS_OUT.has(form.protocol);
+
+const BLANK_PEER = { name: '', port: '', unitCode: '', structures: [''] };
+
 const BLANK = {
   name: '', protocol: 'tcp', side: 'server', ip: '127.0.0.1', local_ip: '127.0.0.1',
   // No default port or unitCode: a silently-accepted 0 is worse than an empty
   // required field, because 0 is a legal value the user never chose.
-  unitCode: '', peers: [{ name: '', port: '', unitCode: '' }], structures: [''],
+  unitCode: '', peers: [{ ...BLANK_PEER }], structures: [''],
   echo_opcode: '', echo_interval: '', echo_timeout: '',
 };
 
@@ -129,6 +137,7 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
   const pressStartedOnBackdrop = useRef(false);
 
   const showEcho = ECHO_PROTOCOLS.has(form.protocol);
+  const showSharedStructures = sharedStructures(form);
 
   useEffect(() => {
     const onKey = (event) => event.key === 'Escape' && onClose();
@@ -143,15 +152,28 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
     return () => window.removeEventListener('pywebviewready', onReady);
   }, [canBrowse]);
 
-  const browseForStructureFile = async (index) => {
+  /** `peerIndex === null` targets the connection-level list. */
+  const browseForStructureFile = async (index, peerIndex = null) => {
     try {
       const path = await window.pywebview.api.browse_structures_file();
       if (!path) return;
-      set('structures', form.structures.map((s, i) => (i === index ? path : s)));
+      if (peerIndex === null) {
+        set('structures', form.structures.map((s, i) => (i === index ? path : s)));
+      } else {
+        setPeerStructures(peerIndex, (list) => list.map((s, i) => (i === index ? path : s)));
+      }
     } catch (err) {
       setError(err.message ?? String(err));
     }
   };
+
+  const setPeerStructures = (peerIndex, update) =>
+    setForm((f) => ({
+      ...f,
+      peers: f.peers.map((peer, i) =>
+        i === peerIndex ? { ...peer, structures: update(peer.structures ?? ['']) } : peer,
+      ),
+    }));
 
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
   const setPeer = (index, key, value) =>
@@ -176,6 +198,20 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
       return setError('Echo opCode must be 0-65535 (decimal, or hex like 0x003C).');
     }
 
+    // Mirror the server's rule so the reason is visible before a round trip.
+    const clean = (list) => (list ?? []).filter((s) => s.trim());
+    if (!showSharedStructures) {
+      const bare = form.peers.filter((peer) => clean(peer.structures).length === 0);
+      if (bare.length) {
+        return setError(
+          `Connected unit${bare.length > 1 ? 's' : ''} ` +
+          `${bare.map((p) => `"${p.name || '—'}"`).join(', ')}: ` +
+          'each unit needs its own IRS structures. A structures file defines the messages ' +
+          'for one link, so with several connected units there is no shared list to fall back on.',
+        );
+      }
+    }
+
     setBusy(true);
     setError(null);
     try {
@@ -186,8 +222,12 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
           ...peer,
           port: Number(peer.port),
           unitCode: parseCode(peer.unitCode),
+          structures: showSharedStructures ? null : clean(peer.structures),
         })),
-        structures: form.structures.filter((s) => s.trim()),
+        // Never submit a connection-level list when it is not legal -- a value
+        // left behind by adding a peer would be rejected by core, same
+        // defensive strip the echo keys get below.
+        structures: showSharedStructures ? clean(form.structures) : [],
         // Never submit echo keys for a protocol that does not offer them --
         // otherwise a value left behind by switching protocol would arm a
         // heartbeat the user can no longer see or edit.
@@ -278,82 +318,104 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
 
             <Section
               title="Connected units"
-              hint="each peer's own unitCode selects its parse layout"
+              hint={
+                showSharedStructures
+                  ? "each unit's own unitCode selects its parse layout"
+                  : "each unit's own unitCode selects its parse layout — and its own IRS structures"
+              }
               action={
                 <AddButton
-                  onClick={() => set('peers', [...form.peers, { name: '', port: '', unitCode: '' }])}
+                  onClick={() => set('peers', [...form.peers, { ...BLANK_PEER }])}
                 >
-                  Add peer
+                  Add connected unit
                 </AddButton>
               }
             >
               {form.peers.map((peer, index) => (
-                <div key={index} className="flex items-end gap-2">
-                  <Field label={index === 0 ? 'Name' : undefined}>
-                    <Input
-                      value={peer.name} required placeholder="Insert connected unit name"
-                      onChange={(e) => setPeer(index, 'name', e.target.value)}
-                      className="!font-sans"
+                <div
+                  key={index}
+                  className={cx(
+                    'flex flex-col gap-2',
+                    // Only box them up once each carries its own structures --
+                    // a bare row is clearer while there is nothing nested in it.
+                    !showSharedStructures &&
+                      'rounded-md border border-slate-800 bg-slate-900/40 p-2',
+                  )}
+                >
+                  <div className="flex items-end gap-2">
+                    <Field label={index === 0 || !showSharedStructures ? 'Name' : undefined}>
+                      <Input
+                        value={peer.name} required placeholder="Insert connected unit name"
+                        onChange={(e) => setPeer(index, 'name', e.target.value)}
+                        className="!font-sans"
+                      />
+                    </Field>
+                    <Field
+                      label={index === 0 || !showSharedStructures ? 'Port' : undefined}
+                      className="max-w-24"
+                    >
+                      <Input
+                        type="number" min={0} max={65535} value={peer.port} required placeholder="—"
+                        onChange={(e) => setPeer(index, 'port', e.target.value)}
+                      />
+                    </Field>
+                    <Field
+                      label={index === 0 || !showSharedStructures ? 'unitCode' : undefined}
+                      className="max-w-24"
+                    >
+                      <Input
+                        value={peer.unitCode} required placeholder="0x00"
+                        onChange={(e) => setPeer(index, 'unitCode', maskCode(e.target.value))}
+                      />
+                    </Field>
+                    <IconButton
+                      icon={Trash2} title="Remove connected unit" variant="danger"
+                      disabled={form.peers.length === 1}
+                      onClick={() => set('peers', form.peers.filter((_, i) => i !== index))}
+                      className="mb-px"
                     />
-                  </Field>
-                  <Field label={index === 0 ? 'Port' : undefined} className="max-w-24">
-                    <Input
-                      type="number" min={0} max={65535} value={peer.port} required placeholder="—"
-                      onChange={(e) => setPeer(index, 'port', e.target.value)}
+                  </div>
+
+                  {!showSharedStructures && (
+                    <StructureList
+                      label="IRS structures for this link"
+                      entries={peer.structures ?? ['']}
+                      canBrowse={canBrowse}
+                      onChange={(update) => setPeerStructures(index, update)}
+                      onBrowse={(entryIndex) => browseForStructureFile(entryIndex, index)}
                     />
-                  </Field>
-                  <Field label={index === 0 ? 'unitCode' : undefined} className="max-w-24">
-                    <Input
-                      value={peer.unitCode} required placeholder="0x00"
-                      onChange={(e) => setPeer(index, 'unitCode', maskCode(e.target.value))}
-                    />
-                  </Field>
-                  <IconButton
-                    icon={Trash2} title="Remove peer" variant="danger"
-                    disabled={form.peers.length === 1}
-                    onClick={() => set('peers', form.peers.filter((_, i) => i !== index))}
-                    className="mb-px"
-                  />
+                  )}
                 </div>
               ))}
             </Section>
 
-            {/* Optional in core; MANDATORY in GSim -- without layouts the
-                Messages panel is empty and the Inspector has no form. */}
-            <Section
-              title="IRS structures"
-              badge={<Badge tone="amber">required</Badge>}
-              hint="module paths under IRS.Structures, e.g. Test.test_messages"
-              action={
-                <AddButton onClick={() => set('structures', [...form.structures, ''])}>
-                  Add module
-                </AddButton>
-              }
-            >
-              {form.structures.map((entry, index) => (
-                <div key={index} className="flex items-end gap-2">
-                  <Field>
-                    <Input
-                      value={entry} required placeholder="Test.test_messages"
-                      onChange={(e) =>
-                        set('structures', form.structures.map((s, i) => (i === index ? e.target.value : s)))
-                      }
-                    />
-                  </Field>
-                  {canBrowse && (
-                    <IconButton
-                      icon={FolderOpen} title="Browse for a structures file"
-                      onClick={() => browseForStructureFile(index)}
-                    />
-                  )}
-                  <IconButton
-                    icon={Trash2} title="Remove module" variant="danger"
-                    disabled={form.structures.length === 1}
-                    onClick={() => set('structures', form.structures.filter((_, i) => i !== index))}
-                  />
-                </div>
-              ))}
-            </Section>
+            {/* Only shown when ONE list can honestly describe the whole
+                connection: a single link, or multicast where one sender fans
+                out to many receivers over a shared IRS. With several
+                point-to-point units each declares its own, above. */}
+            {showSharedStructures && (
+              <Section
+                title="IRS structures"
+                badge={<Badge tone="amber">required</Badge>}
+                hint={
+                  FANS_OUT.has(form.protocol) && form.peers.length > 1
+                    ? 'shared by every receiver — module paths under IRS.Structures, e.g. Test.test_messages'
+                    : 'module paths under IRS.Structures, e.g. Test.test_messages'
+                }
+                action={
+                  <AddButton onClick={() => set('structures', [...form.structures, ''])}>
+                    Add module
+                  </AddButton>
+                }
+              >
+                <StructureList
+                  entries={form.structures}
+                  canBrowse={canBrowse}
+                  onChange={(update) => set('structures', update(form.structures))}
+                  onBrowse={(index) => browseForStructureFile(index)}
+                />
+              </Section>
+            )}
 
             {/* Point-to-point heartbeat only: hidden for multicast/DDS. */}
             {showEcho && (
@@ -412,6 +474,50 @@ function Section({ title, hint, badge, action, children }) {
       <div className="flex flex-col gap-2.5">{children}</div>
       {action && <div className="mt-2.5">{action}</div>}
     </fieldset>
+  );
+}
+
+/**
+ * The editable list of IRS structures modules, used at both levels: once per
+ * peer when each link has its own, or once for the connection when a single
+ * list legitimately covers it.
+ */
+function StructureList({ label, entries, canBrowse, onChange, onBrowse }) {
+  const rows = entries.length ? entries : [''];
+  return (
+    <div className="flex flex-col gap-1.5">
+      {label && (
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
+            {label}
+          </span>
+          <AddButton onClick={() => onChange((list) => [...list, ''])}>Add module</AddButton>
+        </div>
+      )}
+      {rows.map((entry, index) => (
+        <div key={index} className="flex items-end gap-2">
+          <Field>
+            <Input
+              value={entry} required placeholder="Test.test_messages"
+              onChange={(e) =>
+                onChange((list) => list.map((s, i) => (i === index ? e.target.value : s)))
+              }
+            />
+          </Field>
+          {canBrowse && (
+            <IconButton
+              icon={FolderOpen} title="Browse for a structures file"
+              onClick={() => onBrowse(index)}
+            />
+          )}
+          <IconButton
+            icon={Trash2} title="Remove module" variant="danger"
+            disabled={rows.length === 1}
+            onClick={() => onChange((list) => list.filter((_, i) => i !== index))}
+          />
+        </div>
+      ))}
+    </div>
   );
 }
 

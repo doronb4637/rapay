@@ -1,16 +1,22 @@
 /**
- * Messages workspace: what the selected connection is permitted to SEND.
+ * Messages workspace: what the selected connection may send TO ONE PEER.
  *
- * Rows come from the GLOBAL REGISTRY keyed by this connection's OWN unitCode --
- * the same code `irs_to_bytes` is called with on the way out, so this is
- * exactly the set that will encode. A row click loads it into the Inspector.
+ * Rows are keyed by this connection's OWN unitCode -- the code `irs_to_bytes`
+ * is called with on the way out -- but scoped to the destination's structures
+ * modules. That scoping is why the destination is chosen here rather than down
+ * in the compose form: a structures file describes one link, so two peers of
+ * one connection can define the same opCode with different layouts, and a
+ * merged list would offer rows that fail on send.
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Inbox, Search, Send } from 'lucide-react';
 import { api } from '../api';
-import { Badge, EmptyState, Input, Panel, PanelHeader, cx } from './ui';
+import { Badge, EmptyState, Input, Panel, PanelHeader, Select, cx } from './ui';
 
-export default function MessagesTable({ connectionId, activeOpCode, onCompose, className }) {
+export default function MessagesTable({
+  connectionId, peers = [], destination, onDestinationChange,
+  activeOpCode, onCompose, className,
+}) {
   const [messages, setMessages] = useState([]);
   const [query, setQuery] = useState('');
   const [error, setError] = useState(null);
@@ -18,9 +24,9 @@ export default function MessagesTable({ connectionId, activeOpCode, onCompose, c
   useEffect(() => {
     setQuery('');
     setError(null);
-    if (!connectionId) return setMessages([]);
+    if (!connectionId || !destination) return setMessages([]);
     let cancelled = false;
-    api.messages(connectionId).then(
+    api.messages(connectionId, destination).then(
       (next) => !cancelled && setMessages(next),
       (err) => {
         if (cancelled) return;
@@ -29,7 +35,7 @@ export default function MessagesTable({ connectionId, activeOpCode, onCompose, c
       },
     );
     return () => { cancelled = true; };
-  }, [connectionId]);
+  }, [connectionId, destination]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -45,7 +51,25 @@ export default function MessagesTable({ connectionId, activeOpCode, onCompose, c
     <Panel className={className}>
       <PanelHeader title="Messages" icon={Inbox} count={messages.length} />
 
-      <div className="shrink-0 px-2 py-1.5">
+      <div className="shrink-0 space-y-1.5 px-2 py-1.5">
+        {/* Destination first: it selects WHICH layouts exist below. */}
+        <label className="flex items-center gap-1.5">
+          <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-slate-500">
+            To
+          </span>
+          <Select
+            value={destination ?? ''}
+            disabled={!connectionId || peers.length === 0}
+            onChange={(event) => onDestinationChange(event.target.value)}
+            className="!py-1 text-[11px]"
+          >
+            {peers.length === 0 && <option value="">—</option>}
+            {peers.map((peer) => (
+              <option key={peer.name} value={peer.name}>{peer.name}</option>
+            ))}
+          </Select>
+        </label>
+
         <div className="relative">
           <Search
             size={12}
@@ -64,12 +88,14 @@ export default function MessagesTable({ connectionId, activeOpCode, onCompose, c
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!connectionId ? (
           <EmptyState icon={Inbox}>Select a connection to see the messages it can send.</EmptyState>
+        ) : !destination ? (
+          <EmptyState icon={Inbox}>Select a destination unit to see the messages for that link.</EmptyState>
         ) : error ? (
           <EmptyState icon={Inbox}>{error}</EmptyState>
         ) : visible.length === 0 ? (
           <EmptyState icon={Inbox}>
             {messages.length === 0
-              ? 'No messages registered for this unitCode. Check the connection’s Structures modules.'
+              ? `No messages registered for this link. Check ${destination}’s Structures modules.`
               : `Nothing matches “${query}”.`}
           </EmptyState>
         ) : (

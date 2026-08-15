@@ -24,6 +24,16 @@ async function request(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+/** Build a query string from the entries that actually have a value. */
+function query(params) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') search.set(key, value);
+  }
+  const text = search.toString();
+  return text ? `?${text}` : '';
+}
+
 export const api = {
   listConnections: () => request('/api/connections'),
   createConnection: (body) => request('/api/connections', { method: 'POST', body: JSON.stringify(body) }),
@@ -32,9 +42,16 @@ export const api = {
   start: (id) => request(`/api/connections/${id}/start`, { method: 'POST' }),
   stop: (id) => request(`/api/connections/${id}/stop`, { method: 'POST' }),
 
-  messages: (id) => request(`/api/connections/${id}/messages`),
-  messageSchema: (id, opCode) => request(`/api/connections/${id}/messages/${opCode}/schema`),
-  schemaByUnit: (unitCode, opCode) => request(`/api/schema/${unitCode}/${opCode}`),
+  // Scoped by DESTINATION: a structures file describes one link, so the same
+  // opCode can mean different layouts on two peers of one connection.
+  messages: (id, unitName) =>
+    request(`/api/connections/${id}/messages${query({ unit_name: unitName })}`),
+  messageSchema: (id, opCode, unitName) =>
+    request(`/api/connections/${id}/messages/${opCode}/schema${query({ unit_name: unitName })}`),
+  // `namespace` comes off the log entry itself, so a received message is
+  // rendered against the exact layout it was decoded with.
+  schemaByUnit: (unitCode, opCode, namespace) =>
+    request(`/api/schema/${unitCode}/${opCode}${query({ namespace })}`),
   send: (id, body) => request(`/api/connections/${id}/send`, { method: 'POST', body: JSON.stringify(body) }),
   logs: (id, direction) => request(`/api/connections/${id}/logs/${direction}`),
   // Process-wide log history: a send and its matching receive belong to two

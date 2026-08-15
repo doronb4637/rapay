@@ -59,7 +59,7 @@ function HeaderStat({ label, value }) {
   );
 }
 
-export default function Inspector({ connectionId, selection, peers, onSent }) {
+export default function Inspector({ connectionId, selection, peers, destination, onSent }) {
   if (!selection) {
     return (
       <Panel className="min-w-0 flex-1">
@@ -72,10 +72,13 @@ export default function Inspector({ connectionId, selection, peers, onSent }) {
   }
   return selection.mode === 'compose' ? (
     <ComposeForm
-      key={`${connectionId}:${selection.opCode}`}
+      // Destination is part of the identity: it selects the layout, so
+      // switching peers must rebuild the form, not reuse the old schema.
+      key={`${connectionId}:${destination}:${selection.opCode}`}
       connectionId={connectionId}
       opCode={selection.opCode}
       peers={peers}
+      destination={destination}
       onSent={onSent}
     />
   ) : (
@@ -86,19 +89,23 @@ export default function Inspector({ connectionId, selection, peers, onSent }) {
 /* ------------------------------------------------------------------ */
 /* Compose                                                             */
 /* ------------------------------------------------------------------ */
-function ComposeForm({ connectionId, opCode, peers, onSent }) {
+function ComposeForm({ connectionId, opCode, peers, destination, onSent }) {
   const [schema, setSchema] = useState(null);
   const [payload, setPayload] = useState({});
-  const [unitName, setUnitName] = useState(peers[0]?.name ?? '');
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [flash, setFlash] = useState(false);
+
+  // The destination is chosen in the Messages panel, because it selects which
+  // messages exist at all -- see MessagesTable's docstring.
+  const unitName = destination ?? '';
+  const peer = peers.find((entry) => entry.name === unitName) ?? null;
 
   useEffect(() => {
     let cancelled = false;
     setSchema(null);
     setError(null);
-    api.messageSchema(connectionId, opCode).then(
+    api.messageSchema(connectionId, opCode, unitName).then(
       (next) => {
         if (cancelled) return;
         setSchema(next);
@@ -109,11 +116,7 @@ function ComposeForm({ connectionId, opCode, peers, onSent }) {
       (err) => !cancelled && setError(err.message),
     );
     return () => { cancelled = true; };
-  }, [connectionId, opCode]);
-
-  useEffect(() => {
-    if (!peers.some((peer) => peer.name === unitName)) setUnitName(peers[0]?.name ?? '');
-  }, [peers, unitName]);
+  }, [connectionId, opCode, unitName]);
 
   const submit = async (event) => {
     event.preventDefault();
@@ -163,26 +166,29 @@ function ComposeForm({ connectionId, opCode, peers, onSent }) {
               opCode={opCode}
               length={payloadSize(schema.fields, payload)}
             >
-              <div className="flex items-center gap-2">
-                <label
-                  htmlFor="dest"
-                  className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-slate-500"
-                >
+              {/* Read-only: the destination is picked in the Messages panel,
+                  where it also decides which messages are listed. */}
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
                   Destination
-                </label>
-                <Select
-                  id="dest"
-                  value={unitName}
-                  onChange={(e) => setUnitName(e.target.value)}
-                  className="!w-auto min-w-48"
-                >
-                  {peers.map((peer) => (
-                    <option key={peer.name} value={peer.name}>
-                      {peer.name} · unitCode {peer.unit_code}
-                    </option>
-                  ))}
-                </Select>
+                </span>
+                <span className="font-mono text-[11px] text-slate-200">
+                  {peer ? `${peer.name} · unitCode ${peer.unit_code}` : unitName || '—'}
+                </span>
               </div>
+              {schema.namespace && (
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
+                    IRS
+                  </span>
+                  <span
+                    className="truncate font-mono text-[11px] text-slate-400"
+                    title={schema.namespace}
+                  >
+                    {schema.namespace.split('.').slice(-2).join('.')}
+                  </span>
+                </div>
+              )}
             </HeaderBlock>
 
             <div className="flex flex-col gap-2.5 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
@@ -238,7 +244,11 @@ function LogDetails({ entry }) {
     // A received message decodes with the SENDER's unit code, so the entry
     // carries the code its layout is registered under -- ours on send, the
     // peer's on receive. The wrong one finds the wrong layout, or none.
-    api.schemaByUnit(entry.unit_code, entry.op_code).then(
+    // `namespace` pins the exact layout this entry was decoded with --
+    // (unit_code, op_code) alone stopped being unique once structures became
+    // per-link, so without it an inspected message could render against the
+    // other link's fields.
+    api.schemaByUnit(entry.unit_code, entry.op_code, entry.namespace).then(
       (next) => !cancelled && setSchema(next),
       () => {},
     );
