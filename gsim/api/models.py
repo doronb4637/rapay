@@ -34,7 +34,7 @@ _SIDES_BY_PROTOCOL: dict[str, set[str]] = {
 
 class PeerSpec(BaseModel):
     """One entry of core's `connections` block: a logical peer."""
-    model_config = ConfigDict(extra="allow")   # echo_opcode & friends pass through
+    model_config = ConfigDict(extra="allow")   # protocol-specific extras still pass through
 
     name: str = Field(min_length=1, description="Logical peer name; labels the Received log.")
     port: int = Field(ge=0, le=0xFFFF)
@@ -47,6 +47,16 @@ class PeerSpec(BaseModel):
         description="IRS structure modules for this link, e.g. 'Test.test_messages'. "
                     "Required on every peer of a multi-peer non-multicast connection.",
     )
+    #: Per-peer override of the connection-level echo settings below. Same
+    #: three keys; core resolves whichever THIS unit sets, falling back to the
+    #: connection-level value only for the keys the unit leaves unset
+    #: (`EchoSettings.resolve`, core/connections/config.py) -- so a peer may
+    #: override just the opcode and still inherit the shared interval/timeout.
+    #: Only meaningful on tcp/udp; the modal hides these for multicast/dds,
+    #: same as the connection-level ones.
+    echo_opcode: int | None = Field(default=None, ge=0, le=0xFFFF)
+    echo_interval: float | None = Field(default=None, gt=0)
+    echo_timeout: float | None = Field(default=None, gt=0)
 
 
 class ConnectionCreate(BaseModel):
@@ -129,6 +139,12 @@ class ConnectionCreate(BaseModel):
         if self.echo_timeout is not None and self.echo_interval is not None:
             if self.echo_timeout <= self.echo_interval:
                 raise ValueError("echo_timeout must be greater than echo_interval")
+
+        for peer in self.peers:
+            if peer.echo_timeout is not None and peer.echo_interval is not None:
+                if peer.echo_timeout <= peer.echo_interval:
+                    raise ValueError(
+                        f"connected unit {peer.name!r}: echo_timeout must be greater than echo_interval")
         return self
 
     def to_core_config(self) -> dict[str, Any]:
@@ -150,10 +166,18 @@ class ConnectionCreate(BaseModel):
                 peer.name: {
                     "port": peer.port,
                     "unitCode": peer.unitCode,
-                    # Canonical spelling, so core sees one key rather than both
-                    # its accepted spellings for the same thing.
+                    # Canonical spelling, so core sees one key rather than any
+                    # of the several it would also accept for the same thing --
+                    # and matching the exact spelling the connection-level echo
+                    # keys use below, so Save/Load round-trips identically.
                     **({"Structures": peer.structures} if peer.structures else {}),
-                    **peer.model_dump(exclude={"name", "port", "unitCode", "structures"}),
+                    **({"echo_opcode": peer.echo_opcode} if peer.echo_opcode is not None else {}),
+                    **({"EchoInterval": peer.echo_interval} if peer.echo_interval is not None else {}),
+                    **({"EchoTimeout": peer.echo_timeout} if peer.echo_timeout is not None else {}),
+                    **peer.model_dump(exclude={
+                        "name", "port", "unitCode", "structures",
+                        "echo_opcode", "echo_interval", "echo_timeout",
+                    }),
                 }
                 for peer in self.peers
             },
@@ -177,9 +201,52 @@ class ConnectionUpdate(ConnectionCreate):
     `ConnectionConfig` is frozen and a live `Connection` caches state from it."""
 
 
+class ConnectionImport(BaseModel):
+    """One entry of a Save/Load session file, as re-submitted by `POST
+    /api/connections/import`.
+
+    Deliberately bypasses `ConnectionCreate`'s stricter contract: `config` is
+    already core-shaped JSON, exactly what `GET /api/connections` returns as
+    each record's `"config"` (i.e. whatever `ConnectionManager.create()` was
+    originally given). Re-deriving `peers`/`structures` from it and
+    re-validating through `ConnectionCreate` would lose any protocol-specific
+    `extra` keys the frontend form doesn't model (idl_file, qos_file, ttl,
+    mode, ...) -- `ConnectionCreate.extra` only carries what the modal
+    explicitly collected when the connection was first created, not
+    everything core's config actually holds. Importing the raw config makes
+    Save/Load a lossless round trip instead of a second, weaker constructor.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    config: dict[str, Any]
+    autostart: bool = True
+
+
 class SendMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_name: str = Field(min_length=1, description="Which configured peer to send to.")
     op_code: int = Field(ge=0, le=0xFFFF)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class BehaviourRequest(BaseModel):
+    """Configure (or reconfigure) the behaviour on one message route.
+
+    There is at most one behaviour per `(connection, unit_name, op_code)`, so
+    this is an upsert -- see `core_gateway/behaviours.py` for why the route is
+    the key. `kind` is validated against the engine's own `KINDS` rather than a
+    duplicated `Literal`, so adding a behaviour shape there does not require
+    remembering to widen this too.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    unit_name: str = Field(min_length=1, description="Which configured peer to send to.")
+    op_code: int = Field(ge=0, le=0xFFFF)
+    kind: str = Field(default="periodic", description="Behaviour shape, e.g. 'periodic'.")
+    #: Seconds between sends. Only meaningful for `periodic`; kept optional so a
+    #: future one-shot/burst kind need not send a meaningless value.
+    interval: float = Field(default=1.0, gt=0)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True

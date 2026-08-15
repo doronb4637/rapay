@@ -10,7 +10,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   AlertCircle, ArrowDownLeft, ArrowUpRight, FileJson, Loader2, MousePointerClick,
-  RotateCcw, Send,
+  Repeat, RotateCcw, Send,
 } from 'lucide-react';
 import FieldRenderer, { FieldList } from './FieldRenderer';
 import { Badge, Button, EmptyState, Panel, PanelHeader, Select, cx } from './ui';
@@ -59,7 +59,10 @@ function HeaderStat({ label, value }) {
   );
 }
 
-export default function Inspector({ connectionId, selection, peers, destination, onSent }) {
+export default function Inspector({
+  connectionId, selection, peers, destination, onSent, onBehaviour, behaviour,
+  draftKey, drafts,
+}) {
   if (!selection) {
     return (
       <Panel className="min-w-0 flex-1">
@@ -80,6 +83,10 @@ export default function Inspector({ connectionId, selection, peers, destination,
       peers={peers}
       destination={destination}
       onSent={onSent}
+      onBehaviour={onBehaviour}
+      behaviour={behaviour}
+      draftKey={draftKey}
+      drafts={drafts}
     />
   ) : (
     <LogDetails key={selection.entry.seq} entry={selection.entry} />
@@ -89,9 +96,12 @@ export default function Inspector({ connectionId, selection, peers, destination,
 /* ------------------------------------------------------------------ */
 /* Compose                                                             */
 /* ------------------------------------------------------------------ */
-function ComposeForm({ connectionId, opCode, peers, destination, onSent }) {
+function ComposeForm({
+  connectionId, opCode, peers, destination, onSent, onBehaviour, behaviour,
+  draftKey, drafts,
+}) {
   const [schema, setSchema] = useState(null);
-  const [payload, setPayload] = useState({});
+  const [payload, setPayloadState] = useState({});
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [flash, setFlash] = useState(false);
@@ -101,6 +111,19 @@ function ComposeForm({ connectionId, opCode, peers, destination, onSent }) {
   const unitName = destination ?? '';
   const peer = peers.find((entry) => entry.name === unitName) ?? null;
 
+  // Every payload change is mirrored into the caller's draft store, which
+  // outlives this component. This form is remounted whenever the route changes
+  // (the schema differs per route, so reusing the old state would render the
+  // wrong fields), and clicking a log entry unmounts it entirely -- without an
+  // external store, a half-filled message was lost on any of those.
+  const setPayload = (next) => {
+    setPayloadState((current) => {
+      const resolved = typeof next === 'function' ? next(current) : next;
+      if (drafts && draftKey) drafts.set(draftKey, resolved);
+      return resolved;
+    });
+  };
+
   useEffect(() => {
     let cancelled = false;
     setSchema(null);
@@ -109,14 +132,16 @@ function ComposeForm({ connectionId, opCode, peers, destination, onSent }) {
       (next) => {
         if (cancelled) return;
         setSchema(next);
-        // Fully-populated initial state: every input is controlled from first
-        // render, and the zeros that will be sent are visible up front.
-        setPayload(defaultPayload(next));
+        // Restore an in-progress draft for this exact route if there is one;
+        // otherwise start fully populated, so every input is controlled from
+        // first render and the zeros that will be sent are visible up front.
+        const saved = drafts && draftKey ? drafts.get(draftKey) : undefined;
+        setPayloadState(saved ?? defaultPayload(next));
       },
       (err) => !cancelled && setError(err.message),
     );
     return () => { cancelled = true; };
-  }, [connectionId, opCode, unitName]);
+  }, [connectionId, opCode, unitName, draftKey]);
 
   const submit = async (event) => {
     event.preventDefault();
@@ -207,6 +232,21 @@ function ComposeForm({ connectionId, opCode, peers, destination, onSent }) {
         </div>
 
         <footer className="flex shrink-0 items-center gap-2 border-t border-slate-800 bg-slate-900 px-3 py-2">
+          {/* Left of Send: sending automatically is a variation on sending,
+              and it carries the payload currently in this form. */}
+          <Button
+            icon={Repeat}
+            disabled={!unitName}
+            onClick={() => onBehaviour?.({ opCode, payload, messageName: schema.name })}
+            className={cx(behaviour?.active && '!border-emerald-700 !text-emerald-300')}
+          >
+            Behaviour
+            {behaviour && (
+              <span className="ml-0.5 font-mono text-[10px] opacity-70">
+                {behaviour.interval}s
+              </span>
+            )}
+          </Button>
           <Button
             type="submit"
             variant="primary"

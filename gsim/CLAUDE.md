@@ -60,18 +60,21 @@ for anything that imports `gsim` first.
 core/                        UNTOUCHED. connections/ IRS/ tools/ annotations.py -- see core/*/CLAUDE.md
 gsim/
   __main__.py                 PyWebView desktop launcher + `--server` headless mode
+                                (js_api: browse_structures_file, save_config_file, load_config_file)
   core_gateway/                THE ONLY PACKAGE THAT IMPORTS core
     bootstrap.py                puts <repo-root>/core on sys.path (must import first)
     schema.py                   IRS message class -> JSON form schema (recursive)
     registry.py                 read-only, namespace-scoped view of the IRS registry
     payloads.py                 zero-fill + counted-array sync before encoding
+    behaviours.py               scheduled sending (periodic, ...) -- GSim-driven, see 10
     runtime.py                  GSim's connection registry, message logs, thread bridge
   api/
     app.py                      FastAPI factory; serves gsim/web/dist at "/" if built
     models.py                   Pydantic contract -- where GSim is STRICTER than core
     routes/
-      connections.py             create / edit / delete / start / stop
-      messages.py                registry query, form schema, send, log history
+      connections.py             create / edit / delete / start / stop / import (Save-Load)
+      messages.py                registry query, form schema, send, log history + clear
+      behaviours.py              list / upsert / start / stop / delete schedules
       events.py                  WebSocket: live log + connection-state feed
   web/                         React 18 + Vite 5 + Tailwind v4 + lucide-react
     public/favicon.svg           tab icon (matches the Logo mark)
@@ -79,6 +82,7 @@ gsim/
       App.jsx                    shell: [Connections/Messages] | Inspector | [Sent/Received]
       api.js                     fetch wrapper + WebSocket client (auto-reconnect)
       lib/schema.js               client-side mirror of payloads.py's defaulting rules
+      lib/sessionFile.js          Save/Load envelope: build, parse, browser-download fallback
       components/
         ui.jsx                    shared design-system primitives (Button, Field, Badge, ...)
         Logo.jsx                   GSim badge mark (vector; swappable for the PNG)
@@ -87,6 +91,9 @@ gsim/
         Inspector.jsx              compose (editable form) | inspect (read-only) modes
         FieldRenderer.jsx          recursive dynamic-form renderer -- the core of Inspector
         Console.jsx                Sent + Received panes, process-wide, hide-by-opCode
+        ContextMenu.jsx            desktop-style right-click menu + useContextMenu()
+        BehavioursPanel.jsx        every active schedule, across every connection
+        BehaviourModal.jsx         configure/stop/remove one message's schedule
         ConnectionModal.jsx        create/edit connection form (hex codes, IPv4 mask)
 ```
 
@@ -242,6 +249,53 @@ running connection's internals is exactly the kind of `core`-touching shortcut t
 `PUT /api/connections/{id}` (`runtime.replace()`) is delete-then-recreate under the hood, preserving
 whether the connection was running.
 
+### 7a. Save/Load a session, and why import bypasses `ConnectionCreate`
+
+The title bar's Save/Load buttons (`App.jsx`, next to the GSim logo -- not the Connections panel's
+own header, which is too narrow to reliably fit both without one landing under the Inspector layout)
+round-trip the *whole* connections list through a JSON file, not
+one connection at a time -- `lib/sessionFile.js` builds `{version, exported_at, connections: [{name,
+autostart, config}, ...]}` from `connection.config`, exactly what `GET /api/connections` already
+returns per record. Loading re-submits each entry to `POST /api/connections/import`
+(`ConnectionImport` in `api/models.py`), which calls `runtime.create()` directly with that raw config
+-- it deliberately does **not** go back through `ConnectionCreate`/`to_core_config()`. Re-deriving
+`peers`/`structures` from a core config and re-validating it through the stricter frontend contract
+would lose any protocol-specific `extra` key the modal doesn't model (`idl_file`, `qos_file`, `ttl`,
+`mode`, ...), since `ConnectionCreate.extra` only ever holds what the modal explicitly collected when
+the connection was first created. Importing the raw config is what makes Save/Load lossless.
+
+File I/O has two paths, chosen at click time (not cached, unlike the modal's `canBrowse` state) by
+checking `window.pywebview?.api?.save_config_file`: the desktop app uses `__main__.py`'s
+`save_config_file`/`load_config_file` (native save/open dialogs, read/write directly on disk);
+`--server` mode has no such bridge, so Save triggers a client-side `Blob` download and Load clicks a
+hidden `<input type="file">` -- both plain browser APIs, no server round trip either way.
+
+### 7b. Where the modal narrows core's own options, and why
+
+Three of the create/edit form's fields are deliberately more restrictive than what core's config
+schema would accept, all for the same reason: offering a control for a value nothing downstream
+reads is worse than not offering it, because the user has to guess whether it does something.
+
+- **Remote IP is hidden for a listening endpoint** (tcp/udp `side: "server"`, and DDS on any side).
+  Confirmed against the protocol classes, not assumed: `TcpConnection`/`UdpConnection` never read
+  `config.ip` on the server path (only `local_ip`, to bind), and `DdsConnection` never reads either --
+  DDS is topic-based, not socket-based. Multicast keeps the field always, relabeled "Multicast IP",
+  because `MulticastConnection` reads `config.ip` as the group address on both `sender` and
+  `receiver` sides. The field is submitted regardless (core requires the `ip` key unconditionally) --
+  it is pinned to `"0.0.0.0"` rather than asked of the user when hidden.
+- **`Structures` always lives on the peer, never on the connection, except multicast.** Core itself
+  only *requires* this once there are 2+ units (`connections/CLAUDE.md` 2b); GSim applies it
+  uniformly, including the single-peer case, so a connection's shape in the form never changes
+  depending on how many peers it happens to have today. `toForm` backfills a single legacy
+  connection-level `Structures` onto its one peer when editing a connection saved before this
+  applied, so Edit doesn't show it as unset.
+- **Per-peer echo settings are additive, not a restriction**: core already resolves `EchoSettings`
+  hierarchically (connection-level default, per-unit override -- `EchoSettings.resolve`,
+  `core/connections/config.py`), the modal just didn't expose the per-unit half before. `PeerSpec`
+  gained explicit `echo_opcode`/`echo_interval`/`echo_timeout` fields (typed and validated the same
+  as the connection-level ones) instead of relying on `extra="allow"` passthrough, so a malformed
+  peer-level value is a 422 with a field path, not a `ValueError` string from deep in `from_json`.
+
 ### 8. Frontend: React 18 + Tailwind v4 + lucide-react
 
 Tailwind v4 is CSS-first (`@import 'tailwindcss'` + `@theme` in `styles.css`, wired in via
@@ -277,6 +331,120 @@ invisible until you go click B; this was a real reported bug). `runtime.all_logs
 is still clear which connection owns it. Entries are ordered by the server-assigned `seq` -- a single
 counter shared across every record -- because wall-clock timestamps originate on different threads
 and are not reliably orderable against each other.
+
+### 10. Behaviours: scheduled sending, and why core's `periodic_sending` is unused
+
+A behaviour is "keep sending THIS message to THIS peer, like THIS". `core_gateway/behaviours.py`
+owns them; `BehaviourEngine` runs one daemon thread per active behaviour and calls
+`GSimRuntime.send()` — **the same call the manual Send button makes**.
+
+Core *has* `Connection.periodic_sending(opcode, data, interval, unit_name)`, and it works, but it is
+deliberately not used here. Its send loop calls `_do_send` directly on core's own event loop, so it
+never passes through `runtime.send()` and GSim would log nothing for a schedule actively producing
+traffic — while the *receiving* GSim connection would still log every tick, since inbound callbacks
+are unaffected. The console would contradict itself: a silent Sent pane beside a filling Received
+pane. It also encodes its payload **once** at schedule time, which makes anything varying per tick
+(a counter, a timestamp, jitter) impossible through it by construction — and more behaviour shapes
+are the stated direction.
+
+Load-bearing rules:
+
+- **Keyed by route, `(connection_id, unit_name, op_code)`** — at most one schedule per message per
+  destination, mirroring what core enforces internally for `_periodic_tasks` and for the same
+  reason: two schedules on one route would silently double its rate. `PUT` is therefore an upsert.
+- **`enabled AND connection running`** is one condition, evaluated in `BehaviourEngine._sync`. That
+  single funnel is what makes stopping a connection pause its behaviours and starting it resume
+  them, with no separate paused state to keep in step. `enabled` is intent; `active` is reality, and
+  the UI's status dot shows `active` so a behaviour armed on a stopped connection never reads as live.
+- **A failing tick never kills the schedule** — the usual cause (peer not yet connected) is
+  transient. The error lands on the behaviour (`last_error`, `error_count`) and the engine publishes
+  only on a *change* of error state, never per tick, so a fast failing schedule cannot flood the
+  WebSocket.
+- **Payload is normalised once**, at configure time, by the same `build_payload` the manual path uses
+  (§4) — a payload that could never encode fails in the `PUT`, where the modal shows why, instead of
+  logging the identical error forever on a worker thread.
+- **Deleting a connection drops its behaviours** (`remove_connection`), and so does *editing* one,
+  since `replace()` is delete-then-create (§7). That is intentional: an edit can rename or remove the
+  very peer a behaviour targets, and a schedule left pointing at a peer that no longer exists would
+  just error forever.
+
+The UI shows them twice on purpose: a badge on the Messages row (the message you configured carries
+the evidence) **and** `BehavioursPanel`, which is process-wide. The panel is the load-bearing one — a
+schedule keeps firing while you look at a different connection, so a selection-scoped view could show
+an idle screen while traffic streams out of a connection one click away.
+
+### 11a. `ContextMenu`'s dismissal is containment-checked, not capture-raced
+
+The dismiss listener is `window.addEventListener('mousedown', dismissIfOutside, true)`, and it
+checks `menuRef.current?.contains(event.target)` before closing. An earlier version closed
+unconditionally on capture and relied on the menu's own `onMouseDown={stopPropagation}` to save a
+click on an item -- which does not work: capture-phase listeners on `window` run top-down, before
+the event reaches the target, so a bubble-phase `stopPropagation` on the menu is always too late to
+stop them. That ordering silently ate every menu click in production while passing every automated
+check, because a synthetic `element.click()` fires `click` directly and skips `mousedown` entirely --
+the one event the bug lived in. If a UI action can be scripted with `.click()`, that is a hint it
+did not exercise the real `mousedown → mouseup → click` sequence; verifying a fix here needs an
+actual simulated click (or two real events in order), not a call to `.click()`.
+
+### 11. Right-click menus
+
+`ContextMenu.jsx` + `useContextMenu()` is generic: callers pass an `items` array
+(`{label, onSelect, icon?, danger?, disabled?, hint?}`, or `{separator: true}`), so adding an option
+is adding an object. The Console uses it for "Clear <pane>", the Behaviours panel for "Stop all" /
+"Remove all". Positioning is fixed-viewport and flips near the window edges, measured after mount
+because the height depends on how many items the caller passed.
+
+**Clearing is server-side** (`DELETE /api/logs/{direction}` -> `runtime.clear_logs`), not a
+client-side view filter: those deques are what `GET /api/logs/{direction}` backfills from, so
+clearing only the browser's copy would put every entry straight back on the next refresh or socket
+reconnect. The `seq` counter is deliberately **not** reset — it orders entries across threads and
+connections, and restarting it would make surviving entries in the other pane sort incorrectly
+against new ones.
+
+The clicking client clears its own state **from the DELETE response**, and the `logs.cleared`
+broadcast is for OTHER clients. Relying on the broadcast alone was a bug: while the socket is down
+no event arrives, and the reconnect snapshot carries connections and behaviours but *not* log
+history, so the pane kept showing entries the server had already dropped — indistinguishable from
+"Clear did nothing". `App.refillLogs()` therefore also runs on every snapshot (i.e. every
+reconnect), which is the only thing that re-syncs a console that missed events while disconnected.
+
+### 12. Two console/layout invariants that are easy to break
+
+- **Auto-scroll is keyed on the newest entry's `seq`, never on `entries.length`.** Each pane keeps
+  only `LOG_VIEW_LIMIT` rows, so at the cap every arrival evicts one and the length stops changing —
+  a length-keyed effect silently stops following at exactly the point following matters. The
+  scroller also sets `overflow-anchor: none`: Chrome's scroll anchoring compensates for content
+  removed *above* the viewport, so each evicted row dragged the view up by a row while a new row was
+  appended below, drifting off the bottom with nothing appearing to move it.
+- **Growable arrays are capped** (`lib/schema.js` `maxArrayItems`). A counted array's length travels
+  in a *sibling* scalar, so it can never exceed what that field can count — a `UInt8` counter caps it
+  at 255, and exceeding it does not raise, it silently truncates on the receiving side. The limit is
+  computed in `FieldList`, which is the only level that can see the sibling. Dynamic arrays have no
+  counter and are bounded instead by the uint16 `DataLength` in `framing.py`.
+
+### 12a. `handlers_installed` is tracked separately from `running`
+
+`start()` installs the receive callbacks **before** `unit.start()`, because a peer can have data
+waiting the instant the transport opens. That ordering means the two states diverge whenever a start
+fails partway: the handlers are registered, but `running` is still False. Guarding installation on
+`running` therefore re-registered every route on the next attempt, and core correctly refuses that
+(`route ... already has an on-receive callback`) — a 500 on exactly the everyday workflow of bringing
+up a TCP client before its server and starting it once the server is up. `ConnectionRecord` carries
+`handlers_installed` for this, cleared in `stop()` because core's `close()` drops the callbacks.
+
+`index.html` is served `no-store` (`_WebFiles` in `api/app.py`). Vite fingerprints every asset, so
+`index.html` is the only stable filename and the only thing naming the current hashes — if the shell
+caches it, the app keeps loading the previous build's bundle and a fix that is provably present in
+`dist/` simply never appears.
+
+### 13. Compose drafts outlive the form
+
+`ComposeForm` is deliberately remounted per route (`key` includes connection, destination and
+opCode) because the schema differs per route and reusing state would render the wrong fields. That
+made in-progress edits vanish whenever the user clicked another message or a console entry. The
+payload therefore lives in `App`'s `composeDrafts` — a `Map` in a **ref**, not state, since it
+changes on every keystroke and nothing renders from it directly. The form restores from it on mount
+and mirrors every change back into it.
 
 ### 9. Known `core` issues GSim works around without touching `core`
 

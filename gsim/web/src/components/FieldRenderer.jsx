@@ -13,9 +13,11 @@
 import React from 'react';
 import { Braces, Hash, List, Plus, ToggleLeft, Trash2 } from 'lucide-react';
 import { Badge, Field, IconButton, Input, Select, cx } from './ui';
-import { counterSource, defaultFor, derivedCounters } from '../lib/schema';
+import { counterSource, defaultFor, derivedCounters, maxArrayItems } from '../lib/schema';
 
-export default function FieldRenderer({ node, value, onChange, readOnly = false, depth = 0 }) {
+export default function FieldRenderer({
+  node, value, onChange, readOnly = false, depth = 0, maxItems = null,
+}) {
   switch (node.kind) {
     case 'enum':
       return <EnumField node={node} value={value} onChange={onChange} readOnly={readOnly} />;
@@ -24,7 +26,12 @@ export default function FieldRenderer({ node, value, onChange, readOnly = false,
     case 'bitfield':
       return <BitFieldGroup node={node} value={value} onChange={onChange} readOnly={readOnly} depth={depth} />;
     case 'array':
-      return <ArrayField node={node} value={value} onChange={onChange} readOnly={readOnly} depth={depth} />;
+      return (
+        <ArrayField
+          node={node} value={value} onChange={onChange} readOnly={readOnly}
+          depth={depth} maxItems={maxItems}
+        />
+      );
     case 'scalar':
       return <ScalarField node={node} value={value} onChange={onChange} readOnly={readOnly} />;
     default:
@@ -190,6 +197,9 @@ export function FieldList({ fields, value, onChange, readOnly, depth = 0 }) {
             onChange={setField}
             readOnly={readOnly}
             depth={depth}
+            // Derived HERE because a counted array's limit lives in a sibling
+            // field -- the array node alone cannot see it.
+            maxItems={maxArrayItems(field, fields)}
           />
         );
       })}
@@ -231,23 +241,31 @@ function BitFieldGroup({ node, value, onChange, readOnly, depth }) {
 /* ------------------------------------------------------------------ */
 /* Arrays -- the "+ Add <Struct>" case                                 */
 /* ------------------------------------------------------------------ */
-function ArrayField({ node, value, onChange, readOnly, depth }) {
+function ArrayField({ node, value, onChange, readOnly, depth, maxItems = null }) {
   const items = value ?? [];
   const growable = node.length !== 'fixed' && !readOnly;
+  // At the ceiling the array cannot take another item -- for a counted array
+  // that is its counter's width (a UInt8 count stops at 255), and going past it
+  // does not raise, it silently truncates on the receiving side. Blocking the
+  // button is the only place that failure is visible.
+  const full = maxItems !== null && items.length >= maxItems;
 
   // "Increments the internal array size variable by 1 and dynamically adds a
   // new set of fields": appending a fully-defaulted item does both -- the
   // rendered fields follow from the item's presence, and a counted array's
   // sibling counter is derived from this length.
-  const addItem = () => onChange([...items, defaultFor(node.item)]);
+  const addItem = () => {
+    if (full) return;
+    onChange([...items, defaultFor(node.item)]);
+  };
   const removeItem = (index) => onChange(items.filter((_, i) => i !== index));
   const setItem = (index, next) => onChange(items.map((item, i) => (i === index ? next : item)));
 
   const meta =
     node.length === 'counted'
-      ? `counted by ${node.count_field}`
+      ? `counted by ${node.count_field}${maxItems !== null ? ` · max ${maxItems}` : ''}`
       : node.length === 'dynamic'
-        ? 'fills remaining frame'
+        ? `fills remaining frame${maxItems !== null ? ` · max ${maxItems}` : ''}`
         : `fixed ${node.size}`;
 
   return (
@@ -263,10 +281,24 @@ function ArrayField({ node, value, onChange, readOnly, depth }) {
           <button
             type="button"
             onClick={addItem}
-            className="inline-flex items-center gap-1 rounded-md border border-sky-800/70 bg-sky-950/50 px-2 py-0.5 text-[10px] font-medium text-sky-300 transition-colors hover:border-sky-600 hover:bg-sky-900/60 hover:text-sky-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
+            disabled={full}
+            title={
+              full
+                ? node.length === 'counted'
+                  ? `Limit reached — ${node.count_field} can only count ${maxItems} items`
+                  : `Limit reached — ${maxItems} items fill the maximum frame`
+                : undefined
+            }
+            className={cx(
+              'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium transition-colors',
+              'focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500',
+              full
+                ? 'cursor-not-allowed border-slate-700 bg-slate-800/60 text-slate-500'
+                : 'border-sky-800/70 bg-sky-950/50 text-sky-300 hover:border-sky-600 hover:bg-sky-900/60 hover:text-sky-200',
+            )}
           >
             <Plus size={11} />
-            Add {node.item_label}
+            {full ? `Max ${maxItems}` : `Add ${node.item_label}`}
           </button>
         )
       }

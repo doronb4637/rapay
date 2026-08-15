@@ -37,6 +37,7 @@ from . import bootstrap  # noqa: F401
 from connections.manager import ConnectionManager
 
 from . import registry as message_registry
+from .behaviours import BehaviourEngine
 
 #: Per-connection ring buffers. Bounded so a chatty link cannot grow without
 #: limit; the UI streams live events and only re-reads these on (re)connect.
@@ -120,6 +121,23 @@ class ConnectionRecord:
     running: bool = False
     sent: deque = field(default_factory=lambda: deque(maxlen=LOG_LIMIT))
     received: deque = field(default_factory=lambda: deque(maxlen=LOG_LIMIT))
+    #: Why this connection is not running, when an automatic start failed.
+    #: A TCP client created before its server exists is the ordinary case --
+    #: the config is perfectly valid, the peer simply is not listening yet --
+    #: so `create()` keeps the connection and records the reason here instead
+    #: of failing the request and throwing the config away.
+    start_error: str | None = None
+    #: Whether this connection's `handle_on_receive` callbacks are currently
+    #: registered with core. Tracked separately from `running` because the two
+    #: genuinely diverge: `start()` installs the handlers BEFORE `unit.start()`
+    #: (a peer can have data waiting the instant the transport opens), so a
+    #: start that fails to connect leaves handlers installed while `running`
+    #: stays False. Using `running` as the guard meant the next start attempt
+    #: registered every route a second time, and core rightly refuses that --
+    #: "route ... already has an on-receive callback" -- which surfaced as a
+    #: 500 on the one workflow this is most likely to happen in: bring up a TCP
+    #: client before its server, then start it once the server is up.
+    handlers_installed: bool = False
 
     @property
     def own_unit_code(self) -> int:
@@ -164,6 +182,7 @@ class ConnectionRecord:
             ],
             "active_units": sorted(getattr(self.unit, "active_units", set()) or set()),
             "config": self.config,
+            "start_error": self.start_error,
         }
 
 
@@ -180,10 +199,26 @@ class GSimRuntime:
         self._ids = itertools.count(1)
         self._seq = itertools.count(1)
         self.events = EventBus()
+        # Scheduled sending. Given `self.send` -- the same call the manual send
+        # button makes -- so every tick lands in the console as an ordinary
+        # entry; see behaviours.py's docstring for why core's own
+        # `periodic_sending` is not used here.
+        self.behaviours = BehaviourEngine(
+            send=self.send,
+            is_connection_running=self._is_connection_running,
+            publish=self.events.publish,
+        )
         self._watcher = threading.Thread(
             target=self._watch_unit_state, name="gsim-unit-state", daemon=True
         )
         self._watcher.start()
+
+    def _is_connection_running(self, connection_id: str) -> bool:
+        """Unknown connection reads as "not running" rather than raising -- the
+        behaviour engine polls this during teardown races."""
+        with self._lock:
+            record = self._conn_records.get(connection_id)
+        return bool(record and record.running)
 
     def _watch_unit_state(self) -> None:
         """Publish `connection.state` whenever a connection's set of live peers
@@ -259,6 +294,30 @@ class GSimRuntime:
         entries.sort(key=lambda entry: entry.seq)
         return [entry.as_dict() for entry in entries]
 
+    def clear_logs(self, direction: str) -> int:
+        """Empty every connection's ring buffer for ONE direction, and tell
+        every client to do the same.
+
+        Server-side rather than a client-only view filter, because these deques
+        are what `GET /api/logs/{direction}` backfills from: clearing only the
+        browser's copy would put every entry straight back on the next refresh
+        or WebSocket reconnect. Publishing the event is what keeps a second
+        open client from continuing to show what was just cleared.
+
+        The `seq` counter is deliberately NOT reset -- it orders entries across
+        threads and connections, and restarting it would make surviving entries
+        in the *other* pane sort against new ones incorrectly.
+        """
+        with self._lock:
+            conn_records = list(self._conn_records.values())
+        cleared = 0
+        for record in conn_records:
+            buffer = record.sent if direction == "sent" else record.received
+            cleared += len(buffer)
+            buffer.clear()
+        self.events.publish({"type": "logs.cleared", "direction": direction})
+        return cleared
+
     # -- lifecycle -------------------------------------------------------
     def create(self, name: str, config: dict[str, Any], autostart: bool = True,
                connection_id: str | None = None) -> ConnectionRecord:
@@ -279,17 +338,65 @@ class GSimRuntime:
         with self._lock:
             self._conn_records[connection_id] = record
 
-        self._install_receive_handlers(record)
+        # NOT installed here -- see `start()`. Nothing can arrive before the
+        # connection actually starts, so there's no need to register early,
+        # and `start()` is what has to (re-)install them anyway.
         if autostart:
-            self.start(connection_id)
+            try:
+                self.start(connection_id)
+            except OSError as exc:
+                # The CONFIG is fine, the peer just is not reachable yet -- a
+                # TCP client created before its server is listening is the
+                # ordinary case (WinError 1225 / ECONNREFUSED). Failing the
+                # whole request here would discard a config the user just
+                # filled in and leave the modal open on an error they can do
+                # nothing about; core's own `close()` is idempotent, so
+                # keeping the record stopped costs nothing. The reason rides
+                # back on the record so the UI can say why it is not running.
+                record.start_error = str(exc)
+                record.running = False
+                self._publish_state(record)
         else:
             self._publish_state(record)
         return record
 
     def start(self, connection_id: str) -> ConnectionRecord:
+        """Starts the connection, (re-)installing its receive handlers first.
+
+        `Connection.close()` clears every `handle_on_receive` registration as
+        part of its teardown (`core/connections/base.py` `_shutdown_all` --
+        "every standing callback is dropped"). Before this fix, GSim only
+        ever installed handlers once, in `create()`: stopping a connection
+        from the Sidebar and starting it again reconnected the transport
+        just fine but left it with no callbacks at all, so inbound messages
+        were silently discarded by core's own "no route owner -> drop"
+        dispatch rule -- reproduced end to end, the "Received" pane simply
+        never got an entry for anything sent afterward, and only fully
+        recreating the connection (Edit, or restarting GSim) fixed it,
+        because only `create()` used to call this.
+
+        Installed before `unit.start()`, matching the ordering `create()`
+        always used: a reconnecting peer can have data waiting the instant
+        the transport opens, so the handler has to exist first.
+
+        Guarded by `record.handlers_installed` -- NOT by `record.running` --
+        because `unit.start()` is idempotent (a no-op if already started) but
+        `handle_on_receive` is not: registering a route while its first
+        registration is still live raises. The two flags diverge whenever a
+        start fails after the handlers are in place, which is the everyday
+        "TCP client started before its server" case; see the field's own note.
+        """
         record = self.get(connection_id)
+        if not record.handlers_installed:
+            self._install_receive_handlers(record)
+            record.handlers_installed = True
         record.unit.start()
         record.running = True
+        record.start_error = None       # a successful start clears the excuse
+        # Resumes any behaviour configured on this connection -- see
+        # `BehaviourEngine._sync`: "enabled AND connection running" is one
+        # condition, so start/stop need no separate resume bookkeeping.
+        self.behaviours.sync_connection(connection_id)
         self._publish_state(record)
         return record
 
@@ -297,6 +404,10 @@ class GSimRuntime:
         record = self.get(connection_id)
         record.unit.close()
         record.running = False
+        # `close()` drops every standing callback (core's `_shutdown_all`), so
+        # they are genuinely gone and the next start must put them back.
+        record.handlers_installed = False
+        self.behaviours.sync_connection(connection_id)   # pauses them
         self._publish_state(record)
         return record
 
@@ -305,6 +416,9 @@ class GSimRuntime:
         its own (now inert) entry -- harmless, because `close()` is idempotent,
         so its eventual `shutdown_all()` is a no-op on this one."""
         record = self.get(connection_id)
+        # Before closing: a worker mid-tick would otherwise send into a
+        # connection being torn down and log a spurious failure.
+        self.behaviours.remove_connection(connection_id)
         try:
             record.unit.close()
         finally:
@@ -322,12 +436,37 @@ class GSimRuntime:
         selection, which would silently point at a connection that no longer
         exists, leaving its panels blank until the user clicked elsewhere and
         back.
+
+        The POSITION is restored too. `_conn_records` is an ordinary dict and
+        the sidebar renders it in insertion order, so a plain delete-then-create
+        re-inserts the rebuilt connection at the END -- editing the top entry
+        visibly dropped it to the bottom of the list. Reinserting it where it
+        was keeps "edit" from looking like "move".
         """
+        with self._lock:
+            order = list(self._conn_records)
+        position = order.index(connection_id) if connection_id in order else len(order)
+
         was_running = self.get(connection_id).running
         self.delete(connection_id)
-        return self.create(name, config, autostart=was_running, connection_id=connection_id)
+        record = self.create(name, config, autostart=was_running, connection_id=connection_id)
+
+        with self._lock:
+            # `create` appended it; rebuild the mapping with it back in place.
+            # Cheap -- there are a handful of connections, and doing it here
+            # keeps every reader (list(), the snapshot, all_logs()) ordered
+            # without any of them needing to know an edit happened.
+            rebuilt = {
+                key: value for key, value in self._conn_records.items() if key != connection_id
+            }
+            items = list(rebuilt.items())
+            items.insert(position, (connection_id, record))
+            self._conn_records.clear()
+            self._conn_records.update(items)
+        return record
 
     def shutdown(self) -> None:
+        self.behaviours.shutdown()      # stop the workers before their targets vanish
         self._manager.shutdown_all()
         with self._lock:
             self._conn_records.clear()

@@ -38,6 +38,9 @@ export const api = {
   listConnections: () => request('/api/connections'),
   createConnection: (body) => request('/api/connections', { method: 'POST', body: JSON.stringify(body) }),
   updateConnection: (id, body) => request(`/api/connections/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  // One call per saved connection when Loading a session file -- `body` is
+  // `{name, config, autostart}`, core-shaped, from `lib/sessionFile.js`.
+  importConnection: (body) => request('/api/connections/import', { method: 'POST', body: JSON.stringify(body) }),
   deleteConnection: (id) => request(`/api/connections/${id}`, { method: 'DELETE' }),
   start: (id) => request(`/api/connections/${id}/start`, { method: 'POST' }),
   stop: (id) => request(`/api/connections/${id}/stop`, { method: 'POST' }),
@@ -57,10 +60,31 @@ export const api = {
   // Process-wide log history: a send and its matching receive belong to two
   // different connections, so the console backfills globally.
   allLogs: (direction) => request(`/api/logs/${direction}`),
+  // Server-side, so cleared entries do not come back on the next refresh --
+  // these buffers are what allLogs() backfills from.
+  clearLogs: (direction) => request(`/api/logs/${direction}`, { method: 'DELETE' }),
+
+  // Behaviours: scheduled sending. Upsert keyed by (connection, unit, opCode) --
+  // one schedule per message route, so PUT replaces rather than stacking.
+  behaviours: () => request('/api/behaviours'),
+  setBehaviour: (connectionId, body) =>
+    request(`/api/connections/${connectionId}/behaviours`, { method: 'PUT', body: JSON.stringify(body) }),
+  startBehaviour: (id) => request(`/api/behaviours/${id}/start`, { method: 'POST' }),
+  stopBehaviour: (id) => request(`/api/behaviours/${id}/stop`, { method: 'POST' }),
+  deleteBehaviour: (id) => request(`/api/behaviours/${id}`, { method: 'DELETE' }),
 };
 
-/** Live log/state feed. Reconnects on drop; the server replays a snapshot. */
-export function openEventStream(onEvent) {
+/**
+ * Live log/state feed. Reconnects on drop; the server replays a snapshot.
+ *
+ * `onStatus(connected)` reports whether the feed is actually up. Worth
+ * surfacing because a dead socket is otherwise INVISIBLE: the HTTP API keeps
+ * answering, so the app looks online while silently receiving no live
+ * messages, no connection-state changes and no clear broadcasts. Every action
+ * still works over HTTP, but nothing pushed ever arrives, which reads as "the
+ * UI is stale/ignoring me" rather than "the feed dropped".
+ */
+export function openEventStream(onEvent, onStatus) {
   let socket;
   let closed = false;
 
@@ -68,8 +92,10 @@ export function openEventStream(onEvent) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const host = BASE ? BASE.replace(/^https?:\/\//, '') : location.host;
     socket = new WebSocket(`${proto}://${host}/ws/events`);
+    socket.onopen = () => onStatus?.(true);
     socket.onmessage = (event) => onEvent(JSON.parse(event.data));
     socket.onclose = () => {
+      onStatus?.(false);
       if (!closed) setTimeout(connect, 1000);
     };
   };

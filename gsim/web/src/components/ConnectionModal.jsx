@@ -29,13 +29,32 @@ const SIDES = {
 // rather than offered and ignored.
 const ECHO_PROTOCOLS = new Set(['tcp', 'udp']);
 
-// A structures file defines the IRS for ONE link, so it belongs to a peer.
-// Multicast is the exception core makes too: one sender fans out to many
-// receivers over a single shared IRS, so a connection-level list is legal.
+// A structures file defines the IRS for ONE link, so it belongs to a peer --
+// even when there is only one. Multicast is the sole exception core makes:
+// one sender fans out to many receivers over a single shared IRS, so a
+// connection-level list stays legal there (and only there).
 const FANS_OUT = new Set(['multicast']);
-const sharedStructures = (form) => form.peers.length === 1 || FANS_OUT.has(form.protocol);
+const sharedStructures = (form) => FANS_OUT.has(form.protocol);
 
-const BLANK_PEER = { name: '', port: '', unitCode: '', structures: [''] };
+// core never reads "ip" (the remote address) for a listening endpoint -- a
+// TCP/UDP server binds only `local_ip` and learns its peer from whoever
+// connects; DDS is data-centric and doesn't use either IP at all. Offering
+// the field there is offering a value nothing will ever use. `ip` still goes
+// out in the submitted config either way (core requires the key); it is just
+// pinned to a harmless default instead of asked of the user.
+const remoteIpVisible = (form) => {
+  if (form.protocol === 'dds') return false;
+  if (form.protocol === 'multicast') return true;   // the group address, needed by both sides
+  return form.side === 'client';
+};
+const remoteIpLabel = (form) => (form.protocol === 'multicast' ? 'Multicast IP' : 'Remote IP');
+const HIDDEN_IP_DEFAULT = '0.0.0.0';
+
+const BLANK_PEER = {
+  name: '', port: '', unitCode: '', structures: [''],
+  // Per-peer echo override -- blank means "inherit the connection's default".
+  echo_opcode: '', echo_interval: '', echo_timeout: '',
+};
 
 const BLANK = {
   name: '', protocol: 'tcp', side: 'server', ip: '127.0.0.1', local_ip: '127.0.0.1',
@@ -197,6 +216,24 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
     if (showEcho && form.echo_opcode !== '' && codeInvalid(form.echo_opcode, 0xffff)) {
       return setError('Echo opCode must be 0-65535 (decimal, or hex like 0x003C).');
     }
+    if (showEcho) {
+      const badEchoPeer = form.peers.find(
+        (peer) => peer.echo_opcode !== '' && codeInvalid(peer.echo_opcode, 0xffff),
+      );
+      if (badEchoPeer) {
+        return setError(
+          `Connected unit "${badEchoPeer.name || '—'}": echo opCode must be 0-65535 (decimal, or hex like 0x003C).`,
+        );
+      }
+      const mistimedPeer = form.peers.find(
+        (peer) =>
+          peer.echo_interval !== '' && peer.echo_timeout !== '' &&
+          Number(peer.echo_timeout) <= Number(peer.echo_interval),
+      );
+      if (mistimedPeer) {
+        return setError(`Connected unit "${mistimedPeer.name || '—'}": echo timeout must exceed interval.`);
+      }
+    }
 
     // Mirror the server's rule so the reason is visible before a round trip.
     const clean = (list) => (list ?? []).filter((s) => s.trim());
@@ -217,12 +254,20 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
     try {
       await onSubmit({
         ...form,
+        // Pinned rather than asked for once the field is hidden -- core still
+        // requires the key, it just never reads it for a listening endpoint.
+        ip: remoteIpVisible(form) ? form.ip : HIDDEN_IP_DEFAULT,
         unitCode: parseCode(form.unitCode),
         peers: form.peers.map((peer) => ({
           ...peer,
           port: Number(peer.port),
           unitCode: parseCode(peer.unitCode),
           structures: showSharedStructures ? null : clean(peer.structures),
+          // Same reasoning as the connection-level echo keys below: never
+          // submit a value for a protocol/peer that can no longer see it.
+          echo_opcode: !showEcho || peer.echo_opcode === '' ? null : parseCode(peer.echo_opcode),
+          echo_interval: !showEcho || peer.echo_interval === '' ? null : Number(peer.echo_interval),
+          echo_timeout: !showEcho || peer.echo_timeout === '' ? null : Number(peer.echo_timeout),
         })),
         // Never submit a connection-level list when it is not legal -- a value
         // left behind by adding a peer would be rejected by core, same
@@ -301,12 +346,19 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                 </Field>
               </div>
               <div className="flex gap-3">
-                <Field label="Remote IP">
-                  <Input
-                    value={form.ip} required inputMode="numeric" placeholder="0.0.0.0"
-                    onChange={(e) => set('ip', maskIp(e.target.value, form.ip))}
-                  />
-                </Field>
+                {/* Hidden for a listening endpoint (tcp/udp server, any DDS
+                    side): core never reads this address for one, it only
+                    binds `local_ip` and learns its peer from who connects.
+                    Multicast keeps it always, relabeled -- the group address
+                    is needed by senders and receivers alike. */}
+                {remoteIpVisible(form) && (
+                  <Field label={remoteIpLabel(form)}>
+                    <Input
+                      value={form.ip} required inputMode="numeric" placeholder="0.0.0.0"
+                      onChange={(e) => set('ip', maskIp(e.target.value, form.ip))}
+                    />
+                  </Field>
+                )}
                 <Field label="Local IP">
                   <Input
                     value={form.local_ip} inputMode="numeric" placeholder="0.0.0.0"
@@ -384,6 +436,10 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                       onChange={(update) => setPeerStructures(index, update)}
                       onBrowse={(entryIndex) => browseForStructureFile(entryIndex, index)}
                     />
+                  )}
+
+                  {showEcho && (
+                    <PeerEchoFields peer={peer} onChange={(key, value) => setPeer(index, key, value)} />
                   )}
                 </div>
               ))}
@@ -517,6 +573,44 @@ function StructureList({ label, entries, canBrowse, onChange, onBrowse }) {
           />
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * One peer's echo override -- the same three keys as the connection-level
+ * Echo settings section, just scoped to this link. Blank fields fall back to
+ * the connection's default (`EchoSettings.resolve`, core/connections/config.py);
+ * a peer may override just one key (e.g. only the opcode) and still inherit
+ * the rest.
+ */
+function PeerEchoFields({ peer, onChange }) {
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-slate-800/70 pt-2">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
+        Echo override{' '}
+        <span className="normal-case text-slate-600">(blank = connection default)</span>
+      </span>
+      <div className="flex gap-2">
+        <Field label="echo opCode" hint="decimal or 0x hex">
+          <Input
+            value={peer.echo_opcode ?? ''} placeholder="—"
+            onChange={(e) => onChange('echo_opcode', maskCode(e.target.value))}
+          />
+        </Field>
+        <Field label="interval (s)">
+          <Input
+            type="number" step="any" value={peer.echo_interval ?? ''} placeholder="—"
+            onChange={(e) => onChange('echo_interval', e.target.value)}
+          />
+        </Field>
+        <Field label="timeout (s)">
+          <Input
+            type="number" step="any" value={peer.echo_timeout ?? ''} placeholder="—"
+            onChange={(e) => onChange('echo_timeout', e.target.value)}
+          />
+        </Field>
+      </div>
     </div>
   );
 }

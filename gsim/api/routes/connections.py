@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 
-from gsim.api.models import ConnectionCreate, ConnectionUpdate
+from gsim.api.models import ConnectionCreate, ConnectionImport, ConnectionUpdate
 from gsim.core_gateway import get_runtime
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
@@ -49,9 +49,24 @@ def create_connection(request: ConnectionCreate) -> dict[str, Any]:
     can show the real reason ("connections 'A' and 'B' both use unitCode 7")
     rather than a generic failure.
     """
-    config = request.to_core_config()
+    return _create_or_raise(request.name, request.to_core_config(), request.autostart)
+
+
+@router.post("/import", status_code=status.HTTP_201_CREATED)
+def import_connection(request: ConnectionImport) -> dict[str, Any]:
+    """One entry of a Save/Load session file (see `ConnectionImport`'s
+    docstring for why this bypasses `ConnectionCreate` and its stricter
+    contract entirely -- `config` is already core-shaped). The frontend calls
+    this once per saved connection when the user picks a file to Load."""
+    return _create_or_raise(request.name, request.config, request.autostart)
+
+
+def _create_or_raise(name: str, config: dict[str, Any], autostart: bool) -> dict[str, Any]:
+    """Shared by `create_connection` and `import_connection`: both end up
+    calling `runtime.create()` with a core-shaped config dict and need the
+    same core-error -> HTTP-status mapping."""
     try:
-        record = get_runtime().create(request.name, config, autostart=request.autostart)
+        record = get_runtime().create(name, config, autostart=autostart)
     except ValueError as exc:
         # ConnectionConfig.from_json / install-time validation.
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -121,6 +136,12 @@ def start_connection(connection_id: str) -> dict[str, Any]:
     try:
         return get_runtime().start(connection_id).as_dict()
     except OSError as exc:
+        # The peer is not reachable (server not up, port taken, host down).
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # Core refusing a route registration, or any other invariant it
+        # enforces. Reported rather than left as a bare 500, so the toast says
+        # what core actually objected to instead of "Internal Server Error".
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 

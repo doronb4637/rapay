@@ -55,6 +55,42 @@ class Api:
         )
         return result[0] if result else None
 
+    def save_config_file(self, contents: str) -> bool:
+        """Native "save file" dialog for the Sidebar's Save button -- writes
+        `contents` (a JSON string the caller has already formatted) to the
+        chosen path. Returns False if the user cancelled, so the caller can
+        tell "saved" from "nothing happened" without a raised exception either
+        way -- cancelling a save is not an error.
+        """
+        import webview
+
+        result = webview.windows[0].create_file_dialog(
+            webview.FileDialog.SAVE,
+            save_filename="gsim-connections.json",
+            file_types=("JSON files (*.json)", "All files (*.*)"),
+        )
+        if not result:
+            return False
+        target = result[0] if isinstance(result, (list, tuple)) else result
+        Path(target).write_text(contents, encoding="utf-8")
+        return True
+
+    def load_config_file(self) -> str | None:
+        """Native "open file" dialog for the Sidebar's Load button. Returns the
+        file's text content directly, not a path -- unlike
+        `browse_structures_file`, the caller here only ever wants the JSON, so
+        there is no reason to make it round-trip through a second call.
+        """
+        import webview
+
+        result = webview.windows[0].create_file_dialog(
+            webview.FileDialog.OPEN,
+            file_types=("JSON files (*.json)", "All files (*.*)"),
+        )
+        if not result:
+            return None
+        return Path(result[0]).read_text(encoding="utf-8")
+
 
 def _free_port() -> int:
     with socket.socket() as sock:
@@ -98,7 +134,7 @@ def main() -> None:
     _wait_until_up(port)
 
     webview.create_window("GSim — Generic Simulator", f"http://127.0.0.1:{port}",
-                          width=1440, height=900, js_api=Api())
+                          width=1440, height=900, x=100, y=50, js_api=Api())
     # Blocks until the window closes; the daemon server thread then dies with
     # the process, and the app's lifespan shutdown tears down every connection.
     # `icon` replaces the interpreter's default Python logo in the title bar

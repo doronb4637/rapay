@@ -38,6 +38,19 @@ def all_logs(direction: str) -> list[dict[str, Any]]:
     return get_runtime().all_logs(direction)
 
 
+@registry_router.delete("/logs/{direction}")
+def clear_all_logs(direction: str) -> dict[str, int]:
+    """Empty one direction's history for every connection.
+
+    Server-side, not a client-side view filter: these buffers are what
+    `GET /api/logs/{direction}` backfills from, so clearing only the browser's
+    copy would put everything back on the next refresh.
+    """
+    if direction not in ("sent", "received"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="direction must be sent|received")
+    return {"cleared": get_runtime().clear_logs(direction)}
+
+
 @registry_router.get("/schema/{unit_code}/{op_code}")
 def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -> dict[str, Any]:
     """Form schema for an explicit (unitCode, opCode).

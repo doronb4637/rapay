@@ -24,7 +24,14 @@ async def events(websocket: WebSocket) -> None:
     runtime.events.subscribe(asyncio.get_running_loop(), queue)
     try:
         # Backfill so a reconnecting client is not missing the current state.
-        await websocket.send_json({"type": "snapshot", "connections": runtime.list()})
+        # Behaviours ride along: they keep firing across a dropped socket, so a
+        # client that reconnected without them would show an idle Behaviours
+        # panel while traffic was still going out.
+        await websocket.send_json({
+            "type": "snapshot",
+            "connections": runtime.list(),
+            "behaviours": runtime.behaviours.list(),
+        })
         while True:
             await websocket.send_json(await queue.get())
     except WebSocketDisconnect:

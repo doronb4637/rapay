@@ -47,6 +47,7 @@ export default function Sidebar({
                   <div
                     role="button"
                     tabIndex={0}
+
                     onClick={() => onSelect(connection.id)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {

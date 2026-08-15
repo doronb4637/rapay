@@ -19,10 +19,11 @@
  * it provokes (this project's layouts routinely reuse one opcode both ways).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, TriangleAlert } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, Trash2, TriangleAlert } from 'lucide-react';
 import { Badge, EmptyState, IconButton, cx } from './ui';
+import ContextMenu, { useContextMenu } from './ContextMenu';
 
-export default function Console({ sent, received, selected, onSelect }) {
+export default function Console({ sent, received, selected, onSelect, onClear }) {
   return (
     <div className="flex w-[27rem] shrink-0 flex-col border-l border-slate-800">
       <LogPane
@@ -31,6 +32,7 @@ export default function Console({ sent, received, selected, onSelect }) {
         entries={sent}
         selected={selected}
         onSelect={onSelect}
+        onClear={onClear}
         className="min-h-0 flex-1 border-b border-slate-800"
       />
       <LogPane
@@ -39,16 +41,18 @@ export default function Console({ sent, received, selected, onSelect }) {
         entries={received}
         selected={selected}
         onSelect={onSelect}
+        onClear={onClear}
         className="min-h-0 flex-1"
       />
     </div>
   );
 }
 
-function LogPane({ title, direction, entries, selected, onSelect, className }) {
+function LogPane({ title, direction, entries, selected, onSelect, onClear, className }) {
   const [hidden, setHidden] = useState(() => new Set());
   const [follow, setFollow] = useState(true);
   const scrollerRef = useRef(null);
+  const menu = useContextMenu();
 
   const isSent = direction === 'sent';
   const Arrow = isSent ? ArrowUpRight : ArrowDownLeft;
@@ -64,19 +68,49 @@ function LogPane({ title, direction, entries, selected, onSelect, className }) {
 
   // Tail the log, but only while the user is already at the bottom -- yanking
   // the viewport while they read scrollback is the classic console sin.
+  //
+  // Keyed on the NEWEST entry's seq, not on `visible.length`. Once the pane is
+  // at its cap every new message evicts an old one, so the length stops
+  // changing and a length-keyed effect never fires again -- the pane silently
+  // stopped following at exactly the point following matters. `seq` is a
+  // server-side counter that only ever increases, so it changes on every
+  // arrival whether or not the list grew.
+  const newestSeq = visible.length ? visible[visible.length - 1].seq : null;
   useEffect(() => {
     if (!follow) return;
     const scroller = scrollerRef.current;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
-  }, [visible.length, follow]);
+  }, [newestSeq, follow]);
 
   const onScroll = (event) => {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
-    setFollow(scrollHeight - scrollTop - clientHeight < 24);
+    // Generous threshold: at the cap, one row leaves the top as another joins
+    // the bottom, and a tight bound would flip `follow` off on that jitter and
+    // strand the user mid-list.
+    setFollow(scrollHeight - scrollTop - clientHeight < 48);
   };
 
+  // Right-click anywhere in the pane -- header, a row, or the empty area.
+  // Kept on the whole <section> rather than the list so it still works when
+  // the pane is empty, which is exactly when "Clear" is least useful but
+  // "why is nothing here" is most likely to be asked.
+  const menuItems = [
+    {
+      label: `Clear ${title}`,
+      icon: Trash2,
+      danger: true,
+      disabled: entries.length === 0,
+      hint: entries.length ? String(entries.length) : undefined,
+      onSelect: () => onClear?.(direction),
+    },
+  ];
+
   return (
-    <section className={cx('flex flex-col bg-slate-900', className)}>
+    <section
+      onContextMenu={menu.open}
+      className={cx('flex flex-col bg-slate-900', className)}
+    >
+      {menu.menuProps && <ContextMenu {...menu.menuProps} items={menuItems} />}
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-slate-800 px-3">
         <Arrow size={13} className={isSent ? 'text-sky-400' : 'text-emerald-400'} />
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
@@ -110,7 +144,17 @@ function LogPane({ title, direction, entries, selected, onSelect, className }) {
         </div>
       </header>
 
-      <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
+      {/* `overflow-anchor: none` is load-bearing at the cap. Chrome's scroll
+          anchoring compensates when content is removed ABOVE the viewport, so
+          each evicted top row pulled scrollTop up by a row while a new row was
+          appended below -- the view drifted off the bottom a row at a time even
+          though nothing moved it. */}
+      <div
+        ref={scrollerRef}
+        onScroll={onScroll}
+        style={{ overflowAnchor: 'none' }}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
         {visible.length === 0 ? (
           <EmptyState>
             {entries.length === 0

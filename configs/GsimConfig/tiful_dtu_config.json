@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "exported_at": "2026-08-15T10:39:30.075Z",
+  "connections": [
+  {
+      "name": "Tiful",
+      "autostart": true,
+      "config": {
+        "protocol": "tcp",
+        "side": "server",
+        "ip": "0.0.0.0",
+        "local_ip": "127.0.0.1",
+        "unitCode": 1,
+        "connections": {
+          "DTU": {
+            "port": 2000,
+            "unitCode": 2,
+            "Structures": [
+              "C:\\Projects\\Rapat\\rapay\\core\\IRS\\Structures\\Tiful\\tiful_to_dtu.py"
+            ],
+            "echo_opcode": 6,
+            "EchoInterval": 1,
+            "EchoTimeout": 5
+          },
+          "Nigga": {
+            "port": 2001,
+            "unitCode": 3,
+            "Structures": [
+              "C:\\Projects\\Rapat\\rapay\\core\\IRS\\Structures\\Test\\test_messages.py"
+            ],
+            "echo_opcode": 3,
+            "EchoInterval": 1,
+            "EchoTimeout": 5
+          }
+        }
+      }
+    },
+    {
+      "name": "DTU",
+      "autostart": true,
+      "config": {
+        "protocol": "tcp",
+        "side": "client",
+        "ip": "127.0.0.1",
+        "local_ip": "127.0.0.1",
+        "unitCode": 2,
+        "connections": {
+          "Tiful": {
+            "port": 2000,
+            "unitCode": 1,
+            "Structures": [
+              "C:\\Projects\\Rapat\\rapay\\core\\IRS\\Structures\\Tiful\\tiful_to_dtu.py"
+            ],
+            "echo_opcode": 6,
+            "EchoInterval": 1,
+            "EchoTimeout": 5
+          }
+        }
+      }
+    },
+    {
+      "name": "Nigga",
+      "autostart": true,
+      "config": {
+        "protocol": "tcp",
+        "side": "client",
+        "ip": "127.0.0.1",
+        "local_ip": "127.0.0.1",
+        "unitCode": 3,
+        "connections": {
+          "Tiful": {
+            "port": 2001,
+            "unitCode": 1,
+            "Structures": [
+              "C:\\Projects\\Rapat\\rapay\\core\\IRS\\Structures\\Test\\test_messages.py"
+            ],
+            "echo_opcode": 3,
+            "EchoInterval": 1,
+            "EchoTimeout": 5
+          }
+        }
+      }
+    }
+  ]
+}

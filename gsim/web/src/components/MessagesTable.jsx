@@ -9,14 +9,23 @@
  * merged list would offer rows that fail on send.
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Inbox, Search, Send } from 'lucide-react';
+import { Inbox, Repeat, Search, Send } from 'lucide-react';
 import { api } from '../api';
 import { Badge, EmptyState, Input, Panel, PanelHeader, Select, cx } from './ui';
 
 export default function MessagesTable({
   connectionId, peers = [], destination, onDestinationChange,
-  activeOpCode, onCompose, className,
+  activeOpCode, onCompose, behaviours = [], className,
 }) {
+  // Behaviours are keyed by route, so at most one can match a row: this
+  // connection, this destination, this opCode.
+  const behaviourFor = (opCode) =>
+    behaviours.find(
+      (behaviour) =>
+        behaviour.connection_id === connectionId &&
+        behaviour.unit_name === destination &&
+        behaviour.op_code === opCode,
+    );
   const [messages, setMessages] = useState([]);
   const [query, setQuery] = useState('');
   const [error, setError] = useState(null);
@@ -131,6 +140,25 @@ export default function MessagesTable({
                         {message.field_count} field{message.field_count === 1 ? '' : 's'}
                       </div>
                     </div>
+                    {/* A schedule attached to this exact route. Shown here as
+                        well as in the Behaviours panel so the message you
+                        configured carries the evidence -- otherwise a row that
+                        is quietly firing looks identical to one that is not. */}
+                    {behaviourFor(message.op_code) && (
+                      <span
+                        title={`Sending every ${behaviourFor(message.op_code).interval}s`}
+                        className={cx(
+                          'flex shrink-0 items-center gap-0.5 rounded px-1 py-px',
+                          'font-mono text-[9px] ring-1 ring-inset',
+                          behaviourFor(message.op_code).active
+                            ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
+                            : 'bg-slate-800 text-slate-500 ring-slate-700',
+                        )}
+                      >
+                        <Repeat size={9} />
+                        {behaviourFor(message.op_code).interval}s
+                      </span>
+                    )}
                     <Badge tone={isActive ? 'sky' : 'slate'}>{message.op_code_hex}</Badge>
                     <Send
                       size={12}

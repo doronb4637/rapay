@@ -26,19 +26,12 @@ from annotations import *
 """ GLOBAL MESSAGE REGISTRY """
 #: namespace -> unitCode -> opCode -> message class
 STRUCTURE_REGISTRY: dict[Namespace, dict[UnitCode, dict[OpCode, IrsMessage]]] = {}
-
-#: namespace -> alias unitCode -> the unitCode whose layouts it reuses.
-#:
-#: A file written for the 1<->2 link often describes 1<->14 just as well.
-#: `register_pair` lets that one file serve both without duplicating a layout:
-#: a message from unit 14 finds nothing under 14, follows the alias to 2, and
-#: parses correctly. Namespaced for the same reason the layouts are -- two files
-#: each aliasing unit 14 to a DIFFERENT canonical unit is exactly the silent
-#: collision this registry exists to prevent.
+#: A file written for the 1<->2 link can also describes 1<->143 for that we define 143 as a pair of 2.
+#: namespace -> alias unitCode -> defined unitCode.
 PAIR_REGISTRY: dict[Namespace, dict[UnitCode, UnitCode]] = {}
 
 
-def _calling_module_name(depth: int = 2) -> Namespace:
+def _getting_struct_name(depth: int = 2) -> Namespace:
     """`__name__` of the frame `depth` levels up (0 = here, 1 = the register_*
     function, 2 = the structures module that called it)."""
     try:
@@ -64,7 +57,7 @@ def register_message(unitCode: int, opCode: int, message: IrsMessage,
     rejected here: a config may legitimately never use both files together.
     """
     if namespace is None:
-        namespace = _calling_module_name()
+        namespace = _getting_struct_name()
     STRUCTURE_REGISTRY.setdefault(namespace, {}).setdefault(unitCode, {})[opCode] = message
 
 
@@ -77,7 +70,7 @@ def register_pair(unitCode: int, pair: UnitCode, namespace: Namespace | None = N
     `register_pair(2, 14)` means "unit 14 speaks unit 2's IRS".
     """
     if namespace is None:
-        namespace = _calling_module_name()
+        namespace = _getting_struct_name()
     PAIR_REGISTRY.setdefault(namespace, {})[pair] = unitCode
 
 

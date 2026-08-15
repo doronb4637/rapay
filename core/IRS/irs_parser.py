@@ -20,9 +20,7 @@ class IRSAmbiguousError(Exception):
     """Raised when a lookup matches a route defined by more than one structures
     module and was given no scope to choose between them.
 
-    Deliberately NOT a subclass of IRSNotFoundError: `is_irs_exist` swallows
-    that one, and an ambiguous route reported as simply absent is the silent
-    wrong-layout bug all over again.
+    Deliberately NOT a subclass of IRSNotFoundError
     """
 
 
