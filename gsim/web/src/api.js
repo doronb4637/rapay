@@ -72,6 +72,15 @@ export const api = {
   startBehaviour: (id) => request(`/api/behaviours/${id}/start`, { method: 'POST' }),
   stopBehaviour: (id) => request(`/api/behaviours/${id}/stop`, { method: 'POST' }),
   deleteBehaviour: (id) => request(`/api/behaviours/${id}`, { method: 'DELETE' }),
+
+  // Filesystem, for the in-app picker used when no native dialog exists
+  // (`--server` + browser tab). The server browses because the browser refuses
+  // to hand over real paths, and real paths are exactly what core needs.
+  fileRoots: () => request('/api/files/roots'),
+  listFiles: (path, suffix) => request(`/api/files/list${query({ path, suffix })}`),
+  readFile: (path) => request(`/api/files/read${query({ path })}`),
+  saveFile: (path, contents) =>
+    request('/api/files/save', { method: 'POST', body: JSON.stringify({ path, contents }) }),
 };
 
 /**

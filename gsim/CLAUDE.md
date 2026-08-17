@@ -373,6 +373,34 @@ the evidence) **and** `BehavioursPanel`, which is process-wide. The panel is the
 schedule keeps firing while you look at a different connection, so a selection-scoped view could show
 an idle screen while traffic streams out of a connection one click away.
 
+### 10a. File dialogs work in both shells, and light mode is one CSS block
+
+**Picking files.** The native OS dialogs in `gsim/__main__.py` only exist under PyWebView. In
+`--server` mode the UI is an ordinary browser tab, and a `<input type="file">` is no substitute:
+browsers deliberately withhold the real path, which is the only thing core can use (a `Structures`
+entry goes to `tools.general.resolve_module_name`) or the server can write to. So
+`gsim/api/routes/files.py` browses on the server -- which is on the user's own machine anyway -- and
+`FilePickerModal.jsx` renders it. Native dialog when `window.pywebview` exists, in-app picker
+otherwise; both open at the same roots (`IRS/Structures`, `configs/GsimConfig`). The Browse button is
+now always offered -- it used to hide itself without pywebview, which read as the feature vanishing.
+
+The browser-download fallback for Save is gone deliberately: a download lands wherever the browser
+puts downloads under a name the user cannot choose, which was the complaint. Both shells now write a
+chosen path.
+
+**Loading replaces.** A load reproduces what the file describes, so `importConnections` deletes
+every existing connection first (after one confirm, since this closes live links). Merging produced a
+session matching neither the file nor what was there, and reused ports failed entries for reasons the
+file could not explain.
+
+**Light mode.** Tailwind v4 compiles solid colours to `var(--color-<name>)`, so the whole theme is
+the `:root[data-theme='light']` block in `styles.css` -- no component knows a second theme exists.
+The slate ramp is *inverted* (950 ground -> lightest, 100 text -> darkest) because the UI uses it
+positionally, so every surface relationship survives. Accents are *darkened*, not inverted: sky-400
+on near-black is fine, on white it is not. The two dim steps (`slate-600/500`) are measured against
+white rather than mirrored -- a straight inversion put 600 at 2.56:1, unreadable for timestamps.
+Everything now clears 4.39:1, with sent (7.56) and received (7.68) still distinct hues.
+
 ### 11a. `ContextMenu`'s dismissal is containment-checked, not capture-raced
 
 The dismiss listener is `window.addEventListener('mousedown', dismissIfOutside, true)`, and it

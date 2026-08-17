@@ -77,3 +77,17 @@ register_message(
     opCode=0x0012,
     message=SetGeneralFlag
 )
+
+class Data(Structure):
+    num1: int = Byte
+    value: int = Byte
+    array: int = [Byte, 9]
+
+class StructMessage(Message):
+    data: Data
+
+register_message(
+    unitCode=0x01,
+    opCode=0x0200,
+    message=StructMessage
+)

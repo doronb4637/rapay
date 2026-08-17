@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,11 +9,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from gsim.api.routes import behaviours, connections, events, messages
+from gsim.api.routes import behaviours, connections, events, files, messages
 from gsim.core_gateway import get_runtime
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
 
 class _WebFiles(StaticFiles):
     """The built UI, with `index.html` explicitly never cached.
@@ -62,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(messages.router)
     app.include_router(messages.registry_router)
     app.include_router(behaviours.router)
+    app.include_router(files.router)
     app.include_router(events.router)
 
     @app.get("/api/health")

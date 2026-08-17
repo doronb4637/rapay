@@ -27,9 +27,24 @@ from gsim.core_gateway.bootstrap import CORE_ROOT
 #: `python gsim/assets/make_icon.py` (also writes gsim.png alongside it).
 ICON = Path(__file__).resolve().parent / "assets" / "gsim.ico"
 
-#: Where the "browse for an IRS structures file" dialog starts, when it exists
-#: -- falls back to the OS default (an empty directory argument) otherwise.
+#: Where each dialog starts, when the directory exists -- falls back to the OS
+#: default (an empty directory argument) otherwise. Deliberately the same
+#: constants the server-side picker uses (`gsim/api/routes/files.py`), so the
+#: desktop and browser modes open in the same place.
 STRUCTURES_DIR = CORE_ROOT / "IRS" / "Structures"
+CONFIGS_DIR = CORE_ROOT.parent / "configs" / "GsimConfig"
+
+
+def _start_dir(directory: Path, create: bool = False) -> str:
+    """A dialog's starting directory, or "" to let the OS choose. `create` for
+    the save path: a Save dialog pointed at a directory that does not exist
+    silently opens somewhere arbitrary instead."""
+    if create:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    return str(directory) if directory.is_dir() else ""
 
 
 class Api:
@@ -47,10 +62,9 @@ class Api:
         """
         import webview
 
-        directory = str(STRUCTURES_DIR) if STRUCTURES_DIR.is_dir() else ""
         result = webview.windows[0].create_file_dialog(
             webview.FileDialog.OPEN,
-            directory=directory,
+            directory=_start_dir(STRUCTURES_DIR),
             file_types=("Python files (*.py)", "All files (*.*)"),
         )
         return result[0] if result else None
@@ -66,6 +80,7 @@ class Api:
 
         result = webview.windows[0].create_file_dialog(
             webview.FileDialog.SAVE,
+            directory=_start_dir(CONFIGS_DIR, create=True),
             save_filename="gsim-connections.json",
             file_types=("JSON files (*.json)", "All files (*.*)"),
         )
@@ -85,6 +100,7 @@ class Api:
 
         result = webview.windows[0].create_file_dialog(
             webview.FileDialog.OPEN,
+            directory=_start_dir(CONFIGS_DIR, create=True),
             file_types=("JSON files (*.json)", "All files (*.*)"),
         )
         if not result:

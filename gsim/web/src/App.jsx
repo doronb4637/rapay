@@ -14,9 +14,11 @@
  * the moment they land.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, Upload } from 'lucide-react';
+import { Download, Moon, Sun, Upload } from 'lucide-react';
 import { api, openEventStream } from './api';
-import { buildSessionExport, downloadJsonFile, parseSessionImport } from './lib/sessionFile';
+import { buildSessionExport, parseSessionImport } from './lib/sessionFile';
+import { applyTheme, initialTheme } from './lib/theme';
+import FilePickerModal from './components/FilePickerModal';
 import Logo from './components/Logo';
 import Sidebar from './components/Sidebar';
 import MessagesTable from './components/MessagesTable';
@@ -71,7 +73,12 @@ export default function App() {
   // renders from it directly, so re-rendering the whole app per character
   // would be pure waste.
   const composeDrafts = useRef(new Map());
-  const fileInputRef = useRef(null);
+  // null | {mode:'open'|'save', contents?} -- the in-app picker for config
+  // Save/Load, used when no native dialog exists (`--server` + browser tab).
+  const [configPicker, setConfigPicker] = useState(null);
+  const [theme, setTheme] = useState(initialTheme);
+
+  useEffect(() => { applyTheme(theme); }, [theme]);
 
   const selected = connections.find((c) => c.id === selectedId) ?? null;
   const peers = selected?.peers ?? [];
@@ -202,6 +209,29 @@ export default function App() {
   // lib/sessionFile.js) -- each entry is exactly one `GET /api/connections`
   // record's `{name, config}`, re-submitted via `POST /api/connections/import`.
   const importConnections = async (entries) => {
+    // A load reproduces what the FILE describes, so anything already open is
+    // replaced rather than merged onto -- merging silently produced a session
+    // that matched neither the file nor what was there before, and reused
+    // ports failed entries for reasons the file could not explain. Confirmed
+    // first because this closes live connections.
+    const existing = connections.length;
+    if (existing) {
+      const ok = window.confirm(
+        `Replace ${existing} open connection${existing === 1 ? '' : 's'} with ` +
+        `${entries.length} from this file?\n\nRunning connections will be closed.`,
+      );
+      if (!ok) return;
+      for (const connection of connections) {
+        try {
+          await api.deleteConnection(connection.id);
+        } catch {
+          /* already gone; the reload below reflects the truth either way */
+        }
+      }
+      setSelectedId(null);
+      await refresh();
+    }
+
     let succeeded = 0;
     let firstError = null;
     for (const entry of entries) {
@@ -222,32 +252,27 @@ export default function App() {
     notify(`Loaded ${succeeded} connection${succeeded === 1 ? '' : 's'}.`);
   };
 
+  // Desktop: the OS dialogs in `gsim/__main__.py`, which open at
+  // configs/GsimConfig. Browser (`--server`): the in-app picker backed by
+  // `/api/files/*`, which opens at the same directory and writes through the
+  // server -- a download would land wherever the browser puts downloads, with
+  // no say in the name or the folder.
   const handleSaveConfig = () =>
     guard(async () => {
       const text = JSON.stringify(buildSessionExport(connections), null, 2);
       if (canUseNativeFiles()) {
         await window.pywebview.api.save_config_file(text);
       } else {
-        downloadJsonFile(text, 'gsim-connections.json');
+        setConfigPicker({ mode: 'save', contents: text });
       }
     });
 
-  // Desktop: native dialog reads the file and hands back its text directly.
-  // Browser (`--server` mode): no dialog to call, so click a hidden
-  // `<input type="file">` instead and read it in handleFileChosen below.
   const handleLoadConfigClick = () => {
-    if (!canUseNativeFiles()) return fileInputRef.current?.click();
+    if (!canUseNativeFiles()) return setConfigPicker({ mode: 'open' });
     guard(async () => {
       const text = await window.pywebview.api.load_config_file();
       if (text) await importConnections(parseSessionImport(text));
     });
-  };
-
-  const handleFileChosen = (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';   // so re-picking the same file still fires onChange
-    if (!file) return;
-    guard(async () => importConnections(parseSessionImport(await file.text())));
   };
 
   const pickLog = (entry) => {
@@ -312,12 +337,12 @@ export default function App() {
           onClick={handleSaveConfig}
         />
         <IconButton icon={Upload} title="Load connections from a file" onClick={handleLoadConfigClick} />
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={handleFileChosen}
+
+        <span className="mx-1 h-4 w-px shrink-0 bg-slate-800" />
+        <IconButton
+          icon={theme === 'light' ? Moon : Sun}
+          title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+          onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
         />
 
         {/* Only surface these when something is actually DOWN -- a permanent
@@ -495,6 +520,27 @@ export default function App() {
           }
           {...behaviourActions}
           onClose={() => setBehaviourDraft(null)}
+        />
+      )}
+
+      {/* Browser-mode Save/Load. `suffix` is what keeps the listing to configs
+          rather than every file in the folder. */}
+      {configPicker && (
+        <FilePickerModal
+          mode={configPicker.mode}
+          title={configPicker.mode === 'save' ? 'Save connections' : 'Load connections'}
+          suffix=".json"
+          defaultFileName="gsim-connections.json"
+          onPick={async (path) => {
+            if (configPicker.mode === 'save') {
+              await api.saveFile(path, configPicker.contents);
+              notify(`Saved to ${path}`);
+            } else {
+              const { contents } = await api.readFile(path);
+              await importConnections(parseSessionImport(contents));
+            }
+          }}
+          onClose={() => setConfigPicker(null)}
         />
       )}
 

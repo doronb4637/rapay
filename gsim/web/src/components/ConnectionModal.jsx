@@ -9,7 +9,8 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, FolderOpen, Loader2, Plus, Save, Trash2, X } from 'lucide-react';
-import { Badge, Button, Field, IconButton, Input, Select, cx } from './ui';
+import { Badge, Button, Field, IconButton, Input, PathInput, Select, cx } from './ui';
+import FilePickerModal from './FilePickerModal';
 
 //: Only present inside the pywebview desktop shell -- `--server`/browser mode
 //: has no native file dialog, so the Browse button hides rather than errors.
@@ -171,16 +172,27 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
     return () => window.removeEventListener('pywebviewready', onReady);
   }, [canBrowse]);
 
-  /** `peerIndex === null` targets the connection-level list. */
+  /** Where a picked path should be written back. `peerIndex === null` targets
+   *  the connection-level list. Held in state while the in-app picker is open,
+   *  since that modal reports its result asynchronously. */
+  const [picking, setPicking] = useState(null);
+
+  const applyStructurePath = (path, { index, peerIndex }) => {
+    if (peerIndex === null) {
+      set('structures', form.structures.map((s, i) => (i === index ? path : s)));
+    } else {
+      setPeerStructures(peerIndex, (list) => list.map((s, i) => (i === index ? path : s)));
+    }
+  };
+
+  /** Native dialog in the desktop shell, in-app picker in a browser tab. The
+   *  button is offered EITHER WAY -- previously it only appeared under
+   *  pywebview, so `--server` mode had no way to browse at all. */
   const browseForStructureFile = async (index, peerIndex = null) => {
+    if (!canBrowse) return setPicking({ index, peerIndex });
     try {
       const path = await window.pywebview.api.browse_structures_file();
-      if (!path) return;
-      if (peerIndex === null) {
-        set('structures', form.structures.map((s, i) => (i === index ? path : s)));
-      } else {
-        setPeerStructures(peerIndex, (list) => list.map((s, i) => (i === index ? path : s)));
-      }
+      if (path) applyStructurePath(path, { index, peerIndex });
     } catch (err) {
       setError(err.message ?? String(err));
     }
@@ -432,7 +444,6 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                     <StructureList
                       label="IRS structures for this link"
                       entries={peer.structures ?? ['']}
-                      canBrowse={canBrowse}
                       onChange={(update) => setPeerStructures(index, update)}
                       onBrowse={(entryIndex) => browseForStructureFile(entryIndex, index)}
                     />
@@ -466,7 +477,6 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
               >
                 <StructureList
                   entries={form.structures}
-                  canBrowse={canBrowse}
                   onChange={(update) => set('structures', update(form.structures))}
                   onBrowse={(index) => browseForStructureFile(index)}
                 />
@@ -515,6 +525,18 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
           </footer>
         </form>
       </div>
+
+      {/* Browser-mode fallback for Browse. Rendered inside this modal so it
+          layers above it; the desktop shell never reaches here. */}
+      {picking && (
+        <FilePickerModal
+          mode="open"
+          title="Select an IRS structures file"
+          suffix=".py"
+          onPick={(path) => applyStructurePath(path, picking)}
+          onClose={() => setPicking(null)}
+        />
+      )}
     </div>
   );
 }
@@ -538,7 +560,7 @@ function Section({ title, hint, badge, action, children }) {
  * peer when each link has its own, or once for the connection when a single
  * list legitimately covers it.
  */
-function StructureList({ label, entries, canBrowse, onChange, onBrowse }) {
+function StructureList({ label, entries, onChange, onBrowse }) {
   const rows = entries.length ? entries : [''];
   return (
     <div className="flex flex-col gap-1.5">
@@ -553,19 +575,22 @@ function StructureList({ label, entries, canBrowse, onChange, onBrowse }) {
       {rows.map((entry, index) => (
         <div key={index} className="flex items-end gap-2">
           <Field>
-            <Input
+            {/* Abbreviated while idle so a browsed absolute path does not push
+                its only meaningful part out of view; focusing reveals the real
+                value, which is what gets submitted. */}
+            <PathInput
               value={entry} required placeholder="Test.test_messages"
               onChange={(e) =>
                 onChange((list) => list.map((s, i) => (i === index ? e.target.value : s)))
               }
             />
           </Field>
-          {canBrowse && (
-            <IconButton
-              icon={FolderOpen} title="Browse for a structures file"
-              onClick={() => onBrowse(index)}
-            />
-          )}
+          {/* Always offered: with no pywebview the click opens the in-app
+              picker instead, rather than the button vanishing. */}
+          <IconButton
+            icon={FolderOpen} title="Browse for a structures file"
+            onClick={() => onBrowse(index)}
+          />
           <IconButton
             icon={Trash2} title="Remove module" variant="danger"
             disabled={rows.length === 1}

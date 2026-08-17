@@ -121,6 +121,47 @@ export function Input({ className, ...rest }) {
   return <input className={cx(CONTROL, 'font-mono', className)} {...rest} />;
 }
 
+/**
+ * An Input for filesystem paths, abbreviated while idle.
+ *
+ * A browsed structures path is long and front-loaded with the least useful part
+ * (`C:\Projects\Rapat\rapay\core\IRS\...`), so in a narrow field the only thing
+ * visible is the part that never varies. This shows the tail while the field is
+ * idle and the REAL value the moment it is focused -- so clicking in, Ctrl+A and
+ * copy all yield the complete path, and the value handed to the server is
+ * always untouched.
+ *
+ * Deliberately not a formatting of the value itself: the path is what core
+ * resolves and what a saved config stores, so it must survive a round trip
+ * through this field byte for byte.
+ */
+export function PathInput({ value, className, onFocus, onBlur, ...rest }) {
+  const [focused, setFocused] = React.useState(false);
+  const text = String(value ?? '');
+  return (
+    <input
+      className={cx(CONTROL, 'font-mono', className)}
+      // `title` covers the hover case; focus covers select/copy.
+      title={text || undefined}
+      value={focused ? text : abbreviatePath(text)}
+      onFocus={(event) => { setFocused(true); onFocus?.(event); }}
+      onBlur={(event) => { setFocused(false); onBlur?.(event); }}
+      {...rest}
+    />
+  );
+}
+
+/** `…\Structures\Tiful\tiful_to_dtu.py` -- the last few segments, which are the
+ *  ones that identify the file. Left alone if it is already short, or if it is
+ *  a dotted module name rather than a path. */
+export function abbreviatePath(text, segments = 3) {
+  if (!text || text.length <= 40) return text;
+  const separator = text.includes('\\') ? '\\' : '/';
+  const parts = text.split(separator).filter(Boolean);
+  if (parts.length <= segments) return text;
+  return `…${separator}${parts.slice(-segments).join(separator)}`;
+}
+
 export function Select({ className, children, ...rest }) {
   return (
     <select className={cx(CONTROL, 'cursor-pointer appearance-none pr-7', className)} {...rest}>
