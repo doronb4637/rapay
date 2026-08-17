@@ -1,6 +1,6 @@
 # logic/bitfields.py
 import struct
-from enum import IntEnum, EnumMeta
+from enum import IntEnum, EnumType
 from typing import Any, Callable
 from .buffers import BinaryReader, BinaryWriter
 from .fields import BaseField
@@ -8,7 +8,7 @@ from .constants import *
 
 
 def baseType(base_type: int, endian = "<") -> Callable[[type], type]:
-    def wrapper(cls: EnumMeta | BitFieldMeta) -> EnumMeta | BitFieldMeta:
+    def wrapper(cls: EnumType | BitFieldMeta) -> EnumType | BitFieldMeta:
         fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(base_type, UInt8) if isinstance(base_type, int) else base_type
         if isinstance(cls, BitFieldMeta):
             cls._packer_ = struct.Struct(endian + fmt)

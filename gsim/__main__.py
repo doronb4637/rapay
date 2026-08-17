@@ -132,7 +132,6 @@ def main() -> None:
     )
     server.start()
     _wait_until_up(port)
-
     webview.create_window("GSim — Generic Simulator", f"http://127.0.0.1:{port}",
                           width=1440, height=900, x=100, y=50, js_api=Api())
     # Blocks until the window closes; the daemon server thread then dies with
