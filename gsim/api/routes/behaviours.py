@@ -39,8 +39,8 @@ def list_behaviours() -> list[dict[str, Any]]:
     return get_runtime().behaviours.list()
 
 
-@router.put("/connections/{connection_id}/behaviours")
-def set_behaviour(connection_id: str, request: BehaviourRequest) -> dict[str, Any]:
+@router.put("/connections/{connection_name}/behaviours")
+def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, Any]:
     """Create or replace the behaviour on one route.
 
     The payload is normalised HERE, once, by the same `build_payload` the manual
@@ -51,7 +51,7 @@ def set_behaviour(connection_id: str, request: BehaviourRequest) -> dict[str, An
     """
     runtime = get_runtime()
     try:
-        record = runtime.get(connection_id)
+        record = runtime.get(connection_name)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -74,7 +74,7 @@ def set_behaviour(connection_id: str, request: BehaviourRequest) -> dict[str, An
 
     try:
         behaviour = runtime.behaviours.set(
-            connection_id=connection_id,
+            connection_name=connection_name,
             unit_name=request.unit_name,
             op_code=request.op_code,
             kind=request.kind,

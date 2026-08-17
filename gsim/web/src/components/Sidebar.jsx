@@ -10,9 +10,9 @@ import { Cable, Pencil, Plus, Trash2 } from 'lucide-react';
 import { Badge, EmptyState, IconButton, Panel, PanelHeader, StatusDot, cx } from './ui';
 
 export default function Sidebar({
-  connections, selectedId, onSelect, onCreate, onEdit, onDelete, onToggle, className,
+  connections, selectedName, onSelect, onCreate, onEdit, onDelete, onToggle, className,
 }) {
-  const selected = connections.find((connection) => connection.id === selectedId) ?? null;
+  const selected = connections.find((connection) => connection.name === selectedName) ?? null;
 
   return (
     <Panel className={className}>
@@ -41,18 +41,18 @@ export default function Sidebar({
         ) : (
           <ul className="flex flex-col gap-0.5">
             {connections.map((connection) => {
-              const isSelected = connection.id === selectedId;
+              const isSelected = connection.name === selectedName;
               return (
-                <li key={connection.id}>
+                <li key={connection.name}>
                   <div
                     role="button"
                     tabIndex={0}
 
-                    onClick={() => onSelect(connection.id)}
+                    onClick={() => onSelect(connection.name)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault();
-                        onSelect(connection.id);
+                        onSelect(connection.name);
                       }
                     }}
                     className={cx(

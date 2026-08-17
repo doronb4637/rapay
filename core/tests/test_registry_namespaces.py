@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from IRS import Message, UInt16
-from IRS.REGISTRY import (
+from core.IRS import Message, UInt16
+from core.IRS.REGISTRY import (
     PAIR_REGISTRY,
     STRUCTURE_REGISTRY,
     messages_in,
@@ -24,7 +24,7 @@ from IRS.REGISTRY import (
     register_message,
     register_pair,
 )
-from IRS.irs_parser import (
+from core.IRS.irs_parser import (
     IRSAmbiguousError,
     IRSNotFoundError,
     get_message_class,

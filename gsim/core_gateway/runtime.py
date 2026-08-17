@@ -34,7 +34,7 @@ from typing import Any, Callable
 
 from . import bootstrap  # noqa: F401
 
-from connections.manager import ConnectionManager
+from core.connections.manager import ConnectionManager
 
 from . import registry as message_registry
 from .behaviours import BehaviourEngine
@@ -48,7 +48,6 @@ LOG_LIMIT = 2000
 class LogEntry:
     seq: int
     direction: str          # "sent" | "received"
-    connection_id: str
     connection_name: str    # which GSim connection owns this entry (the console is global)
     unit_name: str          # OUR name when sent, the SENDER's configured name when received
     unit_code: int          # the code the layout is registered under -- ours on send, theirs on receive
@@ -67,7 +66,6 @@ class LogEntry:
         return {
             "seq": self.seq,
             "direction": self.direction,
-            "connection_id": self.connection_id,
             "connection_name": self.connection_name,
             "unit_name": self.unit_name,
             "unit_code": self.unit_code,
@@ -114,7 +112,12 @@ class EventBus:
 
 @dataclass
 class ConnectionRecord:
-    id: str
+    #: The connection's name IS its identity -- there is no separate opaque id.
+    #: Every route addresses it (`/api/connections/{name}/...`), `_conn_records`
+    #: is keyed by it, and log entries and behaviours reference it. That is what
+    #: makes a URL readable by hand; the cost is that names must be unique
+    #: (enforced in `create`) and URL-safe (enforced in `api/models.py`), and
+    #: that renaming is a change of identity -- see `replace`.
     name: str
     config: dict[str, Any]
     unit: Any                       # core Connection | CompositeUnit
@@ -171,7 +174,6 @@ class ConnectionRecord:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id,
             "name": self.name,
             "running": self.running,
             "protocol": self.config.get("protocol"),
@@ -196,7 +198,6 @@ class GSimRuntime:
         self._manager = ConnectionManager()
         self._conn_records: dict[str, ConnectionRecord] = {}
         self._lock = threading.RLock()
-        self._ids = itertools.count(1)
         self._seq = itertools.count(1)
         self.events = EventBus()
         # Scheduled sending. Given `self.send` -- the same call the manual send
@@ -213,11 +214,11 @@ class GSimRuntime:
         )
         self._watcher.start()
 
-    def _is_connection_running(self, connection_id: str) -> bool:
+    def _is_connection_running(self, connection_name: str) -> bool:
         """Unknown connection reads as "not running" rather than raising -- the
         behaviour engine polls this during teardown races."""
         with self._lock:
-            record = self._conn_records.get(connection_id)
+            record = self._conn_records.get(connection_name)
         return bool(record and record.running)
 
     def _watch_unit_state(self) -> None:
@@ -245,13 +246,13 @@ class GSimRuntime:
                 connection_records = list(self._conn_records.values())
             existing_conn = set()
             for conn_record in connection_records:
-                existing_conn.add(conn_record.id)
+                existing_conn.add(conn_record.name)
                 try:
                     record_active_unit = set(conn_record.unit.active_units)
                 except Exception:  # a torn-down unit must not kill the watcher
                     continue
-                if previous.get(conn_record.id) != record_active_unit:
-                    previous[conn_record.id] = record_active_unit
+                if previous.get(conn_record.name) != record_active_unit:
+                    previous[conn_record.name] = record_active_unit
                     self._publish_state(conn_record)
             # Pop the id of a deleted connection config.
             for deleted_conn in set(previous) - existing_conn:
@@ -262,15 +263,15 @@ class GSimRuntime:
         with self._lock:
             return [conn_record.as_dict() for conn_record in self._conn_records.values()]
 
-    def get(self, connection_id: str) -> ConnectionRecord:
+    def get(self, connection_name: str) -> ConnectionRecord:
         with self._lock:
-            record = self._conn_records.get(connection_id)
+            record = self._conn_records.get(connection_name)
         if record is None:
-            raise KeyError(f"no connection with id {connection_id!r}")
+            raise KeyError(f"no connection named {connection_name!r}")
         return record
 
-    def logs(self, connection_id: str, direction: str) -> list[dict[str, Any]]:
-        record = self.get(connection_id)
+    def logs(self, connection_name: str, direction: str) -> list[dict[str, Any]]:
+        record = self.get(connection_name)
         source = record.sent if direction == "sent" else record.received
         return [entry.as_dict() for entry in source]
 
@@ -319,9 +320,8 @@ class GSimRuntime:
         return cleared
 
     # -- lifecycle -------------------------------------------------------
-    def create(self, name: str, config: dict[str, Any], autostart: bool = True,
-               connection_id: str | None = None) -> ConnectionRecord:
-        """Build a connection through core's factory and register it here.
+    def create(self, name: str, config: dict[str, Any], autostart: bool = True) -> ConnectionRecord:
+        """Build a connection through core's factory and register it under `name`.
 
         `ConnectionManager.create()` validates the config, imports the
         `Structures` modules (each populating its own namespace) and instantiates
@@ -329,21 +329,30 @@ class GSimRuntime:
         rather than at first I/O, which is what lets the modal report a bad
         config inline.
 
-        `connection_id` is only passed by `replace()`, so an edit keeps its
-        identity; see the note there.
+        The name must be free. It is the identifier every route, log entry and
+        behaviour uses, so a duplicate would not merely be confusing -- the
+        second connection would take over the first's URLs and silently inherit
+        its behaviours. Rejected here rather than in the request model because
+        only the runtime knows what already exists.
         """
-        connection_id = connection_id or f"conn-{next(self._ids)}"
-        unit = self._manager.create(connection_id, config)
-        record = ConnectionRecord(id=connection_id, name=name, config=config, unit=unit)
         with self._lock:
-            self._conn_records[connection_id] = record
+            if name in self._conn_records:
+                raise ValueError(
+                    f"a connection named {name!r} already exists; names identify "
+                    f"connections and must be unique")
+
+        unit = self._manager.create(name, config)
+        record = ConnectionRecord(name=name, config=config, unit=unit)
+        with self._lock:
+            self._conn_records[name] = record
+        connection_name = name
 
         # NOT installed here -- see `start()`. Nothing can arrive before the
         # connection actually starts, so there's no need to register early,
         # and `start()` is what has to (re-)install them anyway.
         if autostart:
             try:
-                self.start(connection_id)
+                self.start(connection_name)
             except OSError as exc:
                 # The CONFIG is fine, the peer just is not reachable yet -- a
                 # TCP client created before its server is listening is the
@@ -360,7 +369,7 @@ class GSimRuntime:
             self._publish_state(record)
         return record
 
-    def start(self, connection_id: str) -> ConnectionRecord:
+    def start(self, connection_name: str) -> ConnectionRecord:
         """Starts the connection, (re-)installing its receive handlers first.
 
         `Connection.close()` clears every `handle_on_receive` registration as
@@ -386,7 +395,7 @@ class GSimRuntime:
         start fails after the handlers are in place, which is the everyday
         "TCP client started before its server" case; see the field's own note.
         """
-        record = self.get(connection_id)
+        record = self.get(connection_name)
         if not record.handlers_installed:
             self._install_receive_handlers(record)
             record.handlers_installed = True
@@ -396,71 +405,75 @@ class GSimRuntime:
         # Resumes any behaviour configured on this connection -- see
         # `BehaviourEngine._sync`: "enabled AND connection running" is one
         # condition, so start/stop need no separate resume bookkeeping.
-        self.behaviours.sync_connection(connection_id)
+        self.behaviours.sync_connection(connection_name)
         self._publish_state(record)
         return record
 
-    def stop(self, connection_id: str) -> ConnectionRecord:
-        record = self.get(connection_id)
+    def stop(self, connection_name: str) -> ConnectionRecord:
+        record = self.get(connection_name)
         record.unit.close()
         record.running = False
         # `close()` drops every standing callback (core's `_shutdown_all`), so
         # they are genuinely gone and the next start must put them back.
         record.handlers_installed = False
-        self.behaviours.sync_connection(connection_id)   # pauses them
+        self.behaviours.sync_connection(connection_name)   # pauses them
         self._publish_state(record)
         return record
 
-    def delete(self, connection_id: str) -> None:
+    def delete(self, connection_name: str) -> None:
         """Close the connection and drop GSim's record. Core's manager keeps
         its own (now inert) entry -- harmless, because `close()` is idempotent,
         so its eventual `shutdown_all()` is a no-op on this one."""
-        record = self.get(connection_id)
+        record = self.get(connection_name)
         # Before closing: a worker mid-tick would otherwise send into a
         # connection being torn down and log a spurious failure.
-        self.behaviours.remove_connection(connection_id)
+        self.behaviours.remove_connection(connection_name)
         try:
             record.unit.close()
         finally:
             with self._lock:
-                self._conn_records.pop(connection_id, None)
-            self.events.publish({"type": "connection.deleted", "connection_id": connection_id})
+                self._conn_records.pop(connection_name, None)
+            self.events.publish({"type": "connection.deleted", "connection_name": connection_name})
 
-    def replace(self, connection_id: str, name: str, config: dict[str, Any]) -> ConnectionRecord:
+    def replace(self, connection_name: str, name: str, config: dict[str, Any]) -> ConnectionRecord:
         """'Edit' = delete + recreate. `ConnectionConfig` is `frozen=True` by
         design (a live `Connection` caches state derived from it), so there is
         no in-place mutation path and none should be invented.
 
-        The id is REUSED across the rebuild. Minting a new one would orphan
-        every reference the caller holds -- most visibly the UI's current
-        selection, which would silently point at a connection that no longer
-        exists, leaving its panels blank until the user clicked elsewhere and
-        back.
+        An edit MAY rename, and because the name is the identity that is a
+        change of identity: the connection is addressed at a new URL afterwards,
+        and (as with any edit) its logs and behaviours do not survive -- `delete`
+        drops both. Callers holding the old name must follow the returned record.
 
-        The POSITION is restored too. `_conn_records` is an ordinary dict and
-        the sidebar renders it in insertion order, so a plain delete-then-create
+        Renaming ONTO another connection's name is refused before anything is
+        torn down, so a rejected edit cannot leave the original deleted.
+
+        The POSITION is restored. `_conn_records` is an ordinary dict and the
+        sidebar renders it in insertion order, so a plain delete-then-create
         re-inserts the rebuilt connection at the END -- editing the top entry
         visibly dropped it to the bottom of the list. Reinserting it where it
         was keeps "edit" from looking like "move".
         """
         with self._lock:
             order = list(self._conn_records)
-        position = order.index(connection_id) if connection_id in order else len(order)
+            if name != connection_name and name in self._conn_records:
+                raise ValueError(
+                    f"a connection named {name!r} already exists; names identify "
+                    f"connections and must be unique")
+        position = order.index(connection_name) if connection_name in order else len(order)
 
-        was_running = self.get(connection_id).running
-        self.delete(connection_id)
-        record = self.create(name, config, autostart=was_running, connection_id=connection_id)
+        was_running = self.get(connection_name).running
+        self.delete(connection_name)
+        record = self.create(name, config, autostart=was_running)
 
         with self._lock:
             # `create` appended it; rebuild the mapping with it back in place.
             # Cheap -- there are a handful of connections, and doing it here
             # keeps every reader (list(), the snapshot, all_logs()) ordered
             # without any of them needing to know an edit happened.
-            rebuilt = {
-                key: value for key, value in self._conn_records.items() if key != connection_id
-            }
+            rebuilt = {key: value for key, value in self._conn_records.items() if key != name}
             items = list(rebuilt.items())
-            items.insert(position, (connection_id, record))
+            items.insert(position, (name, record))
             self._conn_records.clear()
             self._conn_records.update(items)
         return record
@@ -472,12 +485,12 @@ class GSimRuntime:
             self._conn_records.clear()
 
     # -- messaging -------------------------------------------------------
-    def send(self, connection_id: str, unit_name: str, op_code: int,
+    def send(self, connection_name: str, unit_name: str, op_code: int,
              payload: dict[str, Any]) -> dict[str, Any]:
         """Encode + send, and log it. `payload` is a plain dict: core's
         `_encode` hands any non-`bytes` to `irs_to_bytes`, which calls
         `message_class.from_dict()` itself -- so no IRS object is built here."""
-        record = self.get(connection_id)
+        record = self.get(connection_name)
         # Scoped by the DESTINATION: our own unit code is the same for every
         # peer, so it alone cannot say which link's layout this opcode means.
         structures = record.structures_for(unit_name)
@@ -538,7 +551,6 @@ class GSimRuntime:
         entry = LogEntry(
             seq=next(self._seq),
             direction=direction,
-            connection_id=record.id,
             connection_name=record.name,
             unit_name=unit_name,
             unit_code=unit_code,

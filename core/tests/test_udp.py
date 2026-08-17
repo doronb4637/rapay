@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 def test_unit_name_optional_with_a_single_connected_unit(manager, free_port):
@@ -117,7 +117,7 @@ def test_server_send_before_any_inbound_datagram_raises(manager, free_port):
 
 
 def test_malformed_datagram_is_dropped_not_fatal(manager, free_port):
-    from connections.framing import HEADER_SIZE
+    from core.connections.framing import HEADER_SIZE
 
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",

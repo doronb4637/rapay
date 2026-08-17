@@ -14,7 +14,7 @@ plus config-file loading come from `tools`.
 See README.md for the full design write-up.
 """
 
-from IRS.irs_parser import irs_to_bytes, parse_irs
+from core.IRS.irs_parser import irs_to_bytes, parse_irs
 
 from .config import ConnectionConfig, Protocol, Side
 from .framing import (

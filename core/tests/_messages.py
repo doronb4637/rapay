@@ -20,8 +20,8 @@ also avoids by omitting the future import.
 """
 from enum import IntEnum
 
-from IRS import Byte, Message, UInt16, baseType
-from IRS.REGISTRY import register_message
+from core.IRS import Byte, Message, UInt16, baseType
+from core.IRS.REGISTRY import register_message
 
 #: Opaque byte payload -- what most transport/dispatch-level tests need: they
 #: only care that bytes arrived intact, not what they mean.

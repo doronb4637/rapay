@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Callable, TypeVar
 
-from annotations import *
+from core.annotations import *
 from .base import Connection, ReceiveCallback
 from .composite import CompositeUnit
 

@@ -60,8 +60,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from tools.general import resolve_module_name, validated_opCode, validated_unitCode
-from annotations import *
+from core.tools.general import resolve_module_name, validated_opCode, validated_unitCode
+from core.annotations import *
 
 DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0

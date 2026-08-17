@@ -21,7 +21,7 @@ import logging
 import socket
 import struct as pystruct
 
-from IRS.irs_parser import IRSDataError
+from core.IRS.irs_parser import IRSDataError
 
 from .base import FramedConnection
 from .config import ConnectionConfig, Side

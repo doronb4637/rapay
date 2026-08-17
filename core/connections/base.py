@@ -20,9 +20,9 @@ from abc import ABC, abstractmethod
 from asyncio import Event
 from typing import Any, Callable, Coroutine, Iterable
 
-from annotations import *
-from IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
-from tools.general import validated_opCode
+from core.annotations import *
+from core.IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
+from core.tools.general import validated_opCode
 
 from .config import ConnectionConfig, EchoSettings
 from .framing import pack_message

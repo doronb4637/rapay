@@ -6,9 +6,9 @@ sandbox's network namespace has no multicast routing).
 """
 import pytest
 
-from connections.composite import CompositeUnit
-from connections.manager import ConnectionManager
-from tests._messages import TEXT_UNIT_CODE
+from core.connections.composite import CompositeUnit
+from core.connections.manager import ConnectionManager
+from core.tests._messages import TEXT_UNIT_CODE
 
 
 def _member(protocol_mode, port, own_code=TEXT_UNIT_CODE, peer_code=TEXT_UNIT_CODE, side="client"):

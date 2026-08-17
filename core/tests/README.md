@@ -6,9 +6,9 @@ independent of `connections/test_framework.py` (that script stays as-is; this
 suite is the pytest-native counterpart, with its own fixtures and its own
 dedicated IRS message range so the two never collide).
 
-`connections`, `IRS`, `tools` and this `tests` package all live under
-`<repo-root>/core/` -- the repo root itself is one level above the actual
-source tree.
+`core` is an ordinary Python package rooted at `<repo-root>/` (`core/__init__.py`), so `connections`,
+`IRS`, `tools` and this `tests` package are all reached as `core.connections`, `core.IRS`,
+`core.tools`, `core.tests` -- absolute imports through `core`, not top-level packages of their own.
 
 ## Running
 
@@ -19,11 +19,10 @@ installed) from the **repo root**, not from inside `core/`:
 .venv/Scripts/python.exe -m pytest
 ```
 
-`pytest.ini` lives at the repo root and sets `pythonpath = core` /
-`testpaths = core/tests`, so `connections`/`IRS`/`tools`/`annotations` resolve
-the same way they do for `core/connections/test_framework.py`, without an
-installed package. `pytest core` (an explicit path) works too, but plain
-`pytest` from the repo root is what `testpaths` is there for.
+`pytest.ini` lives at the repo root and sets `pythonpath = .` / `testpaths = core/tests`, so
+`core.connections`/`core.IRS`/`core.tools`/`core.annotations` resolve the same way they do for
+`core/connections/test_framework.py`, without an installed package. `pytest core` (an explicit path)
+works too, but plain `pytest` from the repo root is what `testpaths` is there for.
 
 Skip the slower, real-timing echo tests during iteration:
 

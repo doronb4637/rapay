@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 def test_multi_unit_round_trip(manager, free_ports):
@@ -136,7 +136,7 @@ def test_send_with_no_active_peer_raises_connection_error(manager, free_port):
 
 
 def test_own_unit_code_is_stamped_in_the_header_not_the_peers(manager, free_port):
-    from connections.framing import unpack_header
+    from core.connections.framing import unpack_header
 
     connection = manager.create("c", {
         "protocol": "tcp", "unitCode": 77, "side": "client",

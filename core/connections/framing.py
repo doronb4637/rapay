@@ -13,7 +13,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from IRS.irs_parser import IRSDataError
+from core.IRS.irs_parser import IRSDataError
 # "<" = little-endian, no padding. B = uint8, H = uint16, H = uint16.
 _HEADER_STRUCT = struct.Struct("<BHH")
 

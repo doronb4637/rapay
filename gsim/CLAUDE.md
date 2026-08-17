@@ -62,7 +62,7 @@ gsim/
   __main__.py                 PyWebView desktop launcher + `--server` headless mode
                                 (js_api: browse_structures_file, save_config_file, load_config_file)
   core_gateway/                THE ONLY PACKAGE THAT IMPORTS core
-    bootstrap.py                puts <repo-root>/core on sys.path (must import first)
+    bootstrap.py                puts <repo-root> on sys.path so `core...` resolves (must import first)
     schema.py                   IRS message class -> JSON form schema (recursive)
     registry.py                 read-only, namespace-scoped view of the IRS registry
     payloads.py                 zero-fill + counted-array sync before encoding
@@ -133,9 +133,11 @@ abstraction. Two additions specific to this package:
 ### 1. The isolation boundary: `core_gateway`
 
 `gsim/core_gateway/` is the entire surface area of GSim's dependency on `core`. `bootstrap.py` is
-imported first by every other module in the package and puts `<repo-root>/core` on `sys.path` (core's
-own internal imports are absolute and rooted at `core/` itself -- `from IRS.irs_parser import ...`,
-`from annotations import *` -- so `core/`, not the repo root, has to be the thing on the path).
+imported first by every other module in the package and puts the REPO ROOT on `sys.path` (`core` is
+an ordinary package rooted there, `core/__init__.py`, and its own internal imports are absolute
+through it -- `from core.IRS.irs_parser import ...`, `from core.annotations import *` -- so the repo
+root, not `core/` itself, has to be the thing on the path; `CORE_ROOT` stays a plain filesystem path
+for `STRUCTURES_DIR`/`CONFIGS_DIR`, unrelated to what's importable).
 Everything above `core_gateway` -- `gsim/api/*`, `gsim/web/*` -- talks only to this package's public
 functions (`get_runtime()`, `list_messages()`, `message_schema()`, `build_payload()`), never to
 `connections`/`IRS`/`tools` directly. This is what makes the isolation grep in the top-of-file rule
@@ -249,6 +251,26 @@ running connection's internals is exactly the kind of `core`-touching shortcut t
 `PUT /api/connections/{id}` (`runtime.replace()`) is delete-then-recreate under the hood, preserving
 whether the connection was running.
 
+### 6a. A connection's NAME is its identifier
+
+There is no opaque `conn-1` id. `_conn_records` is keyed by name, every route addresses it
+(`/api/connections/{connection_name}/...`), and `LogEntry` / `Behaviour` reference it. This was a
+deliberate trade, made to keep hand-typed URLs readable — `curl .../api/connections/Tiful/messages`
+instead of looking up which number `Tiful` happens to be this run. Three things pay for it:
+
+- **Names must be unique.** Enforced in `runtime.create`/`replace` (not the request model — only the
+  runtime knows what exists). A duplicate would not merely confuse: the second connection would take
+  over the first's URLs and inherit its behaviours.
+- **Names must be URL-safe.** `CONNECTION_NAME_PATTERN` in `api/models.py` allows only
+  `[A-Za-z0-9._-]`. A `/` would split the path into segments matching no route; a space cannot be
+  typed raw at all — which would defeat the entire point. `import` is additionally reserved, since it
+  shares a path position with `POST /api/connections/import`.
+- **Renaming is a change of identity.** `replace` accepts current + new name; the connection is
+  addressed at a new URL afterwards, and (as with any edit — see §7) its logs and behaviours do not
+  survive, because `delete` drops both. A rename onto an existing name is refused *before* anything
+  is torn down, so a rejected edit cannot leave the original deleted. `App.jsx` follows the returned
+  record so the UI selection does not point at a name that no longer exists.
+
 ### 7a. Save/Load a session, and why import bypasses `ConnectionCreate`
 
 The title bar's Save/Load buttons (`App.jsx`, next to the GSim logo -- not the Connections panel's
@@ -349,7 +371,7 @@ are the stated direction.
 
 Load-bearing rules:
 
-- **Keyed by route, `(connection_id, unit_name, op_code)`** — at most one schedule per message per
+- **Keyed by route, `(connection_name, unit_name, op_code)`** — at most one schedule per message per
   destination, mirroring what core enforces internally for `_periodic_tasks` and for the same
   reason: two schedules on one route would silently double its rate. `PUT` is therefore an upsert.
 - **`enabled AND connection running`** is one condition, evaluated in `BehaviourEngine._sync`. That

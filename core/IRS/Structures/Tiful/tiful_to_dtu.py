@@ -1,6 +1,6 @@
-from IRS import *
+from core.IRS import *
 from enum import IntEnum
-from IRS.REGISTRY import register_message
+from core.IRS.REGISTRY import register_message
 
 """ Data Types """
 @baseType(1)

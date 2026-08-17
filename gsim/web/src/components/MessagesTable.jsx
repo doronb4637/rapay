@@ -14,7 +14,7 @@ import { api } from '../api';
 import { Badge, EmptyState, Input, Panel, PanelHeader, Select, cx } from './ui';
 
 export default function MessagesTable({
-  connectionId, peers = [], destination, onDestinationChange,
+  connectionName, peers = [], destination, onDestinationChange,
   activeOpCode, onCompose, behaviours = [], className,
 }) {
   // Behaviours are keyed by route, so at most one can match a row: this
@@ -22,7 +22,7 @@ export default function MessagesTable({
   const behaviourFor = (opCode) =>
     behaviours.find(
       (behaviour) =>
-        behaviour.connection_id === connectionId &&
+        behaviour.connection_name === connectionName &&
         behaviour.unit_name === destination &&
         behaviour.op_code === opCode,
     );
@@ -33,9 +33,9 @@ export default function MessagesTable({
   useEffect(() => {
     setQuery('');
     setError(null);
-    if (!connectionId || !destination) return setMessages([]);
+    if (!connectionName || !destination) return setMessages([]);
     let cancelled = false;
-    api.messages(connectionId, destination).then(
+    api.messages(connectionName, destination).then(
       (next) => !cancelled && setMessages(next),
       (err) => {
         if (cancelled) return;
@@ -44,7 +44,7 @@ export default function MessagesTable({
       },
     );
     return () => { cancelled = true; };
-  }, [connectionId, destination]);
+  }, [connectionName, destination]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -68,7 +68,7 @@ export default function MessagesTable({
           </span>
           <Select
             value={destination ?? ''}
-            disabled={!connectionId || peers.length === 0}
+            disabled={!connectionName || peers.length === 0}
             onChange={(event) => onDestinationChange(event.target.value)}
             className="!py-1 text-[11px]"
           >
@@ -88,14 +88,14 @@ export default function MessagesTable({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Filter messages…"
-            disabled={!connectionId}
+            disabled={!connectionName}
             className="!py-1 pl-7 text-[11px]"
           />
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {!connectionId ? (
+        {!connectionName ? (
           <EmptyState icon={Inbox}>Select a connection to see the messages it can send.</EmptyState>
         ) : !destination ? (
           <EmptyState icon={Inbox}>Select a destination unit to see the messages for that link.</EmptyState>

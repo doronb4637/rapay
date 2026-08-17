@@ -2,7 +2,7 @@ import logging
 
 from .buffers import BinaryReader
 from .REGISTRY import *
-from annotations import *
+from core.annotations import *
 
 logger = logging.getLogger("parser")
 

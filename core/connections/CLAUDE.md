@@ -10,17 +10,21 @@ not an application.
 
 ## Commands
 
-`connections`, `IRS`, `tools` and `annotations` all live directly under `core/` (the repo root is
-`core`'s parent) — `core` itself needs to be on `sys.path`, not the repo root:
+`core` is an ordinary Python package (`core/__init__.py`), rooted at the REPO ROOT — not a `sys.path`
+entry in its own right. Every internal import is absolute through it: `core.connections`, `core.IRS`,
+`core.tools`, `core.annotations`. So it's the repo root that needs to be on `sys.path`, not `core/`:
 
 - Run the manual smoke-test harness (real loopback sockets, no pytest dependency), from anywhere —
-  it resolves its own path: `python core/connections/test_framework.py`
+  it resolves its own path (inserts the repo root, its own great-grandparent):
+  `python core/connections/test_framework.py`
 - Run the pytest suite (`core/tests/`) from the repo root — `pytest.ini` there sets
-  `pythonpath = core`: `pytest`
-- Sanity-check imports: `PYTHONPATH=core python -c "import connections; print('import ok')"`
-- Compile-check the whole package: `PYTHONPATH=core python -m compileall -q core/connections`
+  `pythonpath = .`: `pytest`
+- Sanity-check imports: `python -c "import core.connections; print('import ok')"` (run from the repo
+  root, or set `PYTHONPATH` to it)
+- Compile-check the whole package: `python -m compileall -q core/connections`
 
-(On Windows PowerShell, set `PYTHONPATH` first: `$env:PYTHONPATH = "core"`.)
+(On Windows PowerShell from somewhere other than the repo root, set `PYTHONPATH` first:
+`$env:PYTHONPATH = "<repo-root>"`.)
 
 There is no separate lint/build step. DDS support (`dds.py`) is optional and self-disables
 (`DdsConnection = None`) when the RTI Connext Python API isn't installed; the rest of the

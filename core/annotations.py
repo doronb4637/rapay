@@ -1,7 +1,7 @@
 from asyncio import Task, Future
 from typing import Iterable
 
-from IRS.core import Message
+from core.IRS.core import Message
 
 """ IRS Types """
 IrsMessage = type[Message]

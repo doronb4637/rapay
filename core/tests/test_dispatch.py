@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 def _pair(manager, port, server_unit_code=100, client_unit_code=101,
@@ -220,7 +220,7 @@ def test_callback_exception_is_swallowed_and_does_not_kill_the_read_loop(manager
 def test_malformed_payload_fails_the_parked_receive_message(manager, free_port):
     """A payload IRS can't parse into the registered layout surfaces as an
     exception to whoever is waiting -- it must not hang until timeout."""
-    from connections.framing import pack_message
+    from core.connections.framing import pack_message
 
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",

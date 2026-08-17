@@ -20,9 +20,8 @@ import pytest
 # Importing this is what registers this suite's IRS message layouts --
 # module-level `register_message()` calls, same convention the framework
 # itself documents for `IRS.Structures.Test.test_messages`.
-import tests._messages as messages  # noqa: F401
-
-from connections.manager import ConnectionManager
+import core.tests._messages as messages  # noqa: F401
+from core.connections.manager import ConnectionManager
 
 
 # --------------------------------------------------------------------------- #

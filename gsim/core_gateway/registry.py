@@ -27,7 +27,7 @@ from typing import Any, Sequence
 
 from . import bootstrap  # noqa: F401
 
-from IRS.irs_parser import (
+from core.IRS.irs_parser import (
     IRSAmbiguousError,
     IRSNotFoundError,
     get_message_class,
@@ -87,7 +87,10 @@ def message_schema(unit_code: int, op_code: int,
         )
     schema = describe_message(message_class, unit_code, op_code)
     schema["namespace"] = next(
-        (ns for op, _cls, ns in list_routes(unit_code, namespaces) if op == op_code), None
+        (namespace
+         for route_op_code, _message_cls, namespace in list_routes(unit_code, namespaces)
+         if route_op_code == op_code),
+        None,
     )
     return schema
 

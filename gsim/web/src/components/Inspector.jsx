@@ -60,7 +60,7 @@ function HeaderStat({ label, value }) {
 }
 
 export default function Inspector({
-  connectionId, selection, peers, destination, onSent, onBehaviour, behaviour,
+  connectionName, selection, peers, destination, onSent, onBehaviour, behaviour,
   draftKey, drafts,
 }) {
   if (!selection) {
@@ -77,8 +77,8 @@ export default function Inspector({
     <ComposeForm
       // Destination is part of the identity: it selects the layout, so
       // switching peers must rebuild the form, not reuse the old schema.
-      key={`${connectionId}:${destination}:${selection.opCode}`}
-      connectionId={connectionId}
+      key={`${connectionName}:${destination}:${selection.opCode}`}
+      connectionName={connectionName}
       opCode={selection.opCode}
       peers={peers}
       destination={destination}
@@ -97,7 +97,7 @@ export default function Inspector({
 /* Compose                                                             */
 /* ------------------------------------------------------------------ */
 function ComposeForm({
-  connectionId, opCode, peers, destination, onSent, onBehaviour, behaviour,
+  connectionName, opCode, peers, destination, onSent, onBehaviour, behaviour,
   draftKey, drafts,
 }) {
   const [schema, setSchema] = useState(null);
@@ -128,7 +128,7 @@ function ComposeForm({
     let cancelled = false;
     setSchema(null);
     setError(null);
-    api.messageSchema(connectionId, opCode, unitName).then(
+    api.messageSchema(connectionName, opCode, unitName).then(
       (next) => {
         if (cancelled) return;
         setSchema(next);
@@ -141,14 +141,14 @@ function ComposeForm({
       (err) => !cancelled && setError(err.message),
     );
     return () => { cancelled = true; };
-  }, [connectionId, opCode, unitName, draftKey]);
+  }, [connectionName, opCode, unitName, draftKey]);
 
   const submit = async (event) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const entry = await api.send(connectionId, { unit_name: unitName, op_code: opCode, payload });
+      const entry = await api.send(connectionName, { unit_name: unitName, op_code: opCode, payload });
       onSent?.(entry);
       setFlash(true);
       setTimeout(() => setFlash(false), 1200);

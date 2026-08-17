@@ -91,20 +91,20 @@ def _create_or_raise(name: str, config: dict[str, Any], autostart: bool) -> dict
     return record.as_dict()
 
 
-@router.get("/{connection_id}")
-def get_connection(connection_id: str) -> dict[str, Any]:
-    return _record(connection_id).as_dict()
+@router.get("/{connection_name}")
+def get_connection(connection_name: str) -> dict[str, Any]:
+    return _record(connection_name).as_dict()
 
 
-@router.put("/{connection_id}")
-def update_connection(connection_id: str, request: ConnectionUpdate) -> dict[str, Any]:
+@router.put("/{connection_name}")
+def update_connection(connection_name: str, request: ConnectionUpdate) -> dict[str, Any]:
     """'Edit'. Rebuilds rather than mutates: `ConnectionConfig` is
     `frozen=True, slots=True` and a live `Connection` caches state derived from
     it, so in-place edits would desync those caches. Running state is
     preserved across the rebuild."""
-    _record(connection_id)
+    _record(connection_name)
     try:
-        record = get_runtime().replace(connection_id, request.name, request.to_core_config())
+        record = get_runtime().replace(connection_name, request.name, request.to_core_config())
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ModuleNotFoundError as exc:
@@ -124,17 +124,17 @@ def update_connection(connection_id: str, request: ConnectionUpdate) -> dict[str
     return record.as_dict()
 
 
-@router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_connection(connection_id: str) -> None:
-    _record(connection_id)
-    get_runtime().delete(connection_id)
+@router.delete("/{connection_name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_connection(connection_name: str) -> None:
+    _record(connection_name)
+    get_runtime().delete(connection_name)
 
 
-@router.post("/{connection_id}/start")
-def start_connection(connection_id: str) -> dict[str, Any]:
-    _record(connection_id)
+@router.post("/{connection_name}/start")
+def start_connection(connection_name: str) -> dict[str, Any]:
+    _record(connection_name)
     try:
-        return get_runtime().start(connection_id).as_dict()
+        return get_runtime().start(connection_name).as_dict()
     except OSError as exc:
         # The peer is not reachable (server not up, port taken, host down).
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -145,14 +145,14 @@ def start_connection(connection_id: str) -> dict[str, Any]:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@router.post("/{connection_id}/stop")
-def stop_connection(connection_id: str) -> dict[str, Any]:
-    _record(connection_id)
-    return get_runtime().stop(connection_id).as_dict()
+@router.post("/{connection_name}/stop")
+def stop_connection(connection_name: str) -> dict[str, Any]:
+    _record(connection_name)
+    return get_runtime().stop(connection_name).as_dict()
 
 
-def _record(connection_id: str):
+def _record(connection_name: str):
     try:
-        return get_runtime().get(connection_id)
+        return get_runtime().get(connection_name)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

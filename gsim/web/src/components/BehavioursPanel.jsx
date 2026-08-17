@@ -23,8 +23,8 @@ export default function BehavioursPanel({
   // tally stay visible, so minimising never hides the fact that something is
   // still sending. That is the whole reason this panel exists.
   const [collapsed, setCollapsed] = useState(false);
-  const nameOf = (connectionId) =>
-    connections.find((connection) => connection.id === connectionId)?.name ?? connectionId;
+  const nameOf = (connectionName) =>
+    connections.find((connection) => connection.name === connectionName)?.name ?? connectionName;
 
   const running = behaviours.filter((behaviour) => behaviour.active).length;
 
@@ -111,7 +111,7 @@ export default function BehavioursPanel({
                     {behaviour.message_name ?? behaviour.op_code_hex}
                   </div>
                   <div className="truncate font-mono text-[10px] text-slate-500">
-                    {nameOf(behaviour.connection_id)} → {behaviour.unit_name} · every {behaviour.interval}s
+                    {nameOf(behaviour.connection_name)} → {behaviour.unit_name} · every {behaviour.interval}s
                   </div>
                 </div>
 

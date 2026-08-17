@@ -4,7 +4,7 @@ EchoSettings resolution. Pure logic, no I/O, no event loop.
 """
 import pytest
 
-from connections.config import ConnectionConfig, EchoSettings, Protocol, Side
+from core.connections.config import ConnectionConfig, EchoSettings, Protocol, Side
 
 
 def _base(**overrides):
@@ -290,8 +290,8 @@ def test_from_json_fails_at_load_time_on_bad_unit_echo():
 # --------------------------------------------------------------------------- #
 # Per-unit Structures: a structures file describes ONE link
 # --------------------------------------------------------------------------- #
-TEST_MESSAGES = "IRS.Structures.Test.test_messages"
-TIFUL_MESSAGES = "IRS.Structures.Tiful.tiful_to_dtu"
+TEST_MESSAGES = "core.IRS.Structures.Test.test_messages"
+TIFUL_MESSAGES = "core.IRS.Structures.Tiful.tiful_to_dtu"
 
 
 def test_from_json_resolves_structures_per_unit():

@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import IRS
-from tools.file_functions import read_unit_config
-from tools.general import import_modules
+from core.tools.file_functions import read_unit_config
+from core.tools.general import import_modules
 
 from .base import Connection
 from .composite import CompositeUnit

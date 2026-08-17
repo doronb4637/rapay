@@ -30,10 +30,10 @@ from typing import Any
 
 from . import bootstrap  # noqa: F401  -- must precede every `core` import
 
-import IRS.constants as _constants
-from IRS.bitfields import BitField
-from IRS.core import ArrayField, Structure
-from IRS.fields import BaseField, EnumField, Field
+import core.IRS.constants as _constants
+from core.IRS.bitfields import BitField
+from core.IRS.core import ArrayField, Structure
+from core.IRS.fields import BaseField, EnumField, Field
 
 #: struct format char -> the name the IRS constants module gives it. Built from
 #: `IRS.constants` rather than hardcoded, so a new type there shows up here for

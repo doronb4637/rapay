@@ -19,7 +19,7 @@ from gsim.core_gateway import (
     message_schema,
 )
 
-router = APIRouter(prefix="/api/connections/{connection_id}", tags=["messages"])
+router = APIRouter(prefix="/api/connections/{connection_name}", tags=["messages"])
 
 #: Registry lookups that are not scoped to one connection.
 registry_router = APIRouter(prefix="/api", tags=["registry"])
@@ -73,7 +73,7 @@ def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -
 
 
 @router.get("/messages")
-def connection_messages(connection_id: str, unit_name: str | None = None) -> list[dict[str, Any]]:
+def connection_messages(connection_name: str, unit_name: str | None = None) -> list[dict[str, Any]]:
     """Every message this connection is permitted to SEND to `unit_name`.
 
     Queries with OUR unit code, because that is the code `irs_to_bytes` is
@@ -83,16 +83,16 @@ def connection_messages(connection_id: str, unit_name: str | None = None) -> lis
     which link's layouts an opcode belongs to. Omitting `unit_name` lists every
     peer's messages, each row tagged with its namespace.
     """
-    record = _record(connection_id)
+    record = _record(connection_name)
     structures = record.structures_for(unit_name) if unit_name else None
     return list_messages(record.own_unit_code, structures)
 
 
 @router.get("/messages/{op_code}/schema")
-def message_form_schema(connection_id: str, op_code: int,
+def message_form_schema(connection_name: str, op_code: int,
                         unit_name: str | None = None) -> dict[str, Any]:
     """The recursive form schema the Inspector renders, for one destination."""
-    record = _record(connection_id)
+    record = _record(connection_name)
     structures = record.structures_for(unit_name) if unit_name else None
     try:
         return message_schema(record.own_unit_code, op_code, structures)
@@ -103,7 +103,7 @@ def message_form_schema(connection_id: str, op_code: int,
 
 
 @router.post("/send")
-def send_message(connection_id: str, request: SendMessageRequest) -> dict[str, Any]:
+def send_message(connection_name: str, request: SendMessageRequest) -> dict[str, Any]:
     """Normalise the form payload, then send it.
 
     `build_payload` is what makes the Inspector's rules real: absent fields
@@ -111,7 +111,7 @@ def send_message(connection_id: str, request: SendMessageRequest) -> dict[str, A
     `to_bytes`) and every counted array's length field is reconciled with its
     list (otherwise the receiver silently mis-parses).
     """
-    record = _record(connection_id)
+    record = _record(connection_name)
     try:
         # Scoped by destination: the same opcode may mean different layouts on
         # two links, and only the peer says which.
@@ -124,7 +124,7 @@ def send_message(connection_id: str, request: SendMessageRequest) -> dict[str, A
 
     payload = build_payload(schema, request.payload)
     try:
-        return get_runtime().send(connection_id, request.unit_name, request.op_code, payload)
+        return get_runtime().send(connection_name, request.unit_name, request.op_code, payload)
     except ValueError as exc:
         # Unknown unit name for this connection.
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -134,17 +134,17 @@ def send_message(connection_id: str, request: SendMessageRequest) -> dict[str, A
 
 
 @router.get("/logs/{direction}")
-def logs(connection_id: str, direction: str) -> list[dict[str, Any]]:
+def logs(connection_name: str, direction: str) -> list[dict[str, Any]]:
     """History for the orange (sent) / brown (received) panels. The live feed
     arrives over the WebSocket; this backfills on (re)connect."""
     if direction not in ("sent", "received"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="direction must be sent|received")
-    _record(connection_id)
-    return get_runtime().logs(connection_id, direction)
+    _record(connection_name)
+    return get_runtime().logs(connection_name, direction)
 
 
-def _record(connection_id: str):
+def _record(connection_name: str):
     try:
-        return get_runtime().get(connection_id)
+        return get_runtime().get(connection_name)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

@@ -20,7 +20,7 @@ IS the namespaced registration.
 """
 import sys
 
-from annotations import *
+from core.annotations import *
 
 
 """ GLOBAL MESSAGE REGISTRY """

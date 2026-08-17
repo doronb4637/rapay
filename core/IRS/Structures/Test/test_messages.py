@@ -18,7 +18,7 @@ before the connection object exists.
 from enum import IntEnum
 
 from core.IRS.core import *
-from IRS.REGISTRY import register_message
+from core.IRS.REGISTRY import register_message
 
 #: The two peers in test_framework.test_irs_parser_roundtrip.
 CLIENT_UNIT_CODE = 21

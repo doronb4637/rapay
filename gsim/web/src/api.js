@@ -67,8 +67,8 @@ export const api = {
   // Behaviours: scheduled sending. Upsert keyed by (connection, unit, opCode) --
   // one schedule per message route, so PUT replaces rather than stacking.
   behaviours: () => request('/api/behaviours'),
-  setBehaviour: (connectionId, body) =>
-    request(`/api/connections/${connectionId}/behaviours`, { method: 'PUT', body: JSON.stringify(body) }),
+  setBehaviour: (connectionName, body) =>
+    request(`/api/connections/${connectionName}/behaviours`, { method: 'PUT', body: JSON.stringify(body) }),
   startBehaviour: (id) => request(`/api/behaviours/${id}/start`, { method: 'POST' }),
   stopBehaviour: (id) => request(`/api/behaviours/${id}/stop`, { method: 'POST' }),
   deleteBehaviour: (id) => request(`/api/behaviours/${id}`, { method: 'DELETE' }),

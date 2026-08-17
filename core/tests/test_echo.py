@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 pytestmark = pytest.mark.slow
 

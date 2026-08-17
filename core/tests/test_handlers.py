@@ -4,9 +4,9 @@ collection, and `install_handler`'s wiring into `Connection.handle_on_receive`.
 """
 import pytest
 
-from connections.handlers import UnitHandler, install_handler, route
-from connections.manager import ConnectionManager
-from tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.connections.handlers import UnitHandler, install_handler, route
+from core.connections.manager import ConnectionManager
+from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 # --------------------------------------------------------------------------- #

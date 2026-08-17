@@ -3,9 +3,9 @@ from typing import Any, Type
 from enum import IntEnum
 from beartype.door import is_bearable
 
-from IRS.buffers import BinaryReader, BinaryWriter
-from IRS.bitfields import BitField, baseType
-from IRS.fields import BaseField, Field, EnumField
+from .buffers import BinaryReader, BinaryWriter
+from .bitfields import BitField, baseType
+from .fields import BaseField, Field, EnumField
 from .constants import *
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)

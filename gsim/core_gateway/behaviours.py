@@ -22,7 +22,7 @@ Two design points worth stating, because both were deliberate choices:
    its payload ONCE at schedule time, so anything that varies per tick (a
    counter, a timestamp, jitter) is impossible through it by construction.
 
-2. **Behaviours are keyed by ROUTE, not by id.** `(connection_id, unit_name,
+2. **Behaviours are keyed by ROUTE, not by id.** `(connection_name, unit_name,
    op_code)` -- one schedule per message per destination. This mirrors the rule
    core enforces internally for `_periodic_tasks` and exists for the same
    reason: two schedules on one route would silently double its send rate, and
@@ -58,7 +58,7 @@ MIN_INTERVAL_SECONDS = 0.001
 @dataclass
 class Behaviour:
     id: str
-    connection_id: str
+    connection_name: str
     unit_name: str
     op_code: int
     kind: str
@@ -80,7 +80,7 @@ class Behaviour:
     def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "connection_id": self.connection_id,
+            "connection_name": self.connection_name,
             "unit_name": self.unit_name,
             "op_code": self.op_code,
             "op_code_hex": f"0x{self.op_code:04X}",
@@ -103,9 +103,9 @@ class BehaviourEngine:
     Collaborators are injected rather than imported so this module never
     reaches back into `runtime` (which owns an instance of this):
 
-      `send(connection_id, unit_name, op_code, payload)` -- the SAME call the
+      `send(connection_name, unit_name, op_code, payload)` -- the SAME call the
           manual send button makes, which is what gets each tick logged.
-      `is_connection_running(connection_id) -> bool`
+      `is_connection_running(connection_name) -> bool`
       `publish(event: dict)` -- EventBus fan-out to WebSocket clients.
     """
 
@@ -136,7 +136,7 @@ class BehaviourEngine:
         return behaviour
 
     # -- mutation --------------------------------------------------------
-    def set(self, connection_id: str, unit_name: str, op_code: int, kind: str,
+    def set(self, connection_name: str, unit_name: str, op_code: int, kind: str,
             payload: dict[str, Any], interval: float = 1.0,
             message_name: str | None = None, enabled: bool = True) -> Behaviour:
         """Create or REPLACE the behaviour on this route.
@@ -152,7 +152,7 @@ class BehaviourEngine:
                 f"interval must be at least {MIN_INTERVAL_SECONDS}s, got {interval}")
 
         with self._lock:
-            existing = self._find_by_route(connection_id, unit_name, op_code)
+            existing = self._find_by_route(connection_name, unit_name, op_code)
             if existing is not None:
                 # Reuse the id so the UI's selection//highlight survives an edit,
                 # and reset the counters -- they describe THIS schedule, and
@@ -171,7 +171,7 @@ class BehaviourEngine:
             else:
                 behaviour = Behaviour(
                     id=f"bhv-{next(self._ids)}",
-                    connection_id=connection_id,
+                    connection_name=connection_name,
                     unit_name=unit_name,
                     op_code=op_code,
                     kind=kind,
@@ -205,7 +205,7 @@ class BehaviourEngine:
         self._publish_all()
 
     # -- connection lifecycle hooks --------------------------------------
-    def sync_connection(self, connection_id: str) -> None:
+    def sync_connection(self, connection_name: str) -> None:
         """Re-evaluate every behaviour on one connection.
 
         Called by the runtime after that connection starts or stops. Because
@@ -216,20 +216,20 @@ class BehaviourEngine:
         with self._lock:
             affected = [
                 behaviour for behaviour in self._behaviours.values()
-                if behaviour.connection_id == connection_id
+                if behaviour.connection_name == connection_name
             ]
             for behaviour in affected:
                 self._sync(behaviour)
         if affected:
             self._publish_all()
 
-    def remove_connection(self, connection_id: str) -> None:
+    def remove_connection(self, connection_name: str) -> None:
         """Drop every behaviour belonging to a DELETED connection -- unlike a
         stop, there is nothing left for them to resume onto."""
         with self._lock:
             doomed = [
                 behaviour_id for behaviour_id, behaviour in self._behaviours.items()
-                if behaviour.connection_id == connection_id
+                if behaviour.connection_name == connection_name
             ]
             for behaviour_id in doomed:
                 self._stop_worker(behaviour_id)
@@ -244,10 +244,10 @@ class BehaviourEngine:
             self._behaviours.clear()
 
     # -- internals -------------------------------------------------------
-    def _find_by_route(self, connection_id: str, unit_name: str,
+    def _find_by_route(self, connection_name: str, unit_name: str,
                        op_code: int) -> Behaviour | None:
         for behaviour in self._behaviours.values():
-            if (behaviour.connection_id == connection_id
+            if (behaviour.connection_name == connection_name
                     and behaviour.unit_name == unit_name
                     and behaviour.op_code == op_code):
                 return behaviour
@@ -256,7 +256,7 @@ class BehaviourEngine:
     def _sync(self, behaviour: Behaviour) -> None:
         """Make the worker match `enabled AND connection running`. Caller holds
         the lock. Idempotent -- every lifecycle path routes through here."""
-        should_run = behaviour.enabled and self._is_running(behaviour.connection_id)
+        should_run = behaviour.enabled and self._is_running(behaviour.connection_name)
         running = behaviour.id in self._workers
         if should_run and not running:
             self._start_worker(behaviour)
@@ -315,7 +315,7 @@ class BehaviourEngine:
         schedule, because the usual cause (peer not connected yet) is transient
         and the behaviour should still be firing when it recovers."""
         try:
-            self._send(behaviour.connection_id, behaviour.unit_name,
+            self._send(behaviour.connection_name, behaviour.unit_name,
                        behaviour.op_code, behaviour.payload)
         except Exception as exc:  # noqa: BLE001 -- surfaced on the behaviour, not raised
             if stop.is_set():

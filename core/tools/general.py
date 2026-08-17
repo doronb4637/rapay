@@ -4,10 +4,20 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from annotations import *
+from core.annotations import *
 
 #: tools/ and IRS/ are siblings under core/.
 STRUCTURES_ROOT = Path(__file__).resolve().parent.parent / "IRS" / "Structures"
+
+
+#: `IRS.Structures` is now reached as `core.IRS.Structures` -- `core/` stopped
+#: being a `sys.path` root itself (the repo root is, and `core` is an ordinary
+#: package under it). Every namespace this module hands out has to carry that
+#: prefix, or `importlib.import_module` simply cannot find it -- and the
+#: prefix `IRS.REGISTRY.register_message` captures via `sys._getframe` (the
+#: module's real `__name__` once imported) already includes it automatically,
+#: so this is the only place that needs to agree on purpose.
+STRUCTURES_PACKAGE = "core.IRS.Structures"
 
 
 def resolve_module_name(lib: str) -> str:
@@ -24,7 +34,15 @@ def resolve_module_name(lib: str) -> str:
     if path.suffix == ".py" or path.exists():
         return _module_name_for_file(path)
     dotted = lib.replace("\\", ".").replace("/", ".")
-    return dotted if dotted.startswith("IRS.Structures.") else f"IRS.Structures.{dotted}"
+    # Accept the short form ("Test.test_messages"), the fully-qualified new
+    # form ("core.IRS.Structures.Test.test_messages"), and -- since existing
+    # saved configs and Save/Load session files spell it this way -- the
+    # pre-migration form ("IRS.Structures.Test.test_messages") too.
+    if dotted.startswith(STRUCTURES_PACKAGE + "."):
+        return dotted
+    if dotted.startswith("IRS.Structures."):
+        return STRUCTURES_PACKAGE + dotted.removeprefix("IRS.Structures")
+    return f"{STRUCTURES_PACKAGE}.{dotted}"
 
 
 def _module_name_for_file(path: Path) -> str:
@@ -44,8 +62,8 @@ def _module_name_for_file(path: Path) -> str:
         relative = resolved.relative_to(STRUCTURES_ROOT)
     except ValueError:
         digest = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:8]
-        return f"IRS.Structures._external.{resolved.stem}_{digest}"
-    return "IRS.Structures." + ".".join(relative.with_suffix("").parts)
+        return f"{STRUCTURES_PACKAGE}._external.{resolved.stem}_{digest}"
+    return STRUCTURES_PACKAGE + "." + ".".join(relative.with_suffix("").parts)
 
 
 def import_modules(libs: list[str] | str) -> list[str]:
@@ -71,7 +89,7 @@ def _import_one(lib: str) -> str:
     # A file inside IRS/Structures has a real dotted name, so import it the
     # ordinary way -- that is what makes the path and dotted spellings of one
     # file resolve to a single namespace.
-    if is_file and name.startswith("IRS.Structures._external."):
+    if is_file and name.startswith(f"{STRUCTURES_PACKAGE}._external."):
         _import_from_file(path, name)
     else:
         importlib.import_module(name)

@@ -18,19 +18,22 @@ import threading
 import time
 from pathlib import Path
 
-# Cwd-independent: `connections`/`IRS`/`tools`/`annotations` all live directly
-# under `core/`, i.e. this file's grandparent -- insert THAT, not "." (which
-# only happens to be right if the caller's cwd is already `core/`).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Cwd-independent: `core` is an ordinary package rooted at the REPO ROOT
+# (`core.connections`, `core.IRS`, `core.tools`, `core.annotations`), so that
+# root -- this file's great-grandparent -- is what has to go on `sys.path`,
+# not "." (only right if the caller's cwd already happens to be the repo root)
+# and not `core/` itself (there is no top-level `connections`/`IRS`/`tools`
+# package any more for that to resolve).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from connections.config import ConnectionConfig
-from connections.framing import unpack_header
-from connections.handlers import UnitHandler, route
-from connections.manager import ConnectionManager
+from core.connections.config import ConnectionConfig
+from core.connections.framing import unpack_header
+from core.connections.handlers import UnitHandler, route
+from core.connections.manager import ConnectionManager
 
 # receive_message() refuses routes IRS doesn't know, so the layouts have to be
 # registered before any test subscribes.
-import IRS.Structures.Test.test_messages  # noqa: F401
+import core.IRS.Structures.Test.test_messages  # noqa: F401
 
 
 def _received(result):
@@ -891,13 +894,13 @@ def test_own_unit_code():
 #: under "Structures", so ConnectionManager.create() is what imports it -- and
 #: importing it is what runs its register_message() calls, under this module
 #: name as their namespace.
-IRS_MESSAGE_LIB = "IRS.Structures.Test.test_messages"
+IRS_MESSAGE_LIB = "core.IRS.Structures.Test.test_messages"
 
 
 def _track_report(track_id, kind, heading):
     """Build one IRS TrackReport. Imported lazily, because the whole point of
     the test below is that the layouts arrive via the config's Structures."""
-    from IRS.Structures.Test.test_messages import E_TrackKind, TrackReport
+    from core.IRS.Structures.Test.test_messages import E_TrackKind, TrackReport
     message = TrackReport()
     message.trackId = track_id
     message.kind = E_TrackKind[kind]
@@ -912,7 +915,7 @@ def test_irs_parser_roundtrip():
     # both on this one opcode.
     OPCODE = 60
     SERVER_CODE, CLIENT_CODE = 22, 21
-    from IRS.REGISTRY import messages_in
+    from core.IRS.REGISTRY import messages_in
 
     mgr = ConnectionManager()
     try:
@@ -936,7 +939,7 @@ def test_irs_parser_roundtrip():
         print(f"Structures registered both layouts on opcode {OPCODE}: "
               f"unit {CLIENT_CODE}=TrackReport, unit {SERVER_CODE}=TrackAck")
 
-        from IRS.Structures.Test.test_messages import E_TrackKind, TrackAck, TrackReport
+        from core.IRS.Structures.Test.test_messages import E_TrackKind, TrackAck, TrackReport
         mgr.start_all()
 
         report = _track_report(4097, "AIR", 270)

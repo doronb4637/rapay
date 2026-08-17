@@ -19,6 +19,26 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+#: A connection's name IS its identifier -- every route addresses it as
+#: `/api/connections/{connection_name}/...`. So it is restricted to characters
+#: that survive a URL untouched: no spaces, no `/` (which would split the path
+#: into extra segments and match no route at all), no `?`/`#`/`%` (which end the
+#: path or start an escape). Without this the very thing naming buys -- typing
+#: a readable URL by hand -- breaks on the first connection called "My Unit".
+#: Uniqueness is enforced separately, by the runtime, since only it knows what
+#: already exists.
+CONNECTION_NAME_PATTERN = r"^[A-Za-z0-9._-]+$"
+CONNECTION_NAME_HELP = (
+    "letters, digits, dot, underscore and hyphen only -- the name is used "
+    "directly in API paths"
+)
+#: Names that would sit in the same path position as a fixed endpoint. Only
+#: `POST /api/connections/import` exists today and it is POST-only, so a
+#: connection called "import" would not actually be shadowed -- but "why does
+#: this one connection behave oddly" is a miserable thing to debug, and one
+#: reserved word is cheaper than the explanation.
+RESERVED_CONNECTION_NAMES = frozenset({"import"})
+
 Protocol = Literal["tcp", "udp", "multicast", "dds"]
 Side = Literal["client", "server", "publisher", "subscriber", "sender", "receiver"]
 
@@ -62,7 +82,10 @@ class PeerSpec(BaseModel):
 class ConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, description="Display name; labels the Sent log.")
+    name: str = Field(
+        min_length=1, max_length=64, pattern=CONNECTION_NAME_PATTERN,
+        description=f"Identifies this connection everywhere; {CONNECTION_NAME_HELP}.",
+    )
     protocol: Protocol
     side: Side
     ip: str = Field(min_length=1)
@@ -99,6 +122,11 @@ class ConnectionCreate(BaseModel):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "ConnectionCreate":
+        if self.name.lower() in RESERVED_CONNECTION_NAMES:
+            raise ValueError(
+                f"{self.name!r} is reserved; it collides with a fixed API endpoint "
+                f"in the same path position")
+
         allowed = _SIDES_BY_PROTOCOL[self.protocol]
         if self.side not in allowed:
             raise ValueError(f"side {self.side!r} is not valid for {self.protocol}; use one of {sorted(allowed)}")
@@ -218,7 +246,10 @@ class ConnectionImport(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1)
+    name: str = Field(
+        min_length=1, max_length=64, pattern=CONNECTION_NAME_PATTERN,
+        description=f"Identifies this connection everywhere; {CONNECTION_NAME_HELP}.",
+    )
     config: dict[str, Any]
     autostart: bool = True
 

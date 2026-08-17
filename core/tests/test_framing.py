@@ -4,7 +4,7 @@ connections/framing.py -- pure pack/unpack, no I/O. Header is
 """
 import pytest
 
-from connections.framing import (
+from core.connections.framing import (
     HEADER_SIZE,
     MessageHeader,
     IRSDataError,

@@ -44,7 +44,7 @@ const LOG_VIEW_LIMIT = 30;
 
 export default function App() {
   const [connections, setConnections] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedName, setSelectedName] = useState(null);
   const [sent, setSent] = useState([]);
   const [received, setReceived] = useState([]);
   const [selectedLog, setSelectedLog] = useState(null);
@@ -63,7 +63,7 @@ export default function App() {
   // that fail on send.
   const [destination, setDestination] = useState(null);
   const [behaviours, setBehaviours] = useState([]);
-  // null | {opCode, payload, messageName, connectionId, unitName}
+  // null | {opCode, payload, messageName, connectionName, unitName}
   const [behaviourDraft, setBehaviourDraft] = useState(null);
   // In-progress compose payloads, keyed by route. ComposeForm is deliberately
   // remounted per route (the schema differs), so its own state cannot survive
@@ -80,7 +80,7 @@ export default function App() {
 
   useEffect(() => { applyTheme(theme); }, [theme]);
 
-  const selected = connections.find((c) => c.id === selectedId) ?? null;
+  const selected = connections.find((c) => c.name === selectedName) ?? null;
   const peers = selected?.peers ?? [];
 
   const refresh = useCallback(async () => {
@@ -124,7 +124,7 @@ export default function App() {
   useEffect(() => {
     setSelectedLog(null);
     setSelection(null);
-  }, [selectedId]);
+  }, [selectedName]);
 
   // Default to the first peer, and re-aim if the chosen one disappears (an
   // edit can rename or remove peers under us).
@@ -175,8 +175,8 @@ export default function App() {
         if (event.type === 'connection.deleted') {
           // Drop the departed connection's history so the console does not
           // keep referring to something the user just removed.
-          const gone = event.connection_id;
-          const drop = (list) => list.filter((entry) => entry.connection_id !== gone);
+          const gone = event.connection_name;
+          const drop = (list) => list.filter((entry) => entry.connection_name !== gone);
           setSent(drop);
           setReceived(drop);
           return refresh();
@@ -223,12 +223,12 @@ export default function App() {
       if (!ok) return;
       for (const connection of connections) {
         try {
-          await api.deleteConnection(connection.id);
+          await api.deleteConnection(connection.name);
         } catch {
           /* already gone; the reload below reflects the truth either way */
         }
       }
-      setSelectedId(null);
+      setSelectedName(null);
       await refresh();
     }
 
@@ -285,7 +285,7 @@ export default function App() {
     selection?.mode === 'compose'
       ? behaviours.find(
           (behaviour) =>
-            behaviour.connection_id === selectedId &&
+            behaviour.connection_name === selectedName &&
             behaviour.unit_name === destination &&
             behaviour.op_code === selection.opCode,
         )
@@ -295,10 +295,10 @@ export default function App() {
    *  first, so saving writes back to the behaviour you clicked rather than to
    *  whatever happens to be selected. */
   const editBehaviour = (behaviour) => {
-    setSelectedId(behaviour.connection_id);
+    setSelectedName(behaviour.connection_name);
     setDestination(behaviour.unit_name);
     setBehaviourDraft({
-      connectionId: behaviour.connection_id,
+      connectionName: behaviour.connection_name,
       unitName: behaviour.unit_name,
       opCode: behaviour.op_code,
       messageName: behaviour.message_name,
@@ -380,27 +380,27 @@ export default function App() {
           <Sidebar
             className="min-h-0 flex-[1] border-b border-slate-800"
             connections={connections}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
+            selectedName={selectedName}
+            onSelect={setSelectedName}
             onCreate={() => setModal({})}
             onEdit={(connection) => setModal(connection)}
             onDelete={(connection) =>
               guard(async () => {
-                await api.deleteConnection(connection.id);
-                if (connection.id === selectedId) setSelectedId(null);
+                await api.deleteConnection(connection.name);
+                if (connection.name === selectedName) setSelectedName(null);
                 await refresh();
               })
             }
             onToggle={(connection) =>
               guard(async () => {
-                await (connection.running ? api.stop(connection.id) : api.start(connection.id));
+                await (connection.running ? api.stop(connection.name) : api.start(connection.name));
                 await refresh();
               })
             }
           />
           <MessagesTable
             className="min-h-0 flex-[1.43]"
-            connectionId={selectedId}
+            connectionName={selectedName}
             peers={peers}
             destination={destination}
             onDestinationChange={setDestination}
@@ -429,17 +429,17 @@ export default function App() {
 
         <main className="flex min-w-0 flex-1 flex-col">
           <Inspector
-            connectionId={selectedId}
+            connectionName={selectedName}
             selection={selection}
             peers={peers}
             destination={destination}
             onSent={() => {}}
-            draftKey={`${selectedId}:${destination}:${selection?.opCode}`}
+            draftKey={`${selectedName}:${destination}:${selection?.opCode}`}
             drafts={composeDrafts.current}
             behaviour={composeBehaviour}
             onBehaviour={({ opCode, payload, messageName }) =>
               setBehaviourDraft({
-                connectionId: selectedId,
+                connectionName: selectedName,
                 unitName: destination,
                 opCode,
                 payload,
@@ -481,12 +481,19 @@ export default function App() {
 
       {modal && (
         <ConnectionModal
-          initial={modal.id ? toForm(modal) : null}
+          initial={modal.name ? toForm(modal) : null}
           onSubmit={async (body) => {
-            const record = modal.id
-              ? await api.updateConnection(modal.id, body)
+            const wasSelected = modal.name && modal.name === selectedName;
+            const record = modal.name
+              ? await api.updateConnection(modal.name, body)
               : await api.createConnection(body);
             await refresh();
+            // The name IS the identity, so an edit that renames moves the
+            // connection to a new one. Follow it, or the selection would point
+            // at a name that no longer exists and every panel would blank out.
+            if (wasSelected && record?.name && record.name !== modal.name) {
+              setSelectedName(record.name);
+            }
             // The connection was created; it just could not dial out yet (a TCP
             // client whose server is not listening). The modal closes either
             // way -- this only explains the stopped status dot.
@@ -505,12 +512,12 @@ export default function App() {
           destination={behaviourDraft.unitName}
           existing={behaviours.find(
             (behaviour) =>
-              behaviour.connection_id === behaviourDraft.connectionId &&
+              behaviour.connection_name === behaviourDraft.connectionName &&
               behaviour.unit_name === behaviourDraft.unitName &&
               behaviour.op_code === behaviourDraft.opCode,
           )}
           onSubmit={({ kind, interval }) =>
-            api.setBehaviour(behaviourDraft.connectionId, {
+            api.setBehaviour(behaviourDraft.connectionName, {
               unit_name: behaviourDraft.unitName,
               op_code: behaviourDraft.opCode,
               kind,

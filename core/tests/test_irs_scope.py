@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import pytest
 
-from IRS.irs_parser import IRSAmbiguousError, IRSDataError
-from connections.config import ConnectionConfig
-from tools.general import import_modules, resolve_module_name
+from core.IRS.irs_parser import IRSAmbiguousError, IRSDataError
+from core.connections.config import ConnectionConfig
+from core.tools.general import import_modules, resolve_module_name
 
 OUR_CODE = 230              # this file's own range
 PEER_A_CODE = 231
@@ -28,8 +28,8 @@ SHARED_OPCODE = 940
 #: Both files claim (OUR_CODE, SHARED_OPCODE) -- with different field layouts.
 #: That is exactly the shape that used to silently overwrite.
 _FILE = """
-from IRS import *
-from IRS.REGISTRY import register_message
+from core.IRS import *
+from core.IRS.REGISTRY import register_message
 
 class {cls}(Message):
 {fields}
