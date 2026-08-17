@@ -2,14 +2,14 @@
 import struct
 from enum import IntEnum, EnumType
 from typing import Any, Callable
-from IRS.buffers import BinaryReader, BinaryWriter
-from IRS.fields import BaseField
-from IRS.constants import *
+from .buffers import BinaryReader, BinaryWriter
+from .fields import BaseField
+from .constants import *
 
 
-def baseType(base_type: int, endian = "<") -> Callable[[type], type]:
+def baseType(byte_size: int, endian ="<") -> Callable[[type], type]:
     def wrapper(cls: EnumType | BitFieldMeta) -> EnumType | BitFieldMeta:
-        fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(base_type, UInt8) if isinstance(base_type, int) else base_type
+        fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(byte_size, UInt8) if isinstance(byte_size, int) else byte_size
         if isinstance(cls, BitFieldMeta):
             cls._packer_ = struct.Struct(endian + fmt)
             # Safety Enum Configurations

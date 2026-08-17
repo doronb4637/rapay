@@ -1,18 +1,21 @@
 # logic/constants.py
-
-# Standard Integer Types
-Int8 = 'b'
+""" Types Formats"""
+# Endianness
+bigEndian = big_endian = '>'
+littleEndian = little_endian = '<'
+# Bytes
+Int8 = SByte = 'b'
 UInt8 = Byte = 'B'
-
-Int16 = 'h'
-UInt16 = 'H'
-
-Int32 = 'i'
-UInt32 = 'I'
-
-Int64 = 'q'
-UInt64 = 'Q'
-
+# Shorts
+Int16 = Short = 'h'
+UInt16 = UShort ='H'
+# Ints
+Int32 = Int = 'i'
+UInt32 = UInt = 'I'
+# Longs
+Int64 = Long = 'q'
+UInt64 = ULong = 'Q'
 # Floating Point Types
-Float32 = 'f'
-Float64 = 'd'
+Float32 = Float = Single = 'f'
+Float64 = Double = 'd'
+

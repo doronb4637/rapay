@@ -17,7 +17,7 @@ before the connection object exists.
 """
 from enum import IntEnum
 
-from IRS import *
+from core.IRS.core import *
 from IRS.REGISTRY import register_message
 
 #: The two peers in test_framework.test_irs_parser_roundtrip.
