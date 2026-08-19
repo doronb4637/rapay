@@ -1,16 +1,15 @@
 from asyncio import Task, Future
-from typing import Iterable
 
-from core.IRS.core import Message
+from core.IRS.annotations import IrsMessage, UnitCode, OpCode, Namespace, NamespaceScope
 
-""" IRS Types """
-IrsMessage = type[Message]
-UnitCode = int
-OpCode = int
-#: Defined by the module '__name__'
-#: this is what distinguish when defining opcode for the same unit code from erasing each other.
-Namespace = str
-NamespaceScope = Namespace | Iterable[Namespace]
+""" IRS Types -- re-exported so `core.annotations` stays the one-stop import
+for connections/tools; the source of truth lives in IRS itself so IRS never
+has to import outside its own package. """
+IrsMessage = IrsMessage
+UnitCode = UnitCode
+OpCode = OpCode
+Namespace = Namespace
+NamespaceScope = NamespaceScope
 
 """ Connections Types """
 Task = Task

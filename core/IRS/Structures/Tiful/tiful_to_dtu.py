@@ -84,7 +84,7 @@ class Data(Structure):
     array: int = [Byte, 9]
 
 class StructMessage(Message):
-    data: Data
+    datas: list[Data] = [Data, 9]
 
 register_message(
     unitCode=0x01,
