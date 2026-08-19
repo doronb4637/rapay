@@ -1,0 +1,10 @@
+[Fixes]
+2. Add readMe to IRS(using gemini)
+
+
+[Improvments]
+1. Add function that initialize Message with default values.
+
+[TODOS]
+1. Understand if gsim lib does any ontop calculation on the messages.
+2. read the whole project and enforcing Clean code and understandable code.

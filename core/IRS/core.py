@@ -13,7 +13,7 @@ class ArrayField(BaseField):
     def __init__(self, base_type: Any, length: str | int | None) -> None:
         if isinstance(base_type, str): self.baseType = Field(base_type)
         elif isinstance(base_type, type) and issubclass(base_type, IntEnum): self.baseType = EnumField(base_type)
-        elif isinstance(base_type, type) and issubclass(base_type, (Structure, BitField)): self.baseType = base_type() # TODO delete this line
+        elif isinstance(base_type, type) and issubclass(base_type, (Structure, BitField)): self.baseType = base_type()
         else: self.baseType = base_type
         self.length = length
 
