@@ -19,3 +19,6 @@ UInt64 = ULong = 'Q'
 Float32 = Float = Single = 'f'
 Float64 = Double = 'd'
 
+Floats = [Single, Double]
+Ints = [Int8, Int16, Int32, Int64, Int64]
+UInts = [UInt8, UInt16, UInt32, UInt64, UInt64]

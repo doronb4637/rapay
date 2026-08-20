@@ -11,17 +11,17 @@ class BaseField:
     def to_bytes(self, writer: BinaryWriter, value: Any) -> None: raise NotImplementedError
     def from_dict(self, value: Any) -> Any: raise NotImplementedError
     def to_dict(self, value: Any) -> Any: raise NotImplementedError
-
+    def fill(self) -> Any: raise NotImplementedError
 
 class Field(BaseField):
     __slots__ = ('packer',)
     def __init__(self, fmt: str) -> None:
         self.packer = struct.Struct(f"<{fmt}")
 
-    def from_bytes(self, reader: BinaryReader, instance: Any = None) -> Any:
+    def from_bytes(self, reader: BinaryReader, instance: Any = None) -> int:
         return self.packer.unpack_from(reader.data, reader.offset(self.packer.size))[0]
 
-    def to_bytes(self, writer: BinaryWriter, value: Any) -> None:
+    def to_bytes(self, writer: BinaryWriter, value: int) -> None:
         writer.write(self.packer.pack(value))
 
     def from_dict(self, value: Any) -> Any:
@@ -29,6 +29,11 @@ class Field(BaseField):
 
     def to_dict(self, value: Any) -> Any:
         return value
+
+    def fill(self) -> int:
+        if self.packer.format in Floats:
+            return 0.0
+        return 0
 
 class EnumField(BaseField):
     __slots__ = ('enum_class', 'packer',)
@@ -58,3 +63,8 @@ class EnumField(BaseField):
     def to_dict(self, value: Any) -> str:
         return value.name if isinstance(value, self.enum_class) else str(value)
 
+    def fill(self) -> int:
+        try:
+            return self.enum_class(0)
+        except (KeyError, ValueError):
+            return None

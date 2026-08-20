@@ -38,6 +38,10 @@ class ArrayField(BaseField):
     def to_dict(self, value: list[Any]) -> list[Any]:
         return [self.baseType.to_dict(item) for item in value]
 
+    def fill(self) -> list[Any]:
+        if self.length is None or isinstance(self.length, str):
+            return []
+        return [self.baseType.fill()] * self.length
 
 class MessageMeta(type):
     def __new__(cls, name: str, bases: tuple, namespace: dict) -> 'MessageMeta': # TODO change to Self
@@ -78,15 +82,21 @@ class MessageMeta(type):
 class Structure(BaseField, metaclass=MessageMeta):
     __slots__ = ()
 
+    def __init__(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
     def __setattr__(self, name: str, value: Any) -> None:
         """
         Intercepts assignments to enforce strict typing based on annotations.
-        Only used in run time assinments *Not in to_bytes, to_dict or from_bytes, from_dict.
+        Only used in run time assignments *Not in to_bytes, to_dict or from_bytes, from_dict.
         """
         annotations = getattr(self.__class__, '__annotations__', {})
         expected_type = annotations.get(name, None)
         if expected_type is None:
             super().__setattr__(name, value)
+        if isinstance(expected_type, type) and issubclass(expected_type, IntEnum):
+                expected_type = expected_type | int | str
         elif not is_bearable(value, expected_type):
             raise TypeError(f"{self.__class__.__name__}.{name} expects {expected_type}, got {type(value).__name__}.")
         super().__setattr__(name, value)
@@ -120,6 +130,13 @@ class Structure(BaseField, metaclass=MessageMeta):
                 raw_val = getattr(target, field.name)
                 result[field.name] = field.to_dict(raw_val)
         return result
+
+    def fill(self) -> 'Structure':
+        """Explicitly fills uninitialized fields with safe default values."""
+        for field in self.__class__._fields_:
+            if not hasattr(self, field.name):
+                object.__setattr__(self, field.name, field.fill())
+        return self
 
     def _format_repr(self, indent_level: int = 0) -> str:
         inner = "    " * (indent_level + 1)

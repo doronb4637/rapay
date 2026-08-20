@@ -1,7 +1,7 @@
-# logic/bitfields.py
 import struct
 from enum import IntEnum, EnumMeta
 from typing import Any, Callable
+
 from .buffers import BinaryReader, BinaryWriter
 from .fields import BaseField
 from .constants import *
@@ -33,7 +33,8 @@ def _make_bit_property(name: str, shift: int, bits: int, enum_class: type[IntEnu
             try:
                 return enum_class._value2member_map_[value]
             except (KeyError, ValueError):
-                raise RuntimeError(f"Invalid Enum: {value}")
+                raise Warning(f"Enum '{enum_class.name}', Value '{value}' is not defined.")
+                return None
             except Exception as e:
                 raise
         return value
@@ -63,33 +64,26 @@ class BitFieldMeta(type):
 
         for field_name, field_type in annotations.items():
             bits = namespace.pop(field_name)  # Strict: Bits must be defined
-
-            # Shield against TypeError if field_type is a string/generic
+            # Shield against TypeError if field_type is not Int or Enum.
             is_enum = isinstance(field_type, type) and issubclass(field_type, IntEnum)
             enum_class = field_type if is_enum else None
-
             if is_enum:
                 enum_map[field_name] = enum_class
-
             # Generate and attach the property directly to the class
             namespace[field_name] = _make_bit_property(field_name, current_shift, bits, enum_class)
             fields_list.append((field_name, current_shift, bits))
-
             current_shift += bits
 
-        # Strict Format Resolution: Respect @baseType padding over auto-calculation
-        namespace['_packer_'] = None
         namespace['_fields_'] = tuple(fields_list)
         namespace['__enum_map__'] = enum_map
-
-        # Memory efficiency: lock it down to a single backing integer
-        namespace['__slots__'] = ('_value', 'name')
+        # _packer_ is set by @baseType wrapper.
+        namespace['_packer_'] = None
 
         return type.__new__(cls, name, bases, namespace)
 
 
 class BitField(BaseField, metaclass=BitFieldMeta):
-    __slots__ = ()
+    __slots__ = ('_value',)
 
     def __init__(self, value: int = 0) -> None:
         self._value = value
@@ -97,8 +91,7 @@ class BitField(BaseField, metaclass=BitFieldMeta):
     @classmethod
     def from_bytes(cls, reader: BinaryReader, instance: Any = None) -> 'BitField': # TODO change to Self
         value = cls._packer_.unpack_from(reader.data, reader.offset(cls._packer_.size))[0]
-        new_instance = cls(value)
-        return new_instance
+        return cls(value)
 
     def to_bytes(self, writer: BinaryWriter, value: Any = None) -> None:
         target = value if value is not None else self
@@ -106,8 +99,7 @@ class BitField(BaseField, metaclass=BitFieldMeta):
 
     @classmethod
     def from_dict(cls, data: dict) -> 'BitField': # TODO change to Self
-        instance = cls()
-        instance._value = 0
+        instance = cls(0)
         enum_map = getattr(cls, '__enum_map__', {})
 
         for name, _, _ in cls._fields_:
@@ -133,6 +125,9 @@ class BitField(BaseField, metaclass=BitFieldMeta):
             val = getattr(self, field_name)
             lines.append(f"{inner}{field_name}: {val!r}")
         return "\n".join(lines)
+
+    def fill(self):
+        return self.__class__(0)
 
     def __repr__(self) -> str:
         return self._format_repr()

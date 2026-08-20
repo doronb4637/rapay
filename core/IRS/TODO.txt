@@ -1,0 +1,4 @@
+[TODO]:
+1. use python array for arrays that are baseType.
+2. use tuple for static arrays.
+3.

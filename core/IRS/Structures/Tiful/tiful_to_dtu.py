@@ -46,7 +46,7 @@ register_message(
 
 class ArrayOfAreas(Message):
     Len: int = Byte
-    Areas: tuple[S_Area] = [S_Area, "Len"]
+    Areas: list[S_Area] = [S_Area, "Len"]
 
 
 register_message(
@@ -81,10 +81,10 @@ register_message(
 class Data(Structure):
     num1: int = Byte
     value: int = Byte
-    array: int = [Byte, 9]
+    array: tuple[int] = [Byte, 9]
 
 class StructMessage(Message):
-    datas: list[Data] = [Data, 9]
+    datas: tuple[Data] = [Data, 9]
 
 register_message(
     unitCode=0x01,
