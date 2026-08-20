@@ -13,6 +13,8 @@ from fastapi import APIRouter, HTTPException, status
 from gsim.api.models import SendMessageRequest
 from gsim.core_gateway import (
     IRSAmbiguousError,
+    IRSDataError,
+    IRSNotFoundError,
     build_payload,
     get_runtime,
     list_messages,
@@ -130,6 +132,14 @@ def send_message(connection_name: str, request: SendMessageRequest) -> dict[str,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ConnectionError as exc:
         # No live peer on that unit yet (e.g. UDP server before first inbound).
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (IRSDataError, IRSNotFoundError) as exc:
+        # The payload core actually got couldn't be encoded, or no layout
+        # resolved for this route -- reported rather than left as a bare 500,
+        # so the toast says what core actually objected to.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # E.g. a receive_only unit (UDP client side never bound to send).
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 

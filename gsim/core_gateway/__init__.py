@@ -14,12 +14,16 @@ swappable and greppable from one directory.
 """
 from .bootstrap import CORE_ROOT, ensure_core_importable
 from .payloads import build_payload
-from .registry import IRSAmbiguousError, known_unit_codes, list_messages, message_schema
+from .registry import (
+    IRSAmbiguousError, IRSDataError, IRSNotFoundError,
+    known_unit_codes, list_messages, message_schema,
+)
 from .runtime import GSimRuntime, get_runtime
 
 __all__ = [
     "CORE_ROOT", "ensure_core_importable",
     "build_payload",
-    "IRSAmbiguousError", "known_unit_codes", "list_messages", "message_schema",
+    "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
+    "known_unit_codes", "list_messages", "message_schema",
     "GSimRuntime", "get_runtime",
 ]

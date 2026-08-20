@@ -29,15 +29,19 @@ from . import bootstrap  # noqa: F401
 
 from core.IRS.irs_parser import (
     IRSAmbiguousError,
+    IRSDataError,
     IRSNotFoundError,
     get_message_class,
     known_unit_codes as _known_unit_codes,
     list_routes,
 )
 
-#: Re-exported so `gsim.api` can map it to a 409 without importing core --
-#: nothing above this package is allowed to reach into IRS directly.
-__all__ = ["IRSAmbiguousError", "list_messages", "message_schema", "known_unit_codes"]
+#: Re-exported so `gsim.api` can map these to HTTP errors without importing
+#: core -- nothing above this package is allowed to reach into IRS directly.
+__all__ = [
+    "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
+    "list_messages", "message_schema", "known_unit_codes",
+]
 
 from .schema import describe_message
 

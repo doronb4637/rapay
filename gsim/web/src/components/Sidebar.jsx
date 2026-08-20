@@ -7,7 +7,7 @@
  */
 import React from 'react';
 import { Cable, Pencil, Plus, Trash2 } from 'lucide-react';
-import { Badge, EmptyState, IconButton, Panel, PanelHeader, StatusDot, cx } from './ui';
+import { Badge, EmptyState, IconButton, Panel, PanelHeader, StatusDot, cx, sideLabel } from './ui';
 
 export default function Sidebar({
   connections, selectedName, onSelect, onCreate, onEdit, onDelete, onToggle, className,
@@ -87,7 +87,8 @@ export default function Sidebar({
                         {connection.name}
                       </div>
                       <div className="truncate font-mono text-[10px] text-slate-500">
-                        {connection.protocol}/{connection.side} · unit {connection.unit_code}
+                        {connection.protocol}/{sideLabel(connection.protocol, connection.side)} · unit{' '}
+                        {connection.unit_code}
                       </div>
                     </div>
 

@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "gsim", "--server"],
       "port": 8765
+    },
+    {
+      "name": "gsim-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "gsim/web", "run", "dev"],
+      "port": 5173
     }
   ]
 }

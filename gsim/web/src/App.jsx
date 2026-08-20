@@ -48,6 +48,47 @@ export default function App() {
   const [sent, setSent] = useState([]);
   const [received, setReceived] = useState([]);
   const [selectedLog, setSelectedLog] = useState(null);
+
+  // A fast periodic behaviour (interval well under a frame, e.g. 0.01s) can
+  // push 'message.sent'/'message.received' events faster than the browser can
+  // paint. Applying each one as its own setState re-renders the console --
+  // and re-runs its auto-scroll effect -- at that same rate, so the row under
+  // the pointer keeps sliding away between mousedown and click and a click
+  // that looks well-aimed lands on nothing. Coalescing everything that arrives
+  // within one animation frame into a single state update caps the console's
+  // re-render/scroll rate at the display's, independent of how fast the
+  // socket is actually delivering -- no message is dropped, only how often the
+  // DOM reacts to them.
+  const pendingLogsRef = useRef({ sent: [], received: [] });
+  const flushHandleRef = useRef(null);
+  const flushPendingLogs = () => {
+    flushHandleRef.current = null;
+    const { sent: pendingSent, received: pendingReceived } = pendingLogsRef.current;
+    pendingLogsRef.current = { sent: [], received: [] };
+    if (pendingSent.length) {
+      setSent((current) => [...current, ...pendingSent].slice(-LOG_VIEW_LIMIT));
+    }
+    if (pendingReceived.length) {
+      setReceived((current) => [...current, ...pendingReceived].slice(-LOG_VIEW_LIMIT));
+    }
+  };
+  const queueLogEntry = (direction, entry) => {
+    pendingLogsRef.current[direction].push(entry);
+    if (flushHandleRef.current === null) {
+      flushHandleRef.current = requestAnimationFrame(flushPendingLogs);
+    }
+  };
+  // A clear/backfill/removal replaces `sent`/`received` outright -- anything
+  // still queued from before it must not survive to be appended afterwards.
+  const discardPendingLogs = (direction = null) => {
+    if (direction) pendingLogsRef.current[direction] = [];
+    else pendingLogsRef.current = { sent: [], received: [] };
+  };
+  useEffect(() => {
+    return () => {
+      if (flushHandleRef.current !== null) cancelAnimationFrame(flushHandleRef.current);
+    };
+  }, []);
   const [selection, setSelection] = useState(null);   // Inspector mode
   const [modal, setModal] = useState(null);           // null | {} | connection
   const [online, setOnline] = useState(false);
@@ -151,6 +192,7 @@ export default function App() {
           if (event.behaviours) setBehaviours(event.behaviours);
           // The snapshot does NOT carry log history, and everything that
           // happened while the socket was down was missed -- re-sync it.
+          discardPendingLogs();
           refillLogs();
           return;
         }
@@ -159,6 +201,7 @@ export default function App() {
         if (event.type === 'behaviours') return setBehaviours(event.behaviours);
         if (event.type === 'logs.cleared') {
           const drop = () => [];
+          discardPendingLogs(event.direction);
           if (event.direction === 'sent') setSent(drop);
           else setReceived(drop);
           setSelectedLog((current) =>
@@ -177,14 +220,18 @@ export default function App() {
           // keep referring to something the user just removed.
           const gone = event.connection_name;
           const drop = (list) => list.filter((entry) => entry.connection_name !== gone);
+          pendingLogsRef.current.sent = pendingLogsRef.current.sent.filter(
+            (entry) => entry.connection_name !== gone,
+          );
+          pendingLogsRef.current.received = pendingLogsRef.current.received.filter(
+            (entry) => entry.connection_name !== gone,
+          );
           setSent(drop);
           setReceived(drop);
           return refresh();
         }
         if (event.type === 'message.sent' || event.type === 'message.received') {
-          const push = (list) => [...list, event.entry].slice(-LOG_VIEW_LIMIT);
-          if (event.entry.direction === 'sent') setSent(push);
-          else setReceived(push);
+          queueLogEntry(event.entry.direction === 'sent' ? 'sent' : 'received', event.entry);
         }
       }, setLiveFeed),
     [refresh, refillLogs],

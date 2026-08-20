@@ -9,7 +9,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, FolderOpen, Loader2, Plus, Save, Trash2, X } from 'lucide-react';
-import { Badge, Button, Field, IconButton, Input, PathInput, Select, cx } from './ui';
+import { Badge, Button, Field, IconButton, Input, PathInput, Select, cx, sideLabel } from './ui';
 import FilePickerModal from './FilePickerModal';
 
 //: Only present inside the pywebview desktop shell -- `--server`/browser mode
@@ -346,7 +346,9 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                 </Field>
                 <Field label="Side">
                   <Select value={form.side} onChange={(e) => set('side', e.target.value)}>
-                    {SIDES[form.protocol].map((s) => <option key={s} value={s}>{s}</option>)}
+                    {SIDES[form.protocol].map((s) => (
+                      <option key={s} value={s}>{sideLabel(form.protocol, s)}</option>
+                    ))}
                   </Select>
                 </Field>
                 {/* Text, not number, so "0x1F" can be typed. */}

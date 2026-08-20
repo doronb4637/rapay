@@ -15,6 +15,25 @@ export function cx(...parts) {
   return parts.filter(Boolean).join(' ');
 }
 
+/**
+ * UDP's "server"/"client" names its socket role, not the traffic direction --
+ * confusing here specifically because the roles don't map to intuition.
+ * Confirmed against `core/connections/udp.py`: a client has `remote_addr`
+ * set at `_do_start` and can send immediately, while a server only learns a
+ * peer address from its first inbound datagram (`_remember_peer`) -- so the
+ * client is the one that sends first and the server the one that starts out
+ * waiting to receive. Everywhere UDP's side is displayed, it reads as what
+ * it does (Sender/Receiver) with the socket role kept alongside for anyone
+ * who already thinks in those terms. TCP and DDS keep their own vocabulary
+ * (client/server, publisher/subscriber) unchanged -- this relabeling is
+ * UDP-specific.
+ */
+const UDP_SIDE_LABELS = { client: 'Sender (Client)', server: 'Receiver (Server)' };
+export function sideLabel(protocol, side) {
+  if (protocol === 'udp') return UDP_SIDE_LABELS[side] ?? side;
+  return side;
+}
+
 /* ------------------------------------------------------------------ */
 /* Surfaces                                                            */
 /* ------------------------------------------------------------------ */

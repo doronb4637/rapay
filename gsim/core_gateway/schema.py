@@ -110,7 +110,7 @@ def _bitfield_schema(name: str, bitfield: BitField) -> dict[str, Any]:
 
 def describe_field(field: BaseField, name: str | None = None) -> dict[str, Any]:
     """One `_fields_` entry -> one schema node. Recursive for struct/array."""
-    field_name = name if name is not None else getattr(field, "name", None)
+    field_name = name if name is not None else field._name
 
     # Order matters: BitField and Structure are both BaseField subclasses and
     # ArrayField is checked before them only because it is never either.

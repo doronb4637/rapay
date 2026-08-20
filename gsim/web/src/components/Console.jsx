@@ -19,7 +19,7 @@
  * it provokes (this project's layouts routinely reuse one opcode both ways).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, Trash2, TriangleAlert } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, Pause, Trash2, TriangleAlert } from 'lucide-react';
 import { Badge, EmptyState, IconButton, cx } from './ui';
 import ContextMenu, { useContextMenu } from './ContextMenu';
 
@@ -51,6 +51,9 @@ export default function Console({ sent, received, selected, onSelect, onClear })
 function LogPane({ title, direction, entries, selected, onSelect, onClear, className }) {
   const [hidden, setHidden] = useState(() => new Set());
   const [follow, setFollow] = useState(true);
+  const [pointerInside, setPointerInside] = useState(false);
+  // The array rendered while the pane is held still, or null when it is live.
+  const [frozen, setFrozen] = useState(null);
   const scrollerRef = useRef(null);
   const menu = useContextMenu();
 
@@ -58,13 +61,58 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
   const Arrow = isSent ? ArrowUpRight : ArrowDownLeft;
   const tone = isSent ? 'sky' : 'emerald';
 
+  /* A behaviour on a 0.01s interval delivers ~100 entries/second into a pane
+     that keeps 30 rows: the whole list is replaced about three times a second.
+     Coalescing the state updates (App.jsx) stops the wasted re-renders but not
+     this -- every row still slides upward and is evicted within ~300ms, so the
+     <li> the user pressed on is a different element, or gone entirely, by the
+     time they release. A `click` only fires when mousedown and mouseup land on
+     the SAME element, so at that rate the click is not mis-aimed, it is never
+     generated at all. No amount of aiming can beat it.
+
+     So the pane stops moving whenever the user is plausibly reaching for a row:
+     pointer inside it, or scrolled away from the bottom. `frozen` holds the
+     exact array that was on screen at that moment -- a snapshot, not a `seq`
+     cutoff, because the rows worth clicking are precisely the ones eviction
+     would otherwise drop out from under the cursor. Nothing is lost: the live
+     list keeps filling behind the snapshot and the pane rejoins it on thaw. */
+  const held = pointerInside || !follow;
+
+  useEffect(() => {
+    if (!held) return setFrozen(null);
+    // `current ?? ...` is what makes this a snapshot rather than a follow: once
+    // taken it survives every later commit, until the hold ends. An empty pane
+    // is nothing to aim at, so it stays live until it has a row -- otherwise
+    // hovering an idle console pins it at "Nothing sent yet." while traffic
+    // starts behind it, which looks exactly like the bug this fixes.
+    setFrozen((current) => current ?? (entries.length ? entries : null));
+  }, [held, entries]);
+
+  // `frozen` is only ever set to a non-empty list, so indexing its tail is safe.
+  const frozenCeiling = frozen ? frozen[frozen.length - 1].seq : null;
+  const liveCeiling = entries.length ? entries[entries.length - 1].seq : -1;
+
+  // A Clear (or a connection removal) TRUNCATES the live list instead of
+  // growing it, and `seq` never restarts -- so the live tail falling behind the
+  // snapshot's is the one unambiguous signal that entries were dropped rather
+  // than evicted by the view limit. Without this the snapshot outlives the
+  // clear and the pane keeps showing rows the server has already forgotten:
+  // "Clear did nothing", the exact failure the server-side clear exists to
+  // avoid. Clear is reached from the pane's own context menu, so the pointer is
+  // inside -- the pane is always held at that moment.
+  useEffect(() => {
+    if (frozen && liveCeiling < frozenCeiling) setFrozen(null);
+  }, [liveCeiling, frozenCeiling, frozen]);
+
+  const source = frozen ?? entries;
   const visible = useMemo(
-    () => entries.filter((entry) => !hidden.has(entry.op_code)),
-    [entries, hidden],
+    () => source.filter((entry) => !hidden.has(entry.op_code)),
+    [source, hidden],
   );
   // Only counts entries suppressed by the hide rule -- never conflated with
-  // anything else, so the number always explains itself.
-  const hiddenCount = entries.length - visible.length;
+  // anything else (including what the freeze is holding back), so the number
+  // always explains itself.
+  const hiddenCount = source.length - visible.length;
 
   // Tail the log, but only while the user is already at the bottom -- yanking
   // the viewport while they read scrollback is the classic console sin.
@@ -75,12 +123,15 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
   // stopped following at exactly the point following matters. `seq` is a
   // server-side counter that only ever increases, so it changes on every
   // arrival whether or not the list grew.
+  //
+  // Skipped entirely while held: scrolling a frozen list back to the bottom on
+  // every arrival would move the rows the freeze exists to hold still.
   const newestSeq = visible.length ? visible[visible.length - 1].seq : null;
   useEffect(() => {
-    if (!follow) return;
+    if (!follow || frozen) return;
     const scroller = scrollerRef.current;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
-  }, [newestSeq, follow]);
+  }, [newestSeq, follow, frozen]);
 
   const onScroll = (event) => {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
@@ -125,6 +176,20 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
             {hiddenCount} hidden
           </span>
         )}
+        {/* Without this the freeze reads as the feed having died -- which is
+            the same symptom the user came here to report. Deliberately carries
+            no "N new" count: `entries` is itself capped at the view limit, so
+            any such number saturates there and would understate a fast feed
+            rather than describe it. */}
+        {held && (
+          <span
+            className="flex items-center gap-1 text-[10px] font-medium text-amber-400"
+            title="Held still so rows can be clicked. Resumes when the pointer leaves and the pane is scrolled to the bottom."
+          >
+            <Pause size={10} />
+            paused
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1">
           {!follow && (
             <button
@@ -149,9 +214,14 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
           each evicted top row pulled scrollTop up by a row while a new row was
           appended below -- the view drifted off the bottom a row at a time even
           though nothing moved it. */}
+      {/* Hover is tracked on the SCROLLER, not the section, so the header's own
+          Follow / Display-all buttons are reachable without the pane counting
+          as held -- clicking Follow has to be able to end the hold. */}
       <div
         ref={scrollerRef}
         onScroll={onScroll}
+        onMouseEnter={() => setPointerInside(true)}
+        onMouseLeave={() => setPointerInside(false)}
         style={{ overflowAnchor: 'none' }}
         className="min-h-0 flex-1 overflow-y-auto"
       >
