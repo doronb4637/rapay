@@ -14,7 +14,7 @@ package — `gsim/core_gateway/` — which is **the only place in GSim that impo
   gsim/
     __main__.py              PyWebView desktop launcher (`python -m gsim`)
     core_gateway/            ◄── THE ONLY IMPORTER OF core
-      bootstrap.py             puts <repo-root>/core on sys.path (imports first)
+      bootstrap.py             puts <repo-root> on sys.path (imports first)
       schema.py                IRS message class -> JSON form schema
       registry.py              read-only view of the GLOBAL MESSAGE REGISTRY
       payloads.py              zero-fill + counted-array sync before encoding

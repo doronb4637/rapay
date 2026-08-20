@@ -39,6 +39,29 @@ gsim           uses core (the whole package -- connections, IRS, tools, annotati
   to `gsim/core_gateway/` -- see `gsim/CLAUDE.md` §"The one rule that matters more than any other in
   this package". `core` is never modified by `gsim`.
 
+### One IRS, two spellings
+
+IRS is *used* under two names, and this is deliberate rather than a leak in the graph:
+
+- `core.IRS.x` -- its real module name, used by everything inside this repo (`core.connections`,
+  `core.tools`, `gsim.core_gateway`).
+- `IRS.x` -- the name IRS has when it stands alone, and the **required** spelling in
+  `core/IRS/Structures/*.py`. Those files are consumers of IRS written against IRS-as-a-library, and
+  the bare spelling is the only one that keeps working when `IRS/` is copied out without `core`.
+
+`core/IRS/_alias.py`, installed at the top of `core/IRS/__init__.py`, makes the two resolve to the
+**same module object at every depth**. It is a no-op when IRS is imported standalone, and it uses
+only the stdlib, so the "imports nothing else in this repo" rule above is untouched.
+
+This is not cosmetic. Without it the two spellings are two independent module objects -- two
+`STRUCTURE_REGISTRY` dicts, two `MessageMeta` metaclasses, two sets of field classes -- and the
+failure is silent in a way that looks nothing like an import error: a structures file prints a fully
+populated registry while `irs_parser._get_message_class` reads `{}`, and every
+`isinstance(field, Field)` downstream misses. The enabling condition is `core/` being on `sys.path`
+*in addition to* the repo root (an IDE "sources root" does this); `_alias.py` raises rather than
+tolerate a genuine second copy, and `tools.general._assert_registered` catches the same class of
+silent failure from the other end, at the config that named the file.
+
 ## The rule that keeps this real, not aspirational
 
 Whenever you touch an import statement anywhere under `core/IRS/`, check it mechanically before
@@ -47,6 +70,14 @@ committing:
 ```bash
 grep -rn "^from core\.\(annotations\|connections\|tools\)\|^import core\.\(annotations\|connections\|tools\)" core/IRS --include=*.py
 # must print nothing
+```
+
+And whenever you add or edit a file under `core/IRS/Structures/`, check the other half of the same
+rule -- a structures file must reach IRS by the bare name, never through `core`:
+
+```bash
+grep -rn "core\.IRS" core/IRS/Structures --include=*.py
+# must print nothing -- structures files spell it `from IRS...`, see "One IRS, two spellings" above
 ```
 
 If IRS ever needs something from `connections`, `tools`, or `core/annotations.py`, that is

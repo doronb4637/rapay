@@ -6,7 +6,7 @@ above it (`gsim.api`, `gsim.web`) talks to these modules and never to
 `connections`/`IRS`/`tools` directly, so the whole dependency on core is
 swappable and greppable from one directory.
 
-    bootstrap.py   puts <repo-root>/core on sys.path (must import first)
+    bootstrap.py   puts <repo-root> on sys.path (must import first)
     schema.py      IRS message class -> JSON form schema
     registry.py    namespace-scoped read-only view of the IRS registry
     payloads.py    zero-fill + counted-array sync before encoding

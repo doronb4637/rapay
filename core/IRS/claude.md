@@ -46,6 +46,18 @@ The heavy lifters.
 
 This is how packets are defined using `IRS`. All AI-generated code should match this exact syntax.
 
+> **Always spell the import `IRS.x`, never `core.IRS.x`.** `IRS` physically lives at
+> `core/IRS/`, so its real module name is `core.IRS` -- but `core/IRS/_alias.py` makes the two
+> spellings resolve to *one* module object at every depth, and `IRS.x` is the only spelling that
+> also survives copying `IRS/` out on its own. Both are enforced, not conventions:
+>
+> * A structures file spelling `core.IRS.x` would break the moment IRS is used standalone.
+> * Without the alias, the two spellings are two independent module objects -- two
+>   `STRUCTURE_REGISTRY` dicts and two sets of field classes. That fails *silently*: the file
+>   prints a fully populated registry while `irs_parser` reads an empty one, and every
+>   `isinstance(field, Field)` downstream misses. `_alias.py`'s module docstring has the full
+>   account; read it before changing anything about how IRS is imported.
+
 ### Defining BitFields
 ```python
 from IRS.bitfields import BitField, baseType

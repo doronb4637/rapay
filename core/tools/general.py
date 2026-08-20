@@ -93,7 +93,40 @@ def _import_one(lib: str) -> str:
         _import_from_file(path, name)
     else:
         importlib.import_module(name)
+    _assert_registered(lib, name)
     return name
+
+
+def _assert_registered(lib: str, name: str) -> None:
+    """Fail loudly if importing `lib` registered nothing under `name`.
+
+    An import that "succeeds" while registering into somewhere nobody reads is
+    the single worst failure this module can produce: everything looks fine
+    until `irs_parser._get_message_class` raises `IRSNotFoundError` against an
+    empty registry, one config load and several layers away from the file that
+    actually caused it. This turns that into an error naming the file.
+
+    Imported locally, not at module scope: `core.tools.general` is itself
+    imported by `core.connections`, and there is no reason to pull the registry
+    in at that point. Reading it at call time also means we read whatever the
+    module just wrote, with no load-order assumption at all.
+    """
+    from core.IRS.REGISTRY import PAIR_REGISTRY, STRUCTURE_REGISTRY
+
+    if name in STRUCTURE_REGISTRY or name in PAIR_REGISTRY:
+        return
+    # Drop it so a retry after a fix actually re-executes -- both import paths
+    # short-circuit on an existing `sys.modules` entry, so leaving it would make
+    # the second attempt fail identically no matter what the user changed.
+    sys.modules.pop(name, None)
+    raise ImportError(
+        f"structures module {lib!r} imported as {name!r} but registered no "
+        f"messages under that namespace. Either it calls no register_message/"
+        f"register_pair, or it passes an explicit namespace= that does not "
+        f"match, or it reached a DIFFERENT IRS module object than the one being "
+        f"read here (see core/IRS/_alias.py). Known namespaces: "
+        f"{sorted(set(STRUCTURE_REGISTRY) | set(PAIR_REGISTRY)) or 'none'}."
+    )
 
 
 def _import_from_file(path: Path, module_name: str) -> None:

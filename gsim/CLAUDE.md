@@ -19,7 +19,15 @@ a decision to make unilaterally.
 > That escape hatch has been used exactly once, with explicit user authorisation: making IRS
 > layouts per-link (namespaced by structures module, `Structures` declared per unit — see
 > `core/connections/CLAUDE.md` §2b). It could not be done from GSim, because the collision was in
-> `IRS.REGISTRY`'s own key shape. It is not a precedent for editing `core` without asking. Everything GSim needs from `core` is obtained by importing it and
+> `IRS.REGISTRY`'s own key shape. It is not a precedent for editing `core` without asking.
+>
+> Used a second time, also with explicit user authorisation: `core/IRS/_alias.py` (+ two lines in
+> `core/IRS/__init__.py`) making `IRS.x` and `core.IRS.x` one module object, and
+> `tools.general._assert_registered` failing loudly when a structures file registers nothing. The
+> fault was inside `core/IRS`'s own module identity and produced two GSim-visible symptoms --
+> `IRSNotFoundError` against an empty registry, and "No widget for this IRS field type" for every
+> field, because `schema.py`'s `isinstance` ladder was testing against the other copy's classes.
+> Neither was fixable from `gsim/`. Everything GSim needs from `core` is obtained by importing it and
 wrapping it, never by changing it. This is enforced structurally (see Architecture ยง1) and should be
 checked mechanically before any commit:
 
@@ -50,9 +58,11 @@ cd gsim/web && npm run build
 
 Run Python commands with the repo-root `.venv` (`.venv/Scripts/python.exe`), not a bare `python` --
 it is the interpreter with `fastapi`, `pywebview`, `uvicorn`, `rti.connext`, and `pytest` installed.
-`gsim/core_gateway/bootstrap.py` puts `<repo-root>/core` on `sys.path` at import time, so `import
-connections` works from inside `gsim` without an installed package -- no manual `PYTHONPATH` needed
-for anything that imports `gsim` first.
+`gsim/core_gateway/bootstrap.py` puts the `<repo-root>` on `sys.path` at import time, so `import
+core...` works from inside `gsim` without an installed package -- no manual `PYTHONPATH` needed
+for anything that imports `gsim` first. It is the repo root, **not** `core/` itself: `core` is an
+ordinary package rooted there, and putting `core/` on the path as well is what used to give the
+process two `IRS` module objects (see `core/IRS/_alias.py`).
 
 ## Layout
 
