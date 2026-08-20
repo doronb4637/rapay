@@ -1,10 +1,13 @@
 [Fixes]
-2. Add readMe to IRS(using gemini)
+1. Fix readMe to IRS(using gemini)
 
 
 [Improvments]
-1. Add function that initialize Message with default values.
+1. Add function that initialize Message with default values(fill).
+
 
 [TODOS]
 1. Understand if gsim lib does any ontop calculation on the messages.
 2. read the whole project and enforcing Clean code and understandable code.
+3. Add DDS support(figure out with gemini/claude how to Implement the DDS)
+4. Get GitKraken.
