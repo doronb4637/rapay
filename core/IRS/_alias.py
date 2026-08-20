@@ -54,12 +54,9 @@ from importlib.abc import Loader, MetaPathFinder
 from importlib.machinery import ModuleSpec
 from types import ModuleType
 
-#: The name a structures file spells, and the name IRS has when standalone.
-_ALIAS_ROOT = "IRS"
 
-#: Set once `install()` has done its work, so importing this module twice (or
-#: re-importing `core.IRS` after a `sys.modules` cleanup in a test) cannot stack
-#: a second finder on `sys.meta_path`.
+_ALIAS_ROOT = "IRS"
+#: Set once `install()` is called, so importing this module twice is *IMPOSSIBLE*
 _installed = False
 
 
@@ -82,23 +79,16 @@ class _AliasFinder(MetaPathFinder, Loader):
         return self._real_root + fullname[len(_ALIAS_ROOT):]
 
     def find_spec(self, fullname: str, path=None, target=None) -> ModuleSpec | None:
-        # Exact match or a true submodule -- never a merely similar top-level
-        # name (`IRSTools`, `IRS_legacy`), which is why this is not a bare
-        # `startswith("IRS")`.
         if fullname != _ALIAS_ROOT and not fullname.startswith(_ALIAS_ROOT + "."):
             return None
         return ModuleSpec(fullname, self, is_package=False)
 
     def create_module(self, spec: ModuleSpec) -> ModuleType:
-        # `import_module` rather than a `sys.modules` lookup: the real submodule
-        # may genuinely not be imported yet (the first `from IRS.irs_parser
-        # import ...` in a process), and letting the ordinary machinery load it
-        # under its REAL name is exactly what keeps there being only one of it.
+        # `import_module` rather than a `sys.modules` lookup
+        # Used to import the first instance of IRS module.
         module = importlib.import_module(self._real_name(spec.name))
         self._originals[id(module)] = (
             getattr(module, "__spec__", None), getattr(module, "__loader__", None))
-        # Claim the alias now, so a partially-initialised module during a
-        # circular import resolves to the same object rather than recursing.
         sys.modules[spec.name] = module
         return module
 
@@ -130,17 +120,14 @@ def install() -> None:
 
     real_root = __name__.partition(".")[0]
     if real_root == _ALIAS_ROOT:
-        # Standalone IRS: one module object already, nothing to reconcile.
         _installed = True
         return
 
     package = sys.modules[__name__.rpartition(".")[0]]
     existing = sys.modules.get(_ALIAS_ROOT)
     if existing is not None and existing is not package:
-        # A genuine second copy is already loaded -- the exact state this file
-        # exists to prevent, and unfixable from here since its classes are
-        # already built. Say so at the point of the mistake instead of leaving
-        # an empty registry to be discovered three layers downstream.
+        # A second copy is already loaded this is unfixable
+        # So We throw an *ImportError*.
         existing_file = getattr(existing, "__file__", "?")
         this_file = getattr(package, "__file__", "?")
         same_source = (
@@ -165,11 +152,5 @@ def install() -> None:
 
     sys.modules[_ALIAS_ROOT] = package
     if not any(isinstance(finder, _AliasFinder) for finder in sys.meta_path):
-        # PREPENDED, and it has to be. Appending does nothing: `IRS` in
-        # `sys.modules` is this package, so `import IRS.REGISTRY` searches its
-        # `__path__` -- which points at core/IRS/ -- and the ordinary
-        # `PathFinder` (already on `sys.meta_path`) happily finds REGISTRY.py
-        # there and executes it a second time under the name `IRS.REGISTRY`.
-        # Winning the lookup is the entire mechanism.
         sys.meta_path.insert(0, _AliasFinder(f"{real_root}.{_ALIAS_ROOT}"))
     _installed = True

@@ -9,7 +9,6 @@ from typing import Iterable
 from .core import Message
 
 IrsMessage = type[Message]
-UnitCode = int
-OpCode = int
+UnitCode = OpCode = int
 Namespace = str
 NamespaceScope = Namespace | Iterable[Namespace]

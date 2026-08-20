@@ -1,9 +1,12 @@
-# logic/__init__.py
-# FIRST, before anything else in this package runs: make `IRS.x` and
-# `core.IRS.x` one module rather than two independent copies. No-op when IRS is
-# imported standalone (as plain `IRS`). See _alias.py for why this is not
-# optional -- the two-copies failure shows up as an empty STRUCTURE_REGISTRY and
-# as every isinstance() check against IRS field types silently missing.
+"""
+FIRST, before anything else in this package runs: make `IRS.x` and
+`core.IRS.x` one module rather than two independent copies.
+
+*: USE REASON: using core.IRS.* creates a second copy of the IRS module.
+   STRUCTURE_REGISTRY will always stay empty.
+   and every isinstance() check against IRS field types silently missing.
+*THIS FIXES THE PROBLEM.*
+"""
 from . import _alias as _alias
 _alias.install()
 
