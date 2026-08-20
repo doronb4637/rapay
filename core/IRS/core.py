@@ -7,6 +7,8 @@ from .buffers import BinaryReader, BinaryWriter
 from .bitfields import BitField, baseType
 from .fields import BaseField, Field, EnumField
 from .constants import *
+
+
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)
 
