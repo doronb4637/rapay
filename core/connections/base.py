@@ -101,8 +101,14 @@ class _EventLoopThread:
     def await_coroutine(self, coro: Coroutine[Any, Any, Any], timeout: float | int | None = None) -> Any:
         """Submit a coroutine and blocks the CALLER until completion
         (Simulate normal sync)."""
+        # TODO change to this current code when dropping python 3.10
+        #future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        #return future.result(timeout=timeout)
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError) as exc:
+            raise TimeoutError(str(exc)) from exc
 
     def submit(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future[Any]:
         """Non-blocking submission for fire-and-forget call."""
