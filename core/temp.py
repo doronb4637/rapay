@@ -1,3 +1,4 @@
 from core.IRS.Structures.Tiful.tiful_to_dtu import *
-genflag = GeneralFlag(Flag = 1).fill()
-print(genflag.to_bytes())
+genflag: GeneralFlag = GeneralFlag(Flag=255, value=1)
+print(genflag)
+

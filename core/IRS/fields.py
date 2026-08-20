@@ -6,7 +6,7 @@ from .buffers import BinaryReader, BinaryWriter
 from .constants import *
 
 class BaseField:
-    __slots__ = ('name',)
+    __slots__ = ('_name',)
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> Any: raise NotImplementedError
     def to_bytes(self, writer: BinaryWriter, value: Any) -> None: raise NotImplementedError
     def from_dict(self, value: Any) -> Any: raise NotImplementedError
@@ -39,7 +39,7 @@ class EnumField(BaseField):
     __slots__ = ('enum_class', 'packer',)
     def __init__(self, enum_class: type[IntEnum], field_name: str = None) -> None:
         self.enum_class = enum_class
-        self.name = field_name
+        self._name = field_name
         enum_fmt = getattr(enum_class, '_baseType_', Byte)
         self.packer = struct.Struct(enum_fmt)
 

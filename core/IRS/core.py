@@ -56,13 +56,13 @@ class MessageMeta(type):
 
             if isinstance(field_value, list) and len(field_value) == 2:
                 field_value = ArrayField(field_value[0], field_value[1])
-                field_value.name = field_name
+                field_value._name = field_name
                 fields_list.append(field_value)
                 namespace.pop(field_name, None)
 
             elif isinstance(field_value, str):
                 field = Field(field_value)
-                field.name = field_name
+                field._name = field_name
                 fields_list.append(field)
                 namespace.pop(field_name, None)
             else:
@@ -71,7 +71,7 @@ class MessageMeta(type):
                     fields_list.append(field)
                 elif isinstance(field_type, type) and issubclass(field_type, (Structure, BitField)):
                     field = field_type()
-                    field.name = field_name
+                    field._name = field_name
                     fields_list.append(field)
 
         namespace['_fields_'] = tuple(fields_list)
@@ -105,55 +105,55 @@ class Structure(BaseField, metaclass=MessageMeta):
     def from_bytes(cls, reader: BinaryReader, instance: Any = None) -> 'Structure': # TODO change to Self
         new_instance = cls()
         for field in cls._fields_:
-            object.__setattr__(new_instance, field.name, field.from_bytes(reader, new_instance))
+            object.__setattr__(new_instance, field._name, field.from_bytes(reader, new_instance))
         return new_instance
 
     def to_bytes(self, writer: BinaryWriter, value: Any = None) -> None:
         target = value if value is not None else self
         for field in target.__class__._fields_:
-            field.to_bytes(writer, getattr(target, field.name))
+            field.to_bytes(writer, getattr(target, field._name))
 
     @classmethod
     def from_dict(cls, data: dict) -> 'Structure': # TODO change to Self
         instance = cls()
         for field in cls._fields_:
-            if field.name in data:
-                val = field.from_dict(data[field.name])
-                object.__setattr__(instance, field.name, val)
+            if field._name in data:
+                val = field.from_dict(data[field._name])
+                object.__setattr__(instance, field._name, val)
         return instance
 
     def to_dict(self, value: Any = None) -> dict:
         target = value if value is not None else self
         result = {}
         for field in target.__class__._fields_:
-            if hasattr(target, field.name):
-                raw_val = getattr(target, field.name)
-                result[field.name] = field.to_dict(raw_val)
+            if hasattr(target, field._name):
+                raw_val = getattr(target, field._name)
+                result[field._name] = field.to_dict(raw_val)
         return result
 
     def fill(self) -> 'Structure':
         """Explicitly fills uninitialized fields with safe default values."""
         for field in self.__class__._fields_:
-            if not hasattr(self, field.name):
-                object.__setattr__(self, field.name, field.fill())
+            if not hasattr(self, field._name):
+                object.__setattr__(self, field._name, field.fill())
         return self
 
     def _format_repr(self, indent_level: int = 0) -> str:
         inner = "    " * (indent_level + 1)
         lines = [f"<{self.__class__.__name__}>"]
         for field in self.__class__._fields_:
-            if not hasattr(self, field.name): continue
-            val = getattr(self, field.name)
+            if not hasattr(self, field._name): continue
+            val = getattr(self, field._name)
             if isinstance(val, list):
-                lines.append(f"{inner}{field.name}: [")
+                lines.append(f"{inner}{field._name}: [")
                 for item in val:
                     if hasattr(item, '_format_repr'): lines.append(f"{inner}    {item._format_repr(indent_level + 2).lstrip()}")
                     else: lines.append(f"{inner}    {item!r}")
                 lines.append(f"{inner}]")
             elif hasattr(val, '_format_repr'):
-                lines.append(f"{inner}{field.name}: {val._format_repr(indent_level + 1).lstrip()}")
+                lines.append(f"{inner}{field._name}: {val._format_repr(indent_level + 1).lstrip()}")
             else:
-                lines.append(f"{inner}{field.name}: {val!r}")
+                lines.append(f"{inner}{field._name}: {val!r}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
