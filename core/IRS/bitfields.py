@@ -7,18 +7,26 @@ from .fields import BaseField
 from .constants import *
 
 
-def baseType(byte_size: int, endian ="<") -> Callable[[type], type]:
+# TODO make sure EDIAN is a namespace wide constant and if so delete the use of endian var in this function
+# Get the endian immediately from module.
+def baseType(byte_size: int, endian: str | None = None) -> Callable[[type], type]:
+    """Give an IntEnum or BitField its wire size and byte order.
+
+    `endian` defaults to whatever the declaring module declared (`ENDIAN = bigEndian`
+    at the top of a structures file).
+    """
     def wrapper(cls: EnumMeta | BitFieldMeta) -> EnumMeta | BitFieldMeta:
+        resolved_endian = module_endian(cls.__module__) if endian is None else endian
         fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(byte_size, UInt8) if isinstance(byte_size, int) else byte_size
         if isinstance(cls, BitFieldMeta):
-            cls._packer_ = get_packer(endian + fmt)
+            cls._packer_ = get_packer(resolved_endian + fmt)
             # Safety Enum Configurations
             allocated_bits = cls._packer_.size * 8
             actual_bits = sum(bits for _, _, bits in cls._fields_)
             if actual_bits > allocated_bits: raise ValueError(f"BitField '{cls.__name__}' defines {actual_bits} bits, "
                     f"but its @baseType only allocates {allocated_bits} bits.")
         else:
-            cls._baseType_ = endian + fmt
+            cls._baseType_ = resolved_endian + fmt
         return cls
     return wrapper
 

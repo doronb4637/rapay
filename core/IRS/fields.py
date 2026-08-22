@@ -15,8 +15,8 @@ class BaseField:
 
 class Field(BaseField):
     __slots__ = ('packer',)
-    def __init__(self, fmt: str) -> None:
-        self.packer = get_packer(f"<{fmt}")
+    def __init__(self, fmt: str, endian: str = little_endian) -> None:
+        self.packer = get_packer(endian + fmt)
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> int:
         return self.packer.unpack_from(reader.data, reader.offset(self.packer.size))[0]

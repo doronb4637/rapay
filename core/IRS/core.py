@@ -12,11 +12,15 @@ from .constants import *
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)
 
-    def __init__(self, base_type: Any, length: str | int | None) -> None:
-        if isinstance(base_type, str): self.baseType = Field(base_type)
-        elif isinstance(base_type, type) and issubclass(base_type, IntEnum): self.baseType = EnumField(base_type)
-        elif isinstance(base_type, type) and issubclass(base_type, (Structure, BitField)): self.baseType = base_type()
-        else: self.baseType = base_type
+    def __init__(self, base_type: Any, length: str | int | None, endian: str = little_endian) -> None:
+        if isinstance(base_type, str):
+            self.baseType = Field(base_type, endian)
+        elif isinstance(base_type, type) and issubclass(base_type, IntEnum):
+            self.baseType = EnumField(base_type)
+        elif isinstance(base_type, type) and issubclass(base_type, (Structure, BitField)):
+            self.baseType = base_type()
+        else:
+            self.baseType = base_type
         self.length = length
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> list[Any]:
@@ -50,18 +54,19 @@ class MessageMeta(type):
 
         fields_list = []
         annotations = namespace.get('__annotations__', {})
+        endian = module_endian(namespace.get('__module__'))
 
         for field_name, field_type in annotations.items():
             field_value = namespace.get(field_name)
 
             if isinstance(field_value, list) and len(field_value) == 2:
-                field_value = ArrayField(field_value[0], field_value[1])
+                field_value = ArrayField(field_value[0], field_value[1], endian)
                 field_value._name = field_name
                 fields_list.append(field_value)
                 namespace.pop(field_name, None)
 
             elif isinstance(field_value, str):
-                field = Field(field_value)
+                field = Field(field_value, endian)
                 field._name = field_name
                 fields_list.append(field)
                 namespace.pop(field_name, None)

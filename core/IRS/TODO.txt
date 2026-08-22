@@ -1,5 +1,4 @@
 [TODO]:
-
 1. use tuple for static arrays.
 2. Use default pre compile structs instead of compiling the same struct for each Field.
 3. use @opCode(<opCode>) above each messageName(Message) to define its opCode.

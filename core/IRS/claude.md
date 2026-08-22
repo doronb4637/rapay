@@ -58,6 +58,21 @@ This is how packets are defined using `IRS`. All AI-generated code should match 
 >   `isinstance(field, Field)` downstream misses. `_alias.py`'s module docstring has the full
 >   account; read it before changing anything about how IRS is imported.
 
+### Endianness
+Byte order is a property of a **whole specification**, not of a field: one structures file describes one link, and that link does not mix byte orders. So it is declared once, at the top of the file, as a module-level constant:
+
+```python
+from IRS import *
+
+ENDIAN = bigEndian   # `bigEndian`/`big_endian`/`littleEndian`/`little_endian` come from IRS.constants
+```
+
+* **A file that declares nothing is little endian.** Every structures file written before this existed keeps its exact byte layout.
+* **`@baseType(n)` inherits the declaration** -- a big-endian file says it once, not on every enum and bitfield. `@baseType(n, littleEndian)` overrides it for one type.
+* **A type carries the byte order of the file that DEFINED it.** A `Structure`, `BitField`, or `IntEnum` imported from a big-endian file stays big-endian inside a little-endian message. This is what makes "one endian per specification" coherent rather than ambiguous.
+
+Resolution happens in `IRS.constants.module_endian()`, called once per class from `MessageMeta.__new__` and `@baseType` -- at class-creation time, never inside `from_bytes`/`to_bytes`. An `ENDIAN` that is neither `'<'` nor `'>'` raises at import.
+
 ### Defining BitFields
 ```python
 from IRS.bitfields import BitField, baseType
@@ -73,7 +88,9 @@ class HardwareFlags(BitField):
 from enum import IntEnum
 from IRS.bitfields import baseType
 
-@baseType(2, '<') # 2 bytes, Little-Endian, will default to Big-Endian
+@baseType(2, littleEndian) # 2 bytes, explicitly Little-Endian. Omit the second
+                           # argument to inherit the file's `ENDIAN` declaration
+                           # (which is itself Little-Endian when absent).
 class PacketType(IntEnum):
     HANDSHAKE = 0x01
     DATA = 0x02
