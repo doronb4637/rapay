@@ -13,17 +13,10 @@ one message, so a single parse/serialize round covers the whole engine:
   * plain primitive fields (`Field`)              -- id, timestamp
   * an enum field (`EnumField`)                    -- kind
   * a bitfield (`BitField` via `@baseType`)         -- status
+  * a nested structure (`Structure`)                -- pos
   * a static/fixed-length array (`ArrayField`)      -- samples  (length=8)
   * a dynamic array, length bound to another field  -- payload  (length="count")
   * a greedy array, consumes the rest of the buffer -- tail     (length=None)
-
-Note: a nested `Structure`-typed field is deliberately NOT included. It hits a
-pre-existing bug -- `Structure.__setattr__` (core/IRS/core.py) falls through
-to `is_bearable(value, None)` and always raises when an attribute has no
-annotation (which is exactly what `MessageMeta` does when it sets `_name` on
-a nested-structure field instance at class-creation time), so nested
-`Structure` fields are currently unusable. Flagged separately; add `pos:
-Position` back here once that's fixed.
 
 Usage:
     python -m core.IRS.benchmark.bench_message_parsing [--iterations N]
@@ -34,7 +27,9 @@ from enum import IntEnum
 
 from core.IRS import (
     Byte,
+    Float32,
     Message,
+    Structure,
     BitField,
     UInt16,
     UInt32,
@@ -59,12 +54,19 @@ class StatusFlags(BitField):
     reserved: int = 4
 
 
+class Position(Structure):
+    x: float = Float32
+    y: float = Float32
+    z: float = Float32
+
+
 class BenchMessage(Message):
-    """One message exercising every (currently working) IRS field kind -- see module docstring."""
+    """One message exercising every IRS field kind -- see module docstring."""
     id: int = UInt32
     timestamp: int = UInt64
     kind: E_Kind
     status: StatusFlags
+    pos: Position
     samples: list[int] = [UInt16, 8]          # static array
     count: int = UInt16
     payload: list[int] = [Byte, "count"]      # dynamic array, bound to `count`
@@ -78,6 +80,11 @@ def build_sample() -> bytes:
     status.error = 0
     status.mode = 2
 
+    pos = Position()
+    pos.x = 1.5
+    pos.y = -2.25
+    pos.z = 3.75
+
     payload = list(range(16))
 
     msg = BenchMessage()
@@ -85,6 +92,7 @@ def build_sample() -> bytes:
     msg.timestamp = 1_700_000_000_000
     msg.kind = E_Kind.BETA
     msg.status = status
+    msg.pos = pos
     msg.samples = list(range(8))
     msg.count = len(payload)
     msg.payload = payload

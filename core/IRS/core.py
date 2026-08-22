@@ -95,6 +95,7 @@ class Structure(BaseField, metaclass=MessageMeta):
         expected_type = annotations.get(name, None)
         if expected_type is None:
             super().__setattr__(name, value)
+            return
         if isinstance(expected_type, type) and issubclass(expected_type, IntEnum):
                 expected_type = expected_type | int | str
         elif not is_bearable(value, expected_type):
