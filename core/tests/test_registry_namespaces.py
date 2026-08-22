@@ -19,7 +19,7 @@ from core.IRS import Message, UInt16
 from core.IRS.REGISTRY import (
     PAIR_REGISTRY,
     STRUCTURE_REGISTRY,
-    get_messages,
+    get_specification,
     namespaces_for,
     register_message,
     register_pair,
@@ -79,7 +79,7 @@ def test_namespace_defaults_to_the_calling_module():
     no existing structures file needed editing."""
     register_message(UNIT, OPCODE, Alpha)
     assert __name__ in STRUCTURE_REGISTRY
-    assert get_messages(__name__)[UNIT][OPCODE] is Alpha
+    assert get_specification(__name__)[UNIT][OPCODE] is Alpha
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +100,7 @@ def test_unscoped_lookup_of_a_duplicated_route_raises_naming_both():
         get_message_class(UNIT, OPCODE)
     message = str(excinfo.value)
     assert NS_A in message and NS_B in message
-    assert "Structures" in message      # tells the reader how to fix it
+    assert "Specification" in message      # tells the reader how to fix it
 
 
 def test_single_namespace_unscoped_still_resolves():

@@ -1,4 +1,10 @@
 [TODO]:
+
+1. use tuple for static arrays.
+2. Use default pre compile structs instead of compiling the same struct for each Field.
+3. use @opCode(<opCode>) above each messageName(Message) to define its opCode.
+    3.1. then when sending a message this allows us to not pass a message opCode, and taking it from the message class directly.
+4. instead of defining unitCode for a message as a number we define a Constant at the top of the spec file and use the constant itself.
+
+[SPEED]
 1. use python array for arrays that are baseType.
-2. use tuple for static arrays.
-3.

@@ -136,7 +136,7 @@ def test_structures_import_happens_before_the_connection_object_is_instantiated(
     """So a config can never come up unable to receive messages it declares
     layouts for -- `_import_config_libs` runs strictly before `impl_cls(...)`
     in `create()`."""
-    from core.IRS.REGISTRY import get_messages
+    from core.IRS.REGISTRY import get_specification
     from core.IRS.Structures.Test.test_messages import CLIENT_UNIT_CODE, TRACK_OPCODE
 
     connection = manager.create("c", _udp_config(
@@ -145,7 +145,7 @@ def test_structures_import_happens_before_the_connection_object_is_instantiated(
     # If import ran, the layout is already registered by the time we get the
     # connection object back -- no separate "warm up" step needed. Asserted
     # inside the module's own namespace, which is what the config named.
-    registered = get_messages("core.IRS.Structures.Test.test_messages")
+    registered = get_specification("core.IRS.Structures.Test.test_messages")
     assert TRACK_OPCODE in registered[CLIENT_UNIT_CODE]
     assert connection is not None
 
@@ -181,7 +181,7 @@ def test_a_path_inside_the_structures_package_resolves_to_its_dotted_name():
 def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):
     """`sys.modules[path.stem]` used to collapse both onto one entry, so the
     second import silently erased the first."""
-    from core.IRS.REGISTRY import get_messages
+    from core.IRS.REGISTRY import get_specification
     from core.tools.general import import_modules
 
     body = (
@@ -201,8 +201,8 @@ def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):
 
     namespaces = import_modules(paths)
     assert namespaces[0] != namespaces[1], namespaces
-    assert get_messages(namespaces[0])[241][950].__name__ == "M1"
-    assert get_messages(namespaces[1])[242][950].__name__ == "M2"
+    assert get_specification(namespaces[0])[241][950].__name__ == "M1"
+    assert get_specification(namespaces[1])[242][950].__name__ == "M2"
 
 
 def test_import_config_libs_imports_every_per_unit_list(manager, free_ports):

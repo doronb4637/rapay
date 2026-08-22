@@ -105,7 +105,7 @@ def get_registered_namespaces() -> list[Namespace]:
     return list(STRUCTURE_REGISTRY)
 
 
-def get_messages(namespace: Namespace) -> dict[UnitCode, dict[OpCode, IrsMessage]]:
+def get_specification(namespace: Namespace) -> dict[UnitCode, dict[OpCode, IrsMessage]]:
     """Return the message layouts registered under a specific namespace.
 
     Args:
