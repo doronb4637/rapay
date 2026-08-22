@@ -2,7 +2,7 @@ import struct
 from enum import IntEnum, EnumMeta
 from typing import Any, Callable
 
-from .buffers import BinaryReader, BinaryWriter
+from .buffers import BinaryReader, BinaryWriter, get_packer
 from .fields import BaseField
 from .constants import *
 
@@ -11,7 +11,7 @@ def baseType(byte_size: int, endian ="<") -> Callable[[type], type]:
     def wrapper(cls: EnumMeta | BitFieldMeta) -> EnumMeta | BitFieldMeta:
         fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(byte_size, UInt8) if isinstance(byte_size, int) else byte_size
         if isinstance(cls, BitFieldMeta):
-            cls._packer_ = struct.Struct(endian + fmt)
+            cls._packer_ = get_packer(endian + fmt)
             # Safety Enum Configurations
             allocated_bits = cls._packer_.size * 8
             actual_bits = sum(bits for _, _, bits in cls._fields_)

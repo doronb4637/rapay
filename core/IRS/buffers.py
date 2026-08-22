@@ -1,4 +1,9 @@
-# logic/streams.py
+import struct
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def get_packer(fmt: str) -> struct.Struct:
+    return struct.Struct(fmt)
 
 class BinaryReader:
     __slots__ = ('_data', '_offset',)

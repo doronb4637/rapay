@@ -2,7 +2,7 @@
 import struct
 from enum import IntEnum
 from typing import Any
-from .buffers import BinaryReader, BinaryWriter
+from .buffers import BinaryReader, BinaryWriter, get_packer
 from .constants import *
 
 class BaseField:
@@ -16,7 +16,7 @@ class BaseField:
 class Field(BaseField):
     __slots__ = ('packer',)
     def __init__(self, fmt: str) -> None:
-        self.packer = struct.Struct(f"<{fmt}")
+        self.packer = get_packer(f"<{fmt}")
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> int:
         return self.packer.unpack_from(reader.data, reader.offset(self.packer.size))[0]
@@ -41,7 +41,7 @@ class EnumField(BaseField):
         self.enum_class = enum_class
         self._name = field_name
         enum_fmt = getattr(enum_class, '_baseType_', Byte)
-        self.packer = struct.Struct(enum_fmt)
+        self.packer = get_packer(enum_fmt)
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> IntEnum:
         value = self.packer.unpack_from(reader.data, reader.offset(self.packer.size))[0]
