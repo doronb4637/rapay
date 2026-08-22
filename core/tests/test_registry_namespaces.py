@@ -19,7 +19,7 @@ from core.IRS import Message, UInt16
 from core.IRS.REGISTRY import (
     PAIR_REGISTRY,
     STRUCTURE_REGISTRY,
-    messages_in,
+    get_messages,
     namespaces_for,
     register_message,
     register_pair,
@@ -79,7 +79,7 @@ def test_namespace_defaults_to_the_calling_module():
     no existing structures file needed editing."""
     register_message(UNIT, OPCODE, Alpha)
     assert __name__ in STRUCTURE_REGISTRY
-    assert messages_in(__name__)[UNIT][OPCODE] is Alpha
+    assert get_messages(__name__)[UNIT][OPCODE] is Alpha
 
 
 # --------------------------------------------------------------------------- #

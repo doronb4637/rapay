@@ -8,6 +8,7 @@ from typing import Iterable
 
 from .core import Message
 
+
 IrsMessage = type[Message]
 UnitCode = OpCode = int
 Namespace = str

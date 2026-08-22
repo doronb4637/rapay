@@ -915,7 +915,7 @@ def test_irs_parser_roundtrip():
     # both on this one opcode.
     OPCODE = 60
     SERVER_CODE, CLIENT_CODE = 22, 21
-    from core.IRS.REGISTRY import messages_in
+    from core.IRS.REGISTRY import get_messages
 
     mgr = ConnectionManager()
     try:
@@ -933,7 +933,7 @@ def test_irs_parser_roundtrip():
         # create() imports the config's Structures, so register_message() has
         # run before either connection can receive anything. Both layouts live
         # in that module's namespace -- one file, one link, both directions.
-        registered = messages_in(IRS_MESSAGE_LIB)
+        registered = get_messages(IRS_MESSAGE_LIB)
         assert registered[CLIENT_CODE][OPCODE].__name__ == "TrackReport", registered
         assert registered[SERVER_CODE][OPCODE].__name__ == "TrackAck", registered
         print(f"Structures registered both layouts on opcode {OPCODE}: "
