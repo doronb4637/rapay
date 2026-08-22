@@ -70,3 +70,12 @@ class Sample(Message):
     pos: Position
     count: int = Byte
     values: list[int] = [UInt16, "count"]
+
+
+class Arrays(Message):
+    """All three array shapes, big endian -- the bulk-unpack path builds its own
+    repeated format ('>4H'), so each shape needs proving under both byte orders."""
+    fixed: list[int] = [UInt16, 4]
+    count: int = Byte
+    dynamic: list[int] = [UInt32, "count"]
+    greedy: list[int] = [UInt16, None]

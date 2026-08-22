@@ -98,12 +98,12 @@ class BitField(BaseField, metaclass=BitFieldMeta):
 
     @classmethod
     def from_bytes(cls, reader: BinaryReader, instance: Any = None) -> 'BitField': # TODO change to Self
-        value = cls._packer_.unpack_from(reader.data, reader.offset(cls._packer_.size))[0]
-        return cls(value)
+        packer = cls._packer_
+        return cls(packer.unpack_from(reader.data, reader.offset(packer.size))[0])
 
     def to_bytes(self, writer: BinaryWriter, value: Any = None) -> None:
         target = value if value is not None else self
-        writer.write(self.__class__._packer_.pack(target._value))
+        writer.buffer += self.__class__._packer_.pack(target._value)
 
     @classmethod
     def from_dict(cls, data: dict) -> 'BitField': # TODO change to Self

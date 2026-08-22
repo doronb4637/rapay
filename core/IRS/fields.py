@@ -14,15 +14,20 @@ class BaseField:
     def fill(self) -> Any: raise NotImplementedError
 
 class Field(BaseField):
-    __slots__ = ('packer',)
+    #: `endian` and `code` are kept apart from the compiled packer so `ArrayField`
+    #: can build a repeated format ('<8H') without re-parsing `packer.format`.
+    __slots__ = ('packer', 'endian', 'code',)
     def __init__(self, fmt: str, endian: str = little_endian) -> None:
+        self.endian = endian
+        self.code = fmt
         self.packer = get_packer(endian + fmt)
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> int:
-        return self.packer.unpack_from(reader.data, reader.offset(self.packer.size))[0]
+        packer = self.packer
+        return packer.unpack_from(reader.data, reader.offset(packer.size))[0]
 
     def to_bytes(self, writer: BinaryWriter, value: int) -> None:
-        writer.write(self.packer.pack(value))
+        writer.buffer += self.packer.pack(value)
 
     def from_dict(self, value: Any) -> Any:
         return value
@@ -31,7 +36,7 @@ class Field(BaseField):
         return value
 
     def fill(self) -> int:
-        if self.packer.format in Floats:
+        if self.code in Floats:
             return 0.0
         return 0
 
@@ -44,7 +49,8 @@ class EnumField(BaseField):
         self.packer = get_packer(enum_fmt)
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> IntEnum:
-        value = self.packer.unpack_from(reader.data, reader.offset(self.packer.size))[0]
+        packer = self.packer
+        value = packer.unpack_from(reader.data, reader.offset(packer.size))[0]
         try:
             # value2member_map is identical to self.enum_class(value) but works much faster
             return self.enum_class._value2member_map_[value]
@@ -55,7 +61,7 @@ class EnumField(BaseField):
 
     def to_bytes(self, writer: BinaryWriter, value: Any) -> None:
         raw_val = value.value if isinstance(value, self.enum_class) else value
-        writer.write(self.packer.pack(raw_val))
+        writer.buffer += self.packer.pack(raw_val)
 
     def from_dict(self, value: str | int) -> IntEnum:
         return self.enum_class[value] if isinstance(value, str) else self.enum_class(value)
