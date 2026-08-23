@@ -673,7 +673,7 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage, opcode: int, unit_name: str | None = None) -> None:
+    def send_message(self, data: IrsMessage, opCode: int = None, unit_name: str | None = None) -> None:
         """
         Send `data` tagged with `opcode` to `unit_name` (or the sole
         connected unit if omitted). `opcode` is mandatory: every message
@@ -694,10 +694,12 @@ class Connection(ABC):
         taken as already-encoded and sent through unchanged, so a caller that
         assembles its own payload still works.
         """
-        opcode = validated_opCode(opcode)
+        if opCode is None and hasattr(data, '_opCode'):
+            opCode = data._opCode
+        opCode = validated_opCode(opCode)
         unit = self._resolve_unit(unit_name)
-        payload = self._encode(opcode, data, unit)
-        self._loop_thread.await_coroutine(self._do_send(unit, payload, opcode))
+        payload = self._encode(opCode, data, unit)
+        self._loop_thread.await_coroutine(self._do_send(unit, payload, opCode))
 
     def wait_for_connected_units(
         self, target: ConnectedTarget, timeout: float | int | None = None

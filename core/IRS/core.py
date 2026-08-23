@@ -3,11 +3,18 @@ from typing import Any, Type
 from enum import IntEnum
 from beartype.door import is_bearable
 
+
 from .buffers import BinaryReader, BinaryWriter
 from .bitfields import BitField, baseType
 from .fields import BaseField, Field, EnumField
 from .constants import *
 
+def OpCode(opCode: int):
+    """ add _opCode variable to the message class"""
+    def wrapper(msg: type[Message]) -> type[Message]:
+        msg._opCode = opCode
+        return msg
+    return wrapper
 
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)

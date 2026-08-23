@@ -77,8 +77,8 @@ package. `FramedConnection` sets `uses_irs_parser = True`, which turns
 on the codec at both boundaries:
 
 ```python
-connection.send_message(Track(track_id=7, label="alpha"), opcode=60)
-unit, track = connection.receive_message(60, timeout=3)   # -> a Track object
+connection.send_message(Track(track_id=7, label="alpha"), opCode=60)
+unit, track = connection.receive_message(60, timeout=3)  # -> a Track object
 ```
 
 - **Outbound** (`send_message`, `periodic_sending`): `Connection._encode` calls
@@ -509,7 +509,7 @@ beacon = mgr.create_composite("BeaconUnit", {
     "receive": {"protocol": "udp", "side": "server", "mode": "receive_only", ...},
 })
 beacon.start()
-beacon.send_message(b"...", opcode=20)
+beacon.send_message(b"...", opCode=20)
 unit, payload = beacon.receive_message(opCode=21)
 beacon.close()
 ```
