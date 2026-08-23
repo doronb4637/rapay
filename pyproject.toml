@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rapay-core"
-version = "0.1.0"
+version = "0.8.5"
 description = "IRS binary parsing engine + connections/tools framework (import name: core)"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,3 +25,6 @@ exclude = [
     "core.IRS.Structures", "core.IRS.Structures.*",
     "core.IRS.benchmark", "core.IRS.benchmark.*",
 ]
+
+#python -m pip install build
+#python -m build --wheel
