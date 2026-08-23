@@ -14,12 +14,8 @@ class BaseField:
     def fill(self) -> Any: raise NotImplementedError
 
 class Field(BaseField):
-    #: `endian` and `code` are kept apart from the compiled packer so `ArrayField`
-    #: can build a repeated format ('<8H') without re-parsing `packer.format`.
-    __slots__ = ('packer', 'endian', 'code',)
+    __slots__ = ('packer',)
     def __init__(self, fmt: str, endian: str = little_endian) -> None:
-        self.endian = endian
-        self.code = fmt
         self.packer = get_packer(endian + fmt)
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> int:
@@ -36,7 +32,7 @@ class Field(BaseField):
         return value
 
     def fill(self) -> int:
-        if self.code in Floats:
+        if self.packer.format in Floats:
             return 0.0
         return 0
 

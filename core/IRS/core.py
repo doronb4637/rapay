@@ -1,18 +1,16 @@
 # logic/core.py
-import struct
 from typing import Any, Type
 from enum import IntEnum
 from beartype.door import is_bearable
 
-from .buffers import BinaryReader, BinaryWriter, get_packer
+from .buffers import BinaryReader, BinaryWriter
 from .bitfields import BitField, baseType
 from .fields import BaseField, Field, EnumField
 from .constants import *
 
 
 class ArrayField(BaseField):
-    #: `_cached` is one `(count, packer)` tuple -- see `_packer_for`.
-    __slots__ = ('baseType', 'length', '_bulk', '_cached',)
+    __slots__ = ('baseType', 'length',)
 
     def __init__(self, base_type: Any, length: str | int | None, endian: str = little_endian) -> None:
         if isinstance(base_type, str):
@@ -25,60 +23,9 @@ class ArrayField(BaseField):
             self.baseType = base_type
         self.length = length
 
-        # An array of primitives is ONE struct operation ('<8H') instead of one call
-        # per element -- by far the largest cost in the old parser. Only a
-        # single-character format can be repeated like that, and only a plain Field
-        # has one: enums, bitfields and structures still go element by element.
-        item = self.baseType
-        self._bulk = type(item) is Field and len(item.code) == 1
-        self._cached = (-1, None)
-        if self._bulk and isinstance(self.length, int):
-            self._packer_for(self.length)
-
-    def _packer_for(self, count: int):
-        """The packer for exactly `count` elements, remembering the last one built.
-
-        A FIXED-length array goes through `get_packer`: its format is decided at import
-        time, so the set of them is bounded by the declarations and sharing one Struct
-        across every `[UInt16, 8]` in the program is exactly what that cache is for.
-
-        A dynamic or greedy array builds its Struct directly instead, because its length
-        is data. `get_packer` is `lru_cache(maxsize=None)`, so routing runtime lengths
-        through it would retain one Struct for every distinct length ever received --
-        the unbounded duplication that cache was introduced to prevent. Held only by
-        this field's own slot, it is one Struct per array field instead.
-
-        Read and written as a single tuple, so a concurrent parse can never observe one
-        count paired with another count's packer.
-        """
-        count_and_packer = self._cached
-        if count_and_packer[0] != count:
-            item = self.baseType
-            fmt = '%s%d%s' % (item.endian, count, item.code)
-            packer = get_packer(fmt) if isinstance(self.length, int) else struct.Struct(fmt)
-            count_and_packer = (count, packer)
-            self._cached = count_and_packer
-        return count_and_packer[1]
-
-    def _count(self, reader: BinaryReader, instance: Any) -> int:
-        """How many elements to read: fixed, bound to another field, or whatever is left."""
-        if isinstance(self.length, str):
-            return getattr(instance, self.length)
-        if self.length is not None:
-            return self.length
-        item_size = self.baseType.packer.size
-        count, leftover = divmod(reader.remaining(), item_size)
-        if leftover:
-            raise ValueError(f"Greedy array {self._name!r} has {reader.remaining()} bytes left, "
-                             f"which is not a whole number of {item_size}-byte items.")
-        return count
-
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> list[Any]:
-        if self._bulk:
-            packer = self._packer_for(self._count(reader, instance))
-            return list(packer.unpack_from(reader.data, reader.offset(packer.size)))
         if self.length is not None:
-            array_len = self._count(reader, instance)
+            array_len = getattr(instance, self.length) if isinstance(self.length, str) else self.length
             return [self.baseType.from_bytes(reader, instance) for _ in range(array_len)]
         array = []
         while not reader.is_empty():
@@ -86,12 +33,6 @@ class ArrayField(BaseField):
         return array
 
     def to_bytes(self, writer: BinaryWriter, value: list[Any]) -> None:
-        if self._bulk:
-            count = len(value)
-            if isinstance(self.length, int) and count != self.length:
-                raise ValueError(f"{self._name!r} is a fixed array of {self.length} items, got {count}.")
-            writer.buffer += self._packer_for(count).pack(*value)
-            return
         for item in value:
             self.baseType.to_bytes(writer, item)
 
