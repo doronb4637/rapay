@@ -7,7 +7,7 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: './',
-  build: { outDir: 'dist' },
+  build: { outDir: 'ui_dist' }, // Keeps Vite output separate from PyInstaller's dist/
   server: {
     // Dev only: Vite serves the UI, FastAPI serves the API.
     proxy: {

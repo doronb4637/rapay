@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from gsim.api.routes import behaviours, connections, events, files, messages
 from gsim.core_gateway import get_runtime
 
-WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "ui_dist"
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
