@@ -12,6 +12,7 @@ GsimConfig/
 build/
 develop-eggs/
 dist/
+ui_dist/
 downloads/
 eggs/
 .eggs/

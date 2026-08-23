@@ -4,14 +4,35 @@
     {
       "name": "gsim",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "gsim", "--server"],
+      "runtimeArgs": [
+        "-m",
+        "gsim",
+        "--server"
+      ],
       "port": 8765
     },
     {
       "name": "gsim-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "gsim/web", "run", "dev"],
+      "runtimeArgs": [
+        "--prefix",
+        "gsim/web",
+        "run",
+        "dev"
+      ],
       "port": 5173
+    },
+    {
+      "name": "design-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8901",
+        "--directory",
+        "C:/Users/Doron/AppData/Local/Temp/claude/C--Projects-Rapat-rapay/a08e5b79-fef3-4f28-8153-3276f1c35fa0/scratchpad/design"
+      ],
+      "port": 8901
     }
   ]
 }
