@@ -12,6 +12,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Inbox, Repeat, Search, Send } from 'lucide-react';
 import { api } from '../api';
 import { Badge, EmptyState, Input, Panel, PanelHeader, Select, cx } from './ui';
+import { hexTitle } from '../lib/format';
 
 export default function MessagesTable({
   connectionName, peers = [], destination, onDestinationChange,
@@ -159,7 +160,12 @@ export default function MessagesTable({
                         {behaviourFor(message.op_code).interval}s
                       </span>
                     )}
-                    <Badge tone={isActive ? 'sky' : 'slate'}>{message.op_code_hex}</Badge>
+                    {/* Hex is the form every IRS document and every log row
+                        uses; the decimal is a rare lookup, so it waits in the
+                        tooltip rather than doubling the width of every row. */}
+                    <Badge tone={isActive ? 'sky' : 'slate'}>
+                      <span title={hexTitle(message.op_code, 'opCode')}>{message.op_code_hex}</span>
+                    </Badge>
                     <Send
                       size={12}
                       className={cx(

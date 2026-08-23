@@ -72,32 +72,26 @@ export default function BehavioursPanel({
       <div className={cx('min-h-0 flex-1 overflow-y-auto p-1.5', collapsed && 'hidden')}>
         <ul className="flex flex-col gap-0.5">
           {behaviours.map((behaviour) => (
-            <li key={behaviour.id}>
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={() => onEdit(behaviour)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onEdit(behaviour);
-                  }
-                }}
-                title={behaviour.last_error ?? 'Click to edit'}
-                className={cx(
-                  'group flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5',
-                  'transition-colors duration-100 hover:bg-slate-800/60',
-                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500/70',
-                )}
-              >
+            // Three SIBLING controls, not two buttons nested inside a
+            // clickable div: the old shape announced itself as a button
+            // containing buttons and made Enter/Space on the row ambiguous.
+            <li
+              key={behaviour.id}
+              className={cx(
+                'group flex flex-col rounded-md px-2 py-1.5',
+                'transition-colors duration-100 hover:bg-slate-800/60',
+              )}
+            >
+              <div className="flex w-full items-center gap-2">
                 <button
                   type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();   // toggling must not open the editor
-                    (behaviour.enabled ? onStop : onStart)(behaviour.id);
-                  }}
+                  onClick={() => (behaviour.enabled ? onStop : onStart)(behaviour.id)}
                   title={behaviour.enabled ? 'Running — click to stop' : 'Stopped — click to start'}
-                  aria-label={behaviour.enabled ? 'Stop behaviour' : 'Start behaviour'}
+                  aria-label={
+                    behaviour.enabled
+                      ? `Stop ${behaviour.message_name ?? behaviour.op_code_hex}`
+                      : `Start ${behaviour.message_name ?? behaviour.op_code_hex}`
+                  }
                   className="grid h-5 w-5 shrink-0 place-items-center rounded transition-colors hover:bg-slate-700/70 focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
                 >
                   {/* `active` (really firing), not `enabled` (intended to) --
@@ -106,34 +100,46 @@ export default function BehavioursPanel({
                   <StatusDot on={behaviour.active} />
                 </button>
 
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium text-slate-300">
+                <button
+                  type="button"
+                  onClick={() => onEdit(behaviour)}
+                  className="min-w-0 flex-1 rounded text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500/70"
+                >
+                  <span className="block truncate text-xs font-medium text-slate-300">
                     {behaviour.message_name ?? behaviour.op_code_hex}
-                  </div>
-                  <div className="truncate font-mono text-[10px] text-slate-500">
+                  </span>
+                  <span className="block truncate font-mono text-[10px] text-slate-500">
                     {nameOf(behaviour.connection_name)} → {behaviour.unit_name} · every {behaviour.interval}s
-                  </div>
-                </div>
+                  </span>
+                </button>
 
-                {behaviour.last_error && (
-                  <TriangleAlert
-                    size={11}
-                    className="shrink-0 text-amber-400"
-                    title={behaviour.last_error}
-                  />
-                )}
-                <span className="shrink-0 font-mono text-[10px] text-slate-600">
+                <span
+                  className="tnum shrink-0 font-mono text-[10px] text-slate-500"
+                  title={`${behaviour.sent_count} sent`}
+                >
                   {behaviour.sent_count}
                 </span>
                 <IconButton
                   icon={Trash2} title="Remove behaviour" variant="danger"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onDelete(behaviour.id);
-                  }}
+                  onClick={() => onDelete(behaviour.id)}
                   className="!h-5 !w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
                 />
               </div>
+
+              {/* The error itself, not just a triangle with the text hidden in
+                  a tooltip. A failing schedule is the single most useful thing
+                  this panel can tell you, and "peer not connected yet" reads
+                  very differently from "payload cannot encode" -- which is
+                  exactly the distinction a hover-only label withheld. */}
+              {behaviour.last_error && (
+                <p
+                  className="mt-1 flex items-start gap-1 pl-7 text-[10px] leading-snug text-amber-300"
+                  title={behaviour.last_error}
+                >
+                  <TriangleAlert size={10} className="mt-px shrink-0" />
+                  <span className="line-clamp-2 min-w-0">{behaviour.last_error}</span>
+                </p>
+              )}
             </li>
           ))}
         </ul>

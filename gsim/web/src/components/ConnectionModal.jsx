@@ -398,14 +398,20 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
               }
             >
               {form.peers.map((peer, index) => (
+                // A unit with its own structures is a GROUP of related fields,
+                // not a card: it already sits inside the section's fieldset, so
+                // a border and a fill here stacked modal -> fieldset -> card ->
+                // echo block, four nested boxes deep, and the fields drowned in
+                // chrome. `FieldRenderer` solved exactly this for nested structs
+                // -- depth 0 gets a card, deeper levels get a rule and an indent
+                // guide -- and the same rule applies here.
                 <div
                   key={index}
                   className={cx(
                     'flex flex-col gap-2',
-                    // Only box them up once each carries its own structures --
-                    // a bare row is clearer while there is nothing nested in it.
                     !showSharedStructures &&
-                      'rounded-md border border-slate-800 bg-slate-900/40 p-2',
+                      'border-l-2 border-slate-800 pl-2.5 pt-0.5',
+                    !showSharedStructures && index > 0 && 'mt-1',
                   )}
                 >
                   <div className="flex items-end gap-2">
@@ -613,31 +619,37 @@ function StructureList({ label, entries, onChange, onBrowse }) {
  */
 function PeerEchoFields({ peer, onChange }) {
   return (
-    <div className="flex flex-col gap-1.5 border-t border-slate-800/70 pt-2">
-      <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
-        Echo override{' '}
-        <span className="normal-case text-slate-600">(blank = connection default)</span>
+    // One labelled ROW rather than a titled sub-block: the label sits beside
+    // its three fields instead of above them, which removes a level of visual
+    // nesting and a line of vertical space per unit. The "decimal or 0x hex"
+    // hint is dropped here because the connection-level Echo settings section
+    // below already carries it on the identical field -- saying it twice on one
+    // screen taught nothing the second time.
+    <div className="flex items-end gap-2 border-t border-slate-800/70 pt-2">
+      <span
+        className="mb-1.5 w-24 shrink-0 text-[10px] font-medium uppercase leading-tight tracking-wider text-slate-500"
+        title="Blank inherits this connection's Echo settings"
+      >
+        Echo override
       </span>
-      <div className="flex gap-2">
-        <Field label="echo opCode" hint="decimal or 0x hex">
-          <Input
-            value={peer.echo_opcode ?? ''} placeholder="—"
-            onChange={(e) => onChange('echo_opcode', maskCode(e.target.value))}
-          />
-        </Field>
-        <Field label="interval (s)">
-          <Input
-            type="number" step="any" value={peer.echo_interval ?? ''} placeholder="—"
-            onChange={(e) => onChange('echo_interval', e.target.value)}
-          />
-        </Field>
-        <Field label="timeout (s)">
-          <Input
-            type="number" step="any" value={peer.echo_timeout ?? ''} placeholder="—"
-            onChange={(e) => onChange('echo_timeout', e.target.value)}
-          />
-        </Field>
-      </div>
+      <Field label="opCode">
+        <Input
+          value={peer.echo_opcode ?? ''} placeholder="—"
+          onChange={(e) => onChange('echo_opcode', maskCode(e.target.value))}
+        />
+      </Field>
+      <Field label="interval (s)">
+        <Input
+          type="number" step="any" value={peer.echo_interval ?? ''} placeholder="—"
+          onChange={(e) => onChange('echo_interval', e.target.value)}
+        />
+      </Field>
+      <Field label="timeout (s)">
+        <Input
+          type="number" step="any" value={peer.echo_timeout ?? ''} placeholder="—"
+          onChange={(e) => onChange('echo_timeout', e.target.value)}
+        />
+      </Field>
     </div>
   );
 }

@@ -52,12 +52,34 @@ def _format_char(packer) -> str:
     return packer.format.lstrip("<>=!@")
 
 
-def _numeric_meta(char: str) -> dict[str, Any]:
-    """dtype name, wire width, and the inclusive range -- so the UI can bound
-    its inputs, reject a bad value before it ever reaches `struct.pack`, and
-    total up the message length it is about to send."""
+#: `struct`'s byte-order prefixes. `=` and `@` mean native, which on every
+#: platform this runs on is little-endian; an absent prefix means `@`.
+_BIG_ENDIAN_PREFIXES = frozenset(">!")
+
+
+def _byte_order(packer) -> str:
+    """Which way round this field's bytes go, read off its own packer.
+
+    Carried into the schema so the UI's byte view can render the wire order it
+    will actually have instead of assuming one. Reading it here rather than
+    hardcoding "little" costs a character comparison and means a layout that
+    ever declares network order shows up correctly rather than reversed.
+    """
+    prefix = packer.format[:1]
+    return "big" if prefix in _BIG_ENDIAN_PREFIXES else "little"
+
+
+def _numeric_meta(char: str, endian: str = "little") -> dict[str, Any]:
+    """dtype name, wire width, byte order, and the inclusive range -- so the UI
+    can bound its inputs, reject a bad value before it ever reaches
+    `struct.pack`, total up the message length it is about to send, and show
+    the bytes that message will occupy."""
     width = _BYTE_WIDTH.get(char, 1)
-    meta: dict[str, Any] = {"dtype": _DTYPE_BY_CHAR.get(char, char), "byte_size": width}
+    meta: dict[str, Any] = {
+        "dtype": _DTYPE_BY_CHAR.get(char, char),
+        "byte_size": width,
+        "endian": endian,
+    }
     if char in _FLOAT_CHARS:
         meta["numeric"] = "float"
         return meta
@@ -104,6 +126,7 @@ def _bitfield_schema(name: str, bitfield: BitField) -> dict[str, Any]:
         "kind": "bitfield",
         "struct": cls.__name__,
         "byte_size": packer.size if packer is not None else 1,
+        "endian": _byte_order(packer) if packer is not None else "little",
         "bits": bits,
     }
 
@@ -146,11 +169,15 @@ def describe_field(field: BaseField, name: str | None = None) -> dict[str, Any]:
             "kind": "enum",
             "enum": field.enum_class.__name__,
             "options": _enum_options(field.enum_class),
-            **_numeric_meta(_format_char(field.packer)),
+            **_numeric_meta(_format_char(field.packer), _byte_order(field.packer)),
         }
 
     if isinstance(field, Field):
-        return {"name": field_name, "kind": "scalar", **_numeric_meta(_format_char(field.packer))}
+        return {
+            "name": field_name,
+            "kind": "scalar",
+            **_numeric_meta(_format_char(field.packer), _byte_order(field.packer)),
+        }
 
     # An IRS field kind this module has not been taught yet. Surface it as
     # read-only rather than guessing at a widget for it.

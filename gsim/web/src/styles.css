@@ -3,9 +3,74 @@
 /* Tailwind v4 is CSS-first: theme tokens are declared here, not in a JS
    config. Only the things Tailwind does not already give us live below. */
 @theme {
-    --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, SFMono-Regular,
-    Menlo, Consolas, monospace;
-    --font-sans: 'Inter', ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', 'Cascadia Mono', 'Cascadia Code', ui-monospace,
+    SFMono-Regular, Menlo, Consolas, monospace;
+    --font-sans: 'Inter', ui-sans-serif, system-ui, 'Segoe UI Variable Text',
+    'Segoe UI', sans-serif;
+}
+
+/* ---------------------------------------------------------------------------
+   Typefaces.
+
+   `--font-sans`/`--font-mono` used to NAME Inter and JetBrains Mono without
+   anything ever loading them: no @font-face, no stylesheet link, and
+   `web/public/` held one file (favicon.svg). On a stock Windows box the app
+   therefore rendered in Segoe UI and Consolas, and the Inter-only character
+   alternates below did nothing at all -- every typographic decision in this
+   file was a suggestion.
+
+   These faces are declared rather than fetched, because the packaged app is an
+   offline PyWebView window and a CDN link would simply fail there. `local()`
+   comes first so an installed copy is used with no download; the url() picks up
+   a woff2 dropped into `web/public/fonts/` (see the README there for the two
+   filenames). A source that resolves to nothing is skipped silently, so with
+   neither present the fallback stack above takes over and nothing breaks.
+--------------------------------------------------------------------------- */
+@font-face {
+    font-family: 'Inter';
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: local('Inter Variable'), local('InterVariable'), local('Inter'),
+    url('/fonts/InterVariable.woff2') format('woff2');
+}
+
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 100 800;
+    font-display: swap;
+    src: local('JetBrains Mono'), local('JetBrainsMono-Regular'),
+    url('/fonts/JetBrainsMono.woff2') format('woff2');
+}
+
+/* ---------------------------------------------------------------------------
+   Dark: the two dim text steps, re-measured.
+
+   Dark is the DEFAULT theme and the base stylesheet, so for a long time it was
+   the one ramp nobody checked -- while the light block below carries a comment
+   proving its dim steps were measured and adjusted. Against the slate-900
+   panel, stock `slate-600` sits at 2.36:1 and `slate-500` at 3.75:1; on a
+   selected row (slate-800) they fall to 1.93 and 3.07. Everything they carry is
+   9-11px text, where WCAG AA wants 4.5:1 -- and it is not decoration: log
+   timestamps, the owning connection's name, placeholders, sent counts, and
+   every uppercase micro-label in the app.
+
+   The whole ladder shifts up one rung rather than being rebuilt, so the
+   relationships the UI already relies on (600 dimmest, 500 dim, 400 body) all
+   survive. Measured against slate-900 / slate-800:
+
+       600  #8493ab   5.73 / 4.70
+       500  #94a3b8   6.96 / 5.71
+       400  #a8b5c6   8.58 / 7.03
+
+   Declared unlayered, so it beats Tailwind's own `@layer theme` defaults; the
+   light block below has an attribute selector and therefore still wins over it.
+--------------------------------------------------------------------------- */
+:root {
+    --color-slate-600: #8493ab;
+    --color-slate-500: #94a3b8;
+    --color-slate-400: #a8b5c6;
 }
 
 /* ---------------------------------------------------------------------------
@@ -71,6 +136,14 @@
     body {
         /* The desktop shell has no browser chrome, so the app owns the ground. */
         @apply bg-slate-950 text-slate-200 antialiased;
+    }
+
+    /* cv02/cv03/cv04/ss01 are Inter's own character alternates and mean nothing
+       to any other family, so they are applied only once Inter is confirmed
+       present -- `lib/theme.js` stamps the attribute after `document.fonts`
+       says so. Declaring them unconditionally was harmless but dishonest: it
+       read as a typographic decision that was never actually in effect. */
+    html[data-font-sans='inter'] body {
         font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
     }
 
@@ -148,5 +221,30 @@
         .animate-row-in {
             animation: none;
         }
+    }
+
+    /* "Running" on a status dot, carried by SIZE as well as hue so the state
+       survives a theme that cannot show a glow. On near-black the halo reads;
+       on white it is invisible, which left an 8px hue difference doing the
+       whole job for the most-scanned piece of state in the app. Light mode gets
+       a ring instead -- the running dot is physically larger either way. */
+    .dot-live {
+        /* Literal first, `color-mix` second: a browser that does not understand
+           the second declaration drops it and keeps the first, rather than
+           losing the halo entirely. The literals are the two themes' own
+           emerald-400. */
+        box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+        box-shadow: 0 0 6px color-mix(in srgb, var(--color-emerald-400) 70%, transparent);
+    }
+
+    :root[data-theme='light'] .dot-live {
+        box-shadow: 0 0 0 3px rgba(4, 120, 87, 0.22);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-emerald-400) 22%, transparent);
+    }
+
+    /* Digits that sit in a column -- log timestamps, deltas, byte offsets --
+       must not jitter as their values change. */
+    .tnum {
+        font-variant-numeric: tabular-nums;
     }
 }

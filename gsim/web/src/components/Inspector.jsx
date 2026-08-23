@@ -2,32 +2,47 @@
  * Inspector -- one panel, two modes.
  *
  *   compose  a message picked in the workspace  -> editable card form
- *   inspect  a log line picked in the console   -> read-only parsed view
+ *   inspect  a log line picked in the console   -> read-only decode
  *
  * Both render through the same recursive `FieldRenderer`, so an inbound message
- * displays with exactly the structure its form would have had.
+ * displays with exactly the structure its form would have had -- but its leaves
+ * render as VALUES rather than as disabled inputs. Read-only used to mean the
+ * compose form with `disabled` on it: greyed-out text boxes one per field, and
+ * an enum that kept its dropdown chevron. A decode is a read-out, so it reads
+ * as one.
+ *
+ * Both modes also carry the byte ruler, which is the whole point of the panel:
+ * the payload's actual bytes, lighting up with whichever field you are pointing
+ * at. See `ByteRuler.jsx`.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle, ArrowDownLeft, ArrowUpRight, FileJson, Loader2, MousePointerClick,
   Repeat, RotateCcw, Send,
 } from 'lucide-react';
-import FieldRenderer, { FieldList } from './FieldRenderer';
-import { Badge, Button, EmptyState, Panel, PanelHeader, Select, cx } from './ui';
-import { defaultPayload, payloadSize } from '../lib/schema';
+import { FieldFocus, FieldList } from './FieldRenderer';
+import ByteRuler from './ByteRuler';
+import { Badge, Button, EmptyState, Panel, PanelHeader, cx } from './ui';
+import { defaultPayload } from '../lib/schema';
+import { encodePayload } from '../lib/bytes';
+import { formatTime, hex, hexTitle } from '../lib/format';
 import { api } from '../api';
-
-const hex4 = (value) => `0x${Number(value).toString(16).toUpperCase().padStart(4, '0')}`;
-const hex2 = (value) => `0x${Number(value).toString(16).toUpperCase().padStart(2, '0')}`;
 
 /**
  * Message header block -- top-left of the panel in both modes.
  *
  * Puts the routing facts (who it goes to / came from) next to the wire facts
  * (unitCode, opCode, length) in one place, so the thing that identifies a
- * message on the wire is visible while you build or read it. `length` is the
- * payload size only -- the 5-byte framing header core prepends is separate and
- * not something the user controls.
+ * message on the wire is visible while you build or read it.
+ *
+ * Codes show as HEX only. They used to print both bases at once
+ * (`0x1003 · 4099`), permanently, in the densest strip on the panel -- but the
+ * IRS documents and every log row in the app speak hex, and the decimal is for
+ * a lookup that happens rarely. It is one hover away instead.
+ *
+ * `length` is the payload size only -- the framing header core prepends is
+ * separate and not something the user controls, which is also why the ruler
+ * below does not draw it.
  */
 function HeaderBlock({ title, doc, unitCode, opCode, length, children }) {
   return (
@@ -40,9 +55,9 @@ function HeaderBlock({ title, doc, unitCode, opCode, length, children }) {
       </div>
 
       <dl className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-slate-800 pt-2.5">
-        <HeaderStat label="unitCode" value={`${hex2(unitCode)} · ${unitCode}`} />
-        <HeaderStat label="opCode" value={`${hex4(opCode)} · ${opCode}`} />
-        <HeaderStat label="length" value={`${length} B`} />
+        <HeaderStat label="unitCode" value={hex(unitCode, 2)} title={hexTitle(unitCode, 'unitCode')} />
+        <HeaderStat label="opCode" value={hex(opCode)} title={hexTitle(opCode, 'opCode')} />
+        <HeaderStat label="length" value={`${length} B`} title="Payload size, excluding core's framing header" />
       </dl>
 
       {children && <div className="mt-2.5 border-t border-slate-800 pt-2.5">{children}</div>}
@@ -50,25 +65,79 @@ function HeaderBlock({ title, doc, unitCode, opCode, length, children }) {
   );
 }
 
-function HeaderStat({ label, value }) {
+function HeaderStat({ label, value, title }) {
   return (
-    <div className="flex items-baseline gap-1.5">
+    <div className="flex items-baseline gap-1.5" title={title}>
       <dt className="text-[10px] font-medium uppercase tracking-wider text-slate-500">{label}</dt>
-      <dd className="font-mono text-[11px] text-slate-200">{value}</dd>
+      <dd className="tnum font-mono text-[11px] text-slate-200">{value}</dd>
     </div>
+  );
+}
+
+/** A labelled fact in the header block's second row. */
+function HeaderFact({ label, value, title, className }) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-1.5">
+      <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-slate-500">
+        {label}
+      </span>
+      <span className={cx('truncate font-mono text-[11px] text-slate-200', className)} title={title}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The byte ruler and the field form share one "which field is lit" value.
+ *
+ * Held here rather than in either of them because both read and both write it:
+ * the form sets it on hover and focus, the ruler sets it on hover, and each has
+ * to react to the other's.
+ */
+function ByteScope({ fields, payload, children }) {
+  const [activePath, setActivePath] = useState(null);
+  const { bytes, leaves } = useMemo(
+    () => encodePayload(fields ?? [], payload ?? {}),
+    [fields, payload],
+  );
+  const focus = useMemo(() => ({ activePath, setActivePath }), [activePath]);
+
+  // The ruler is handed BACK to the caller rather than placed here, because
+  // where it belongs differs by mode and it has to sit under the message
+  // header either way -- a provider that also decided layout would force the
+  // header below it.
+  const ruler = (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2.5">
+      <ByteRuler
+        bytes={bytes}
+        leaves={leaves}
+        activePath={activePath}
+        onHoverPath={setActivePath}
+      />
+    </div>
+  );
+
+  return (
+    <FieldFocus.Provider value={focus}>
+      {children({ length: bytes.length, ruler })}
+    </FieldFocus.Provider>
   );
 }
 
 export default function Inspector({
   connectionName, selection, peers, destination, onSent, onBehaviour, behaviour,
-  draftKey, drafts,
+  draftKey, drafts, children,
 }) {
   if (!selection) {
-    return (
+    // The resting state of the app's largest panel. `children` is the link
+    // overview App hands down -- see LinkOverview.jsx for why an empty 45% of
+    // the window was worth spending on.
+    return children ?? (
       <Panel className="min-w-0 flex-1">
-        <PanelHeader title="Inspector" icon={FileJson} />
+        <PanelHeader title="Inspector" icon={FileJson} rank="workspace" />
         <EmptyState icon={MousePointerClick}>
-          Pick a message above to compose one, or a console entry to inspect it.
+          Pick a message to compose one, or a console entry to inspect it.
         </EmptyState>
       </Panel>
     );
@@ -162,7 +231,7 @@ function ComposeForm({
   if (!schema) {
     return (
       <Panel className="min-w-0 flex-1">
-        <PanelHeader title="Inspector" icon={FileJson} />
+        <PanelHeader title="Inspector" icon={FileJson} rank="workspace" />
         {error ? (
           <EmptyState icon={AlertCircle}>{error}</EmptyState>
         ) : (
@@ -177,48 +246,50 @@ function ComposeForm({
 
   return (
     <Panel className="min-w-0 flex-1">
-      <PanelHeader title="Compose" icon={FileJson}>
-        <Badge tone="sky">{`0x${opCode.toString(16).toUpperCase().padStart(4, '0')}`}</Badge>
+      <PanelHeader title="Compose" icon={FileJson} rank="workspace">
+        <Badge tone="sky">{hex(opCode)}</Badge>
       </PanelHeader>
 
       <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          <div className="mx-auto flex max-w-3xl flex-col gap-3">
-            <HeaderBlock
-              title={schema.name}
-              doc={schema.doc}
-              unitCode={schema.unit_code}
-              opCode={opCode}
-              length={payloadSize(schema.fields, payload)}
-            >
-              {/* Read-only: the destination is picked in the Messages panel,
-                  where it also decides which messages are listed. */}
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
-                  Destination
-                </span>
-                <span className="font-mono text-[11px] text-slate-200">
-                  {peer ? `${peer.name} · unitCode ${peer.unit_code}` : unitName || '—'}
-                </span>
-              </div>
-              {schema.namespace && (
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
-                    IRS
-                  </span>
-                  <span
-                    className="truncate font-mono text-[11px] text-slate-400"
-                    title={schema.namespace}
+          <div className="mx-auto flex max-w-3xl flex-col gap-2.5">
+            <ByteScope fields={schema.fields} payload={payload}>
+              {({ length, ruler }) => (
+                <>
+                  <HeaderBlock
+                    title={schema.name}
+                    doc={schema.doc}
+                    unitCode={schema.unit_code}
+                    opCode={opCode}
+                    length={length}
                   >
-                    {schema.namespace.split('.').slice(-2).join('.')}
-                  </span>
-                </div>
-              )}
-            </HeaderBlock>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                      {/* Read-only: the destination is picked in the Messages
+                          panel, where it also decides which messages exist. */}
+                      <HeaderFact
+                        label="Destination"
+                        value={peer ? `${peer.name} · ${hex(peer.unit_code, 2)}` : unitName || '—'}
+                        title={peer ? hexTitle(peer.unit_code, `${peer.name} unitCode`) : undefined}
+                      />
+                      {schema.namespace && (
+                        <HeaderFact
+                          label="IRS"
+                          value={schema.namespace.split('.').slice(-2).join('.')}
+                          title={schema.namespace}
+                          className="text-slate-400"
+                        />
+                      )}
+                    </div>
+                  </HeaderBlock>
 
-            <div className="flex flex-col gap-2.5 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-              <FieldList fields={schema.fields} value={payload} onChange={setPayload} />
-            </div>
+                  {ruler}
+
+                  <div className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/60 p-2">
+                    <FieldList fields={schema.fields} value={payload} onChange={setPayload} />
+                  </div>
+                </>
+              )}
+            </ByteScope>
 
             {error && (
               <div className="flex items-start gap-2 rounded-lg border border-rose-900/60 bg-rose-950/30 p-2.5">
@@ -231,7 +302,9 @@ function ComposeForm({
           </div>
         </div>
 
-        <footer className="flex shrink-0 items-center gap-2 border-t border-slate-800 bg-slate-900 px-3 py-2">
+        {/* Wraps, because at a narrow window the row used to break the Send
+            button's own label onto two lines. */}
+        <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-800 bg-slate-900 px-3 py-2">
           {/* Left of Send: sending automatically is a variation on sending,
               and it carries the payload currently in this form. */}
           <Button
@@ -247,14 +320,16 @@ function ComposeForm({
               </span>
             )}
           </Button>
+          {/* "Send", not "Send Message": the panel is already called Compose
+              and the message is named at the top of it. */}
           <Button
             type="submit"
             variant="primary"
             icon={busy ? Loader2 : Send}
             disabled={busy || !unitName}
-            className={cx(busy && '[&_svg]:animate-spin')}
+            className={cx('whitespace-nowrap', busy && '[&_svg]:animate-spin')}
           >
-            {busy ? 'Sending…' : 'Send Message'}
+            {busy ? 'Sending…' : 'Send'}
           </Button>
           <Button icon={RotateCcw} onClick={() => setPayload(defaultPayload(schema))}>
             Reset
@@ -262,9 +337,9 @@ function ComposeForm({
           {flash && (
             <span className="ml-1 text-[11px] font-medium text-emerald-400">Sent ✓</span>
           )}
-          <span className="ml-auto font-mono text-[10px] text-slate-600">
-            empty fields send as 0
-          </span>
+          {/* The "empty fields send as 0" footnote that used to live here is
+              gone: the byte ruler shows those zeros, which is a better way of
+              saying it than a caption that never changes. */}
         </footer>
       </form>
     </Panel>
@@ -293,11 +368,29 @@ function LogDetails({ entry }) {
       () => {},
     );
     return () => { cancelled = true; };
-  }, [entry.unit_code, entry.op_code]);
+  }, [entry.unit_code, entry.op_code, entry.namespace]);
+
+  const header = (length) => (
+    <HeaderBlock
+      title={entry.message_name}
+      doc={schema?.doc}
+      unitCode={entry.unit_code}
+      opCode={entry.op_code}
+      length={length}
+    >
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        <HeaderFact label={isSent ? 'Destination' : 'Source'} value={entry.unit_name} />
+        <HeaderFact label="Connection" value={entry.connection_name} className="!text-slate-300" />
+        <span className="tnum font-mono text-[10px] text-slate-500">
+          {formatTime(entry.timestamp)}
+        </span>
+      </div>
+    </HeaderBlock>
+  );
 
   return (
     <Panel className="min-w-0 flex-1">
-      <PanelHeader title="Inspector" icon={FileJson}>
+      <PanelHeader title="Inspector" icon={FileJson} rank="workspace">
         <Badge tone={isSent ? 'sky' : 'emerald'}>
           {isSent ? <ArrowUpRight size={10} /> : <ArrowDownLeft size={10} />}
           {isSent ? 'sent' : 'received'}
@@ -305,35 +398,7 @@ function LogDetails({ entry }) {
       </PanelHeader>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <div className="mx-auto flex max-w-3xl flex-col gap-3">
-          <HeaderBlock
-            title={entry.message_name}
-            doc={schema?.doc}
-            unitCode={entry.unit_code}
-            opCode={entry.op_code}
-            length={schema ? payloadSize(schema.fields, entry.payload) : 0}
-          >
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
-                  {isSent ? 'Destination' : 'Source'}
-                </span>
-                <span className="font-mono text-[11px] text-slate-200">{entry.unit_name}</span>
-              </div>
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
-                  Connection
-                </span>
-                <span className="font-mono text-[11px] text-slate-300">
-                  {entry.connection_name}
-                </span>
-              </div>
-              <span className="font-mono text-[10px] text-slate-600">
-                {new Date(entry.timestamp * 1000).toLocaleTimeString()}
-              </span>
-            </div>
-          </HeaderBlock>
-
+        <div className="mx-auto flex max-w-3xl flex-col gap-2.5">
           {entry.error && (
             <div className="flex items-start gap-2 rounded-lg border border-rose-900/60 bg-rose-950/30 p-2.5">
               <AlertCircle size={14} className="mt-px shrink-0 text-rose-400" />
@@ -342,13 +407,29 @@ function LogDetails({ entry }) {
           )}
 
           {schema && entry.payload ? (
-            <div className="flex flex-col gap-2.5 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-              <FieldList fields={schema.fields} value={entry.payload} onChange={() => {}} readOnly />
-            </div>
+            <ByteScope fields={schema.fields} payload={entry.payload}>
+              {({ length, ruler }) => (
+                <>
+                  {header(length)}
+                  {ruler}
+                  <div className="flex flex-col rounded-lg border border-slate-800 bg-slate-900/60 p-2">
+                    <FieldList
+                      fields={schema.fields}
+                      value={entry.payload}
+                      onChange={() => {}}
+                      readOnly
+                    />
+                  </div>
+                </>
+              )}
+            </ByteScope>
           ) : (
-            <pre className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3 font-mono text-[11px] text-slate-300">
-              {JSON.stringify(entry.payload, null, 2)}
-            </pre>
+            <>
+              {header(0)}
+              <pre className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3 font-mono text-[11px] text-slate-300">
+                {JSON.stringify(entry.payload, null, 2)}
+              </pre>
+            </>
           )}
         </div>
       </div>

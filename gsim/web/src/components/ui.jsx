@@ -48,7 +48,20 @@ export function Panel({ className, children, ...rest }) {
   );
 }
 
-export function PanelHeader({ title, icon: Icon, count, children, className }) {
+/**
+ * `rank` is the difference between the panel you are working in and the panels
+ * you are picking things out of. Every header used to be the same 11px
+ * uppercase slate-400 -- Connections, Messages, Behaviours, Compose, Sent and
+ * Received all reading as equals -- so nothing in the type said where the
+ * workspace was, and the empty centre read as a void rather than as the panel
+ * waiting for input.
+ */
+const HEADER_RANKS = {
+  rail: 'text-[11px] text-slate-400',
+  workspace: 'text-[12px] text-slate-200',
+};
+
+export function PanelHeader({ title, icon: Icon, count, children, className, rank = 'rail' }) {
   return (
     <header
       className={cx(
@@ -56,8 +69,8 @@ export function PanelHeader({ title, icon: Icon, count, children, className }) {
         className,
       )}
     >
-      {Icon && <Icon size={14} className="text-slate-500" />}
-      <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+      {Icon && <Icon size={14} className={rank === 'workspace' ? 'text-slate-400' : 'text-slate-500'} />}
+      <h2 className={cx('font-semibold uppercase tracking-wider', HEADER_RANKS[rank])}>
         {title}
       </h2>
       {count !== undefined && (
@@ -216,7 +229,10 @@ export function StatusDot({ on, className }) {
     <span
       className={cx(
         'inline-block h-2 w-2 shrink-0 rounded-full transition-colors',
-        on ? 'bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/70' : 'bg-slate-600',
+        // `dot-live` (styles.css) is a halo in dark and a ring in light. The
+        // glow alone was invisible on white, which left an 8px hue difference
+        // doing the whole job for the most-scanned state in the app.
+        on ? 'bg-emerald-400 dot-live' : 'bg-slate-600',
         className,
       )}
     />
@@ -251,6 +267,83 @@ export function EmptyState({ icon: Icon, children }) {
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
       {Icon && <Icon size={22} className="text-slate-700" />}
       <p className="max-w-[22rem] text-xs text-slate-500">{children}</p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Dense field row                                                     */
+/* ------------------------------------------------------------------ */
+/**
+ * Label on the left, control on the right, sized to what the value can hold.
+ *
+ * `Field` above stacks its label over a full-width control, which is right for
+ * the connection modal (long free text, paths, IP addresses) and wrong for a
+ * message form, where almost every value is a small number with a known
+ * ceiling. Rendering those the same way gave a `UInt8` the same ~900px box as a
+ * `Double` and turned a seven-field message into something that scrolled while
+ * holding seven zeros.
+ *
+ * `chars` comes from the schema (`controlChars` in lib/schema.js), so the width
+ * is derived rather than guessed, and `1fr` on the label column means the two
+ * sides still meet however long the field names are.
+ */
+export function FieldRow({
+  label, type, hint, htmlFor, chars = 10, children, onPointerEnter, onPointerLeave, active,
+}) {
+  return (
+    <div
+      onMouseEnter={onPointerEnter}
+      onMouseLeave={onPointerLeave}
+      className={cx(
+        'grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 rounded-md px-1.5 py-[3px]',
+        'transition-colors duration-75',
+        active ? 'bg-sky-500/10' : 'hover:bg-slate-800/40',
+      )}
+    >
+      <label
+        htmlFor={htmlFor}
+        className="flex min-w-0 items-baseline gap-1.5 text-[11px] font-medium text-slate-300"
+      >
+        {/* The field NAME is the thing that must survive a narrow column, so
+            the type and hint beside it give up space several times faster --
+            without this the two-column layout clipped "TrackQuality" to
+            "Track..." while its `QUALITYLEVEL` badge sat there intact. */}
+        <span className="truncate">{label}</span>
+        {type && (
+          <span className="shrink-[6] truncate font-mono text-[9px] uppercase text-slate-500">
+            {type}
+          </span>
+        )}
+        {hint && (
+          <span className="shrink-[6] truncate text-[10px] font-normal text-slate-500">{hint}</span>
+        )}
+      </label>
+      <div style={{ width: `${chars}ch` }} className="min-w-0">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A read-only field's value, as data rather than as a disabled input.
+ *
+ * Inspecting a received message used to render the compose form with
+ * `disabled` on every control: greyed-out text boxes, and an enum that kept its
+ * dropdown chevron -- an affordance promising something that could not happen.
+ * A decode is a read-out, so it reads as one: right-aligned, tabular, with the
+ * hex alongside because this is a hex protocol and that is the form the log
+ * rows and the IRS documents both use.
+ */
+export function ValueCell({ text, hex: hexText, title }) {
+  return (
+    <div
+      title={title}
+      className="flex items-baseline justify-end gap-2 truncate font-mono text-[11px] text-slate-100"
+    >
+      {hexText && <span className="shrink-0 text-[10px] text-slate-500">{hexText}</span>}
+      <span className="tnum truncate">{text}</span>
     </div>
   );
 }

@@ -18,16 +18,19 @@ import { Download, Moon, Sun, Upload } from 'lucide-react';
 import { api, openEventStream } from './api';
 import { buildSessionExport, parseSessionImport } from './lib/sessionFile';
 import { applyTheme, initialTheme } from './lib/theme';
+import { clamp, readPref, writePref } from './lib/prefs';
 import FilePickerModal from './components/FilePickerModal';
 import Logo from './components/Logo';
 import Sidebar from './components/Sidebar';
 import MessagesTable from './components/MessagesTable';
 import Inspector from './components/Inspector';
+import LinkOverview from './components/LinkOverview';
 import Console from './components/Console';
 import ConnectionModal from './components/ConnectionModal';
 import BehaviourModal from './components/BehaviourModal';
 import BehavioursPanel from './components/BehavioursPanel';
-import { IconButton, StatusDot, cx } from './components/ui';
+import Resizer from './components/Resizer';
+import { Button, IconButton, StatusDot, cx } from './components/ui';
 
 //: Only present inside the pywebview desktop shell -- checked at click time
 //: (not cached in state) since by then the window has certainly finished
@@ -41,6 +44,13 @@ const canUseNativeFiles = () =>
 //: the UI renders. Applied to the backfill as well as the live stream, so a
 //: reconnect cannot quietly hand the pane thousands of rows.
 const LOG_VIEW_LIMIT = 30;
+
+//: Both rails are draggable and remembered. The bounds are what keeps a stored
+//: value from a wider monitor -- or an over-enthusiastic drag -- from squeezing
+//: the workspace out of existence; `clamp` is applied on read as well as on
+//: change, so a stale preference cannot strand a panel off screen.
+const RAIL = { min: 208, max: 420, initial: 256 };
+const CONSOLE = { min: 300, max: 720, initial: 432 };
 
 export default function App() {
   const [connections, setConnections] = useState([]);
@@ -118,11 +128,36 @@ export default function App() {
   // Save/Load, used when no native dialog exists (`--server` + browser tab).
   const [configPicker, setConfigPicker] = useState(null);
   const [theme, setTheme] = useState(initialTheme);
+  // Panel widths, and the file this session was last saved to or loaded from --
+  // the one durable fact about a session that the title bar had nothing to say
+  // about while it sat 900px empty.
+  const [railWidth, setRailWidth] = useState(() =>
+    clamp(readPref('rail.width', RAIL.initial), RAIL.min, RAIL.max));
+  const [consoleWidth, setConsoleWidth] = useState(() =>
+    clamp(readPref('console.width', CONSOLE.initial), CONSOLE.min, CONSOLE.max));
+  const [sessionFile, setSessionFile] = useState(null);
 
   useEffect(() => { applyTheme(theme); }, [theme]);
 
+  // `null` means "reset", which is what double-clicking a separator sends.
+  const resizeRail = (next) => {
+    const value = next === null ? RAIL.initial : clamp(next, RAIL.min, RAIL.max);
+    setRailWidth(value);
+    writePref('rail.width', value);
+  };
+  const resizeConsole = (next) => {
+    const value = next === null ? CONSOLE.initial : clamp(next, CONSOLE.min, CONSOLE.max);
+    setConsoleWidth(value);
+    writePref('console.width', value);
+  };
+
   const selected = connections.find((c) => c.name === selectedName) ?? null;
   const peers = selected?.peers ?? [];
+  // Exact counts, not samples. `active` (really firing) rather than `enabled`
+  // (intended to), for the same reason the Behaviours panel uses it: a schedule
+  // armed on a stopped connection is not traffic.
+  const runningCount = connections.filter((connection) => connection.running).length;
+  const firingCount = behaviours.filter((behaviour) => behaviour.active).length;
 
   const refresh = useCallback(async () => {
     try {
@@ -304,11 +339,18 @@ export default function App() {
   // `/api/files/*`, which opens at the same directory and writes through the
   // server -- a download would land wherever the browser puts downloads, with
   // no say in the name or the folder.
+  //: Just the file name out of a full path, for the title bar. The whole path
+  //: is too long to stand there and the folder never varies within a session.
+  const baseName = (path) => String(path).split(/[\\/]/).filter(Boolean).pop() ?? null;
+
   const handleSaveConfig = () =>
     guard(async () => {
       const text = JSON.stringify(buildSessionExport(connections), null, 2);
       if (canUseNativeFiles()) {
-        await window.pywebview.api.save_config_file(text);
+        const path = await window.pywebview.api.save_config_file(text);
+        // The desktop bridge returns the chosen path, or nothing if the dialog
+        // was cancelled -- so a cancel must not relabel the title bar.
+        if (path) setSessionFile(baseName(path));
       } else {
         setConfigPicker({ mode: 'save', contents: text });
       }
@@ -363,34 +405,59 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-slate-950">
-      <header className="flex h-11 shrink-0 items-center gap-3 border-b border-slate-800 bg-slate-900 px-3">
-        <div className="flex items-center gap-2">
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-slate-800 bg-slate-900 px-3">
+        <div className="flex shrink-0 items-center gap-2">
           <Logo size={22} />
           <span className="text-[13px] font-semibold tracking-tight text-slate-100">GSim</span>
-          <span className="text-[10px] font-medium uppercase tracking-wider text-slate-600">
-            Generic Simulator
-          </span>
         </div>
 
         {/* Save/Load the whole session as one JSON file -- lives here, not in
             the Connections panel header, because that header is too narrow to
             reliably show both buttons without one landing under the Inspector
-            layout next to it (the original bug report). */}
+            layout next to it (the original bug report).
+
+            LABELLED, not bare icons. Loading replaces every open connection and
+            closes anything running, which made these the two most consequential
+            controls in the app and, as unlabelled glyphs behind tooltips, the
+            two least legible. Rare and destructive is exactly the pair that
+            should read as words. */}
         <span className="mx-1 h-4 w-px shrink-0 bg-slate-800" />
-        <IconButton
+        <Button
           icon={Download}
           title={connections.length ? 'Save connections to a file' : 'No connections to save'}
           disabled={!connections.length}
           onClick={handleSaveConfig}
-        />
-        <IconButton icon={Upload} title="Load connections from a file" onClick={handleLoadConfigClick} />
+        >
+          Save
+        </Button>
+        <Button icon={Upload} title="Load connections from a file" onClick={handleLoadConfigClick}>
+          Load
+        </Button>
 
-        <span className="mx-1 h-4 w-px shrink-0 bg-slate-800" />
-        <IconButton
-          icon={theme === 'light' ? Moon : Sun}
-          title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
-          onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
-        />
+        {/* The middle used to be ~900px of nothing until a failure chip
+            appeared. It now stands for the session: the file it came from and
+            what is actually moving. Both are counted exactly rather than
+            sampled, so neither can overstate itself. */}
+        <div className="mx-2 flex min-w-0 flex-1 items-baseline gap-3 overflow-hidden">
+          {sessionFile && (
+            <span className="truncate font-mono text-[11px] text-slate-400" title={sessionFile}>
+              {sessionFile}
+            </span>
+          )}
+          {connections.length > 0 && (
+            <span className="shrink-0 whitespace-nowrap text-[10px] text-slate-500">
+              <span className="tnum text-slate-400">{runningCount}</span>
+              {` of ${connections.length} running`}
+              {firingCount > 0 && (
+                <>
+                  <span className="text-slate-700"> · </span>
+                  <span className="tnum text-emerald-400">{firingCount}</span>
+                  {firingCount === 1 ? ' behaviour firing' : ' behaviours firing'}
+                </>
+              )}
+            </span>
+          )}
+        </div>
 
         {/* Only surface these when something is actually DOWN -- a permanent
             "connected" chip is noise that says nothing the rest of the UI
@@ -401,14 +468,14 @@ export default function App() {
             healthy while no incoming message, connection-state change or
             clear broadcast ever lands again. */}
         {!online ? (
-          <span className="ml-auto flex items-center gap-1.5 text-[10px] font-medium text-rose-400">
+          <span className="flex shrink-0 items-center gap-1.5 text-[10px] font-medium text-rose-400">
             <StatusDot on={false} className="h-1.5 w-1.5 !bg-rose-500" />
             API unreachable
           </span>
         ) : (
           !liveFeed && (
             <span
-              className="ml-auto flex items-center gap-1.5 text-[10px] font-medium text-amber-400"
+              className="flex shrink-0 items-center gap-1.5 text-[10px] font-medium text-amber-400"
               title="The WebSocket feed is down, so nothing pushed by the server will appear until it reconnects. Actions you take still work."
             >
               <StatusDot on={false} className="h-1.5 w-1.5 !bg-amber-500" />
@@ -416,13 +483,23 @@ export default function App() {
             </span>
           )
         )}
+
+        <span className="mx-1 h-4 w-px shrink-0 bg-slate-800" />
+        <IconButton
+          icon={theme === 'light' ? Moon : Sun}
+          title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+          onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+        />
       </header>
 
       <div className="flex min-h-0 flex-1">
         {/* Left column: Connections above, the selected connection's Messages
             below -- browsing a connection and its messages is one continuous
             gesture, so they belong in one column. */}
-        <div className="flex w-64 shrink-0 flex-col border-r border-slate-800">
+        <div
+          className="flex shrink-0 flex-col"
+          style={{ width: `${railWidth}px` }}
+        >
           {/* Messages gets ~43% more height than Connections (1 : 1.43). */}
           <Sidebar
             className="min-h-0 flex-[1] border-b border-slate-800"
@@ -474,6 +551,15 @@ export default function App() {
           )}
         </div>
 
+        <Resizer
+          value={railWidth}
+          min={RAIL.min}
+          max={RAIL.max}
+          onChange={resizeRail}
+          side="left"
+          label="Connections panel width"
+        />
+
         <main className="flex min-w-0 flex-1 flex-col">
           <Inspector
             connectionName={selectedName}
@@ -493,10 +579,35 @@ export default function App() {
                 messageName,
               })
             }
-          />
+          >
+            {/* The resting state of the app's largest panel -- what it shows
+                when nothing is selected, which is how the app starts and where
+                it returns after every clear. Passed in rather than fetched
+                inside the Inspector because everything it draws is state App
+                already holds. */}
+            <LinkOverview
+              connection={selected}
+              sent={sent}
+              received={received}
+              onPickPeer={(peerName) => {
+                setDestination(peerName);
+                setSelection(null);
+              }}
+            />
+          </Inspector>
         </main>
 
+        <Resizer
+          value={consoleWidth}
+          min={CONSOLE.min}
+          max={CONSOLE.max}
+          onChange={resizeConsole}
+          side="right"
+          label="Console width"
+        />
+
         <Console
+          style={{ width: `${consoleWidth}px` }}
           sent={sent}
           received={received}
           selected={selectedLog}
@@ -588,10 +699,12 @@ export default function App() {
           onPick={async (path) => {
             if (configPicker.mode === 'save') {
               await api.saveFile(path, configPicker.contents);
+              setSessionFile(baseName(path));
               notify(`Saved to ${path}`);
             } else {
               const { contents } = await api.readFile(path);
               await importConnections(parseSessionImport(contents));
+              setSessionFile(baseName(path));
             }
           }}
           onClose={() => setConfigPicker(null)}

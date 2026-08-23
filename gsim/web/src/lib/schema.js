@@ -128,3 +128,92 @@ function sizeOf(node, value) {
 export function payloadSize(fields, payload) {
   return fields.reduce((sum, field) => sum + sizeOf(field, payload?.[field.name]), 0);
 }
+
+/**
+ * How many characters wide a field's input needs to be.
+ *
+ * Every scalar used to render full-width, one per row, whatever it could hold:
+ * a `UInt8` bounded at 255 got the same ~900px box as a `Double`, so a
+ * seven-field message scrolled while holding seven zeros. The schema already
+ * says exactly how much room each value needs -- `max` gives the digit count
+ * and `numeric` says whether a decimal point and exponent are possible -- so
+ * the control can simply be that wide.
+ *
+ * Returned in `ch`, and deliberately generous: a value being typed can be
+ * momentarily longer than the field's range allows (a leading minus, a pasted
+ * number about to be trimmed), and a control that clips mid-edit is worse than
+ * one with a little slack.
+ */
+export function controlChars(node) {
+  if (node.kind === 'enum') return 16;
+  if (node.numeric === 'float') return 16;
+  if (typeof node.max === 'number') {
+    const digits = String(node.max).length;
+    const sign = typeof node.min === 'number' && node.min < 0 ? 1 : 0;
+    return Math.min(16, Math.max(6, digits + sign + 2));
+  }
+  if (typeof node.bits === 'number') return Math.max(6, String((1 << node.bits) - 1).length + 2);
+  return 10;
+}
+
+/**
+ * Byte offsets for every leaf in a message, flattened in wire order.
+ *
+ * The byte ruler needs to map a field to a byte range and back, and that map is
+ * pure arithmetic over the schema plus the current payload -- `sizeOf` above
+ * already computes each node's width, so walking the tree in `_fields_` order
+ * and accumulating gives the offset of every leaf. It depends on the payload
+ * because a message's length is not fixed: a counted or dynamic array
+ * contributes `items x item size`, so nothing after one has a knowable offset
+ * until you know how many items there are.
+ *
+ * `path` is the dotted name shown to the user (`Position.Latitude`,
+ * `Emitters[0].PowerDbm`); `key` is the same path as an array, which is what
+ * the renderer compares against to know whether a given field is the one lit.
+ */
+export function leafOffsets(fields, payload) {
+  const out = [];
+  let offset = 0;
+
+  const walk = (node, value, path) => {
+    switch (node.kind) {
+      case 'struct':
+        for (const child of node.fields) {
+          walk(child, value?.[child.name], [...path, child.name]);
+        }
+        return;
+      case 'array': {
+        const items = Array.isArray(value) ? value : [];
+        items.forEach((item, index) => {
+          // The index belongs to the LAST segment, not a segment of its own --
+          // `Emitters[0]`, so the label reads the way the field is written.
+          const head = path.slice(0, -1);
+          const tail = `${path[path.length - 1]}[${index}]`;
+          walk(node.item, item, [...head, tail]);
+        });
+        return;
+      }
+      case 'bitfield':
+      case 'scalar':
+      case 'enum': {
+        const size = sizeOf(node, value);
+        out.push({
+          path: path.join('.'),
+          key: path.join('.'),
+          kind: node.kind,
+          node,
+          value,
+          offset,
+          size,
+        });
+        offset += size;
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
+  for (const field of fields) walk(field, payload?.[field.name], [field.name]);
+  return out;
+}

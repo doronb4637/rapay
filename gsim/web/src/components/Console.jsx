@@ -10,6 +10,12 @@
  * both halves of a round trip on screen at once, which is the point of a
  * simulator console.
  *
+ * Putting both halves on screen is not the same as connecting them, though, so
+ * hovering a row also DIMS everything in the other pane that could not be its
+ * counterpart -- see `counterpartOf`. That is the cheap half of pairing: it
+ * needs no server support and no correlation id, and it answers the question
+ * the two panes exist to answer.
+ *
  * The 'Hide' rule is per-opCode and forward-looking: hiding an entry hides every
  * entry in THAT PANE sharing its opCode, including ones that have not arrived
  * yet. Holding the hidden set as opCodes (not marking entries) is what makes
@@ -22,10 +28,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, Pause, Trash2, TriangleAlert } from 'lucide-react';
 import { Badge, EmptyState, IconButton, cx } from './ui';
 import ContextMenu, { useContextMenu } from './ContextMenu';
+import { formatDelta, formatTime } from '../lib/format';
 
-export default function Console({ sent, received, selected, onSelect, onClear }) {
+export default function Console({ sent, received, selected, onSelect, onClear, style }) {
+  // Which entry the pointer is on, wherever it is. Shared across both panes so
+  // one can dim against the other; held here because neither pane owns it.
+  const [hovered, setHovered] = useState(null);
+
   return (
-    <div className="flex w-[27rem] shrink-0 flex-col border-l border-slate-800">
+    <div className="flex shrink-0 flex-col" style={style}>
       <LogPane
         title="Sent"
         direction="sent"
@@ -33,6 +44,8 @@ export default function Console({ sent, received, selected, onSelect, onClear })
         selected={selected}
         onSelect={onSelect}
         onClear={onClear}
+        hovered={hovered}
+        onHover={setHovered}
         className="min-h-0 flex-1 border-b border-slate-800"
       />
       <LogPane
@@ -42,13 +55,34 @@ export default function Console({ sent, received, selected, onSelect, onClear })
         selected={selected}
         onSelect={onSelect}
         onClear={onClear}
+        hovered={hovered}
+        onHover={setHovered}
         className="min-h-0 flex-1"
       />
     </div>
   );
 }
 
-function LogPane({ title, direction, entries, selected, onSelect, onClear, className }) {
+/**
+ * Could `entry` be the other half of `other`'s exchange?
+ *
+ * Matched on the peer and the opcode, which is as far as this data honestly
+ * goes: core's callbacks carry no correlation id, so a stricter claim would be
+ * invented. Deliberately loose in the other direction too -- a request and its
+ * acknowledgement routinely share an opcode in this project's layouts, which is
+ * exactly the case worth lighting up.
+ *
+ * Used only to DIM the rows that cannot be related, never to hide them: this is
+ * a hint about where to look, not a filter.
+ */
+function counterpartOf(entry, other) {
+  if (!other || other.direction === entry.direction) return true;
+  return other.unit_name === entry.unit_name && other.op_code === entry.op_code;
+}
+
+function LogPane({
+  title, direction, entries, selected, onSelect, onClear, className, hovered, onHover,
+}) {
   const [hidden, setHidden] = useState(() => new Set());
   const [follow, setFollow] = useState(true);
   const [pointerInside, setPointerInside] = useState(false);
@@ -156,6 +190,10 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
     },
   ];
 
+  // Whether the OTHER pane is being pointed at. Only then is dimming meaningful
+  // -- inside one's own pane every row is trivially "related".
+  const pairing = hovered && hovered.direction !== direction ? hovered : null;
+
   return (
     <section
       onContextMenu={menu.open}
@@ -221,7 +259,7 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
         ref={scrollerRef}
         onScroll={onScroll}
         onMouseEnter={() => setPointerInside(true)}
-        onMouseLeave={() => setPointerInside(false)}
+        onMouseLeave={() => { setPointerInside(false); onHover?.(null); }}
         style={{ overflowAnchor: 'none' }}
         className="min-h-0 flex-1 overflow-y-auto"
       >
@@ -235,14 +273,21 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
           </EmptyState>
         ) : (
           <ul className="flex flex-col py-1">
-            {visible.map((entry) => (
+            {visible.map((entry, index) => (
               <LogRow
                 key={entry.seq}
                 entry={entry}
                 tone={tone}
-                Arrow={Arrow}
                 isSelected={selected?.seq === entry.seq}
+                // Printed only when it CHANGES from the row above -- the log-file
+                // convention. Fourteen rows repeating "DTU-Primary" held a third
+                // of the pane's width for something that changes twice a screen,
+                // and a change of owner now stands out instead of blending in.
+                showConnection={index === 0 || visible[index - 1].connection_name !== entry.connection_name}
+                delta={index === 0 ? null : formatDelta(entry.timestamp, visible[index - 1].timestamp)}
+                dimmed={pairing !== null && !counterpartOf(pairing, entry)}
                 onSelect={() => onSelect(entry)}
+                onHover={onHover}
                 onHide={() => setHidden((current) => new Set(current).add(entry.op_code))}
               />
             ))}
@@ -253,32 +298,52 @@ function LogPane({ title, direction, entries, selected, onSelect, onClear, class
   );
 }
 
-function LogRow({ entry, tone, Arrow, isSelected, onSelect, onHide }) {
+function LogRow({
+  entry, tone, isSelected, showConnection, delta, dimmed, onSelect, onHover, onHide,
+}) {
   const isSent = tone === 'sky';
-  const time = new Date(entry.timestamp * 1000).toLocaleTimeString(undefined, { hour12: false });
 
   return (
     <li
       onClick={onSelect}
+      onMouseEnter={() => onHover?.(entry)}
       className={cx(
         'group animate-row-in flex cursor-pointer items-center gap-2 px-2 py-1',
-        'border-l-2 transition-colors duration-100',
+        'border-l-2 transition-[background-color,border-color,opacity] duration-100',
+        // The selected row used to take a sky border whatever pane it was in,
+        // so selecting a RECEIVED message recoloured it to the sent hue at
+        // exactly the moment it was most prominent. Selection now borrows the
+        // pane's own tone; the background is what says "selected".
         isSelected
-          ? 'border-l-sky-500 bg-slate-800'
+          ? isSent
+            ? 'border-l-sky-500 bg-slate-800'
+            : 'border-l-emerald-500 bg-slate-800'
           : cx(
               'border-l-transparent hover:bg-slate-800/50',
               isSent ? 'hover:border-l-sky-500/40' : 'hover:border-l-emerald-500/40',
             ),
+        dimmed && 'opacity-30',
       )}
     >
-      <span className="shrink-0 font-mono text-[10px] text-slate-600">{time}</span>
-      <Arrow size={12} className={cx('shrink-0', isSent ? 'text-sky-400' : 'text-emerald-400')} />
+      <span className="tnum shrink-0 font-mono text-[10px] text-slate-600">
+        {formatTime(entry.timestamp)}
+      </span>
+
+      {/* The gap to the row above, which is the number you want when you are
+          checking that a 0.5s behaviour really fires at 0.5s, or watching an
+          echo timeout. An absolute clock cannot show it. */}
+      <span className="tnum w-12 shrink-0 text-right font-mono text-[9px] text-slate-600">
+        {delta ?? ''}
+      </span>
 
       {/* Which GSim connection owns this entry -- needed now the console spans
-          every connection rather than just the selected one. */}
-      <span className="shrink-0 truncate font-mono text-[9px] text-slate-600">
-        {entry.connection_name}
-      </span>
+          every connection rather than just the selected one, but only worth
+          printing where it changes. */}
+      {showConnection && (
+        <span className="shrink-0 truncate font-mono text-[9px] text-slate-500">
+          {entry.connection_name}
+        </span>
+      )}
 
       {/* "[name]: [message]" -- for received, `unit_name` is the SENDER's
           configured name, not ours. */}

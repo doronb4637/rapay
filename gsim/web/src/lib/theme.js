@@ -44,3 +44,33 @@ export function applyTheme(theme) {
     /* not persisting is survivable; the session still looks right */
   }
 }
+
+/**
+ * Stamp `data-font-sans="inter"` on <html> once Inter has actually resolved.
+ *
+ * `styles.css` applies Inter's `cv02/cv03/cv04/ss01` character alternates, and
+ * those are Inter's own -- on Segoe UI or any other fallback they are simply
+ * ignored. Declaring them unconditionally (which is what this file used to do
+ * by omission) meant the stylesheet asserted a typographic decision that was
+ * not in effect on any machine without Inter installed. Asking first makes the
+ * declaration true wherever it applies.
+ *
+ * `document.fonts.check` answers for locally installed families as well as
+ * loaded ones, which is the point: `@font-face` tries `local('Inter')` before
+ * any download, so "is Inter available" is the only question worth asking.
+ * `document.fonts.ready` is awaited first so a woff2 still in flight is not
+ * mistaken for an absent family.
+ */
+export function detectSansFace() {
+  const stamp = () => {
+    try {
+      if (document.fonts?.check?.('12px Inter')) {
+        document.documentElement.setAttribute('data-font-sans', 'inter');
+      }
+    } catch {
+      /* no Font Loading API; the fallback stack is already correct */
+    }
+  };
+  if (document.fonts?.ready) document.fonts.ready.then(stamp, stamp);
+  else stamp();
+}

@@ -27,12 +27,21 @@ package — `gsim/core_gateway/` — which is **the only place in GSim that impo
         messages.py            gray box: registry query, form schema, send, logs
         events.py              WebSocket: live log + state feed
     web/                     React 18 + Vite + Tailwind v4 + lucide-react
+      public/fonts/            Inter + JetBrains Mono woff2 (see the README there)
+      src/lib/
+        schema.js              form defaults, sizes, andeach leaf's byte offset
+        bytes.js               ◄── payload -> bytes, mirroring IRS's encoder
+        format.js              the one clock + hex formatter the whole UI uses
+        prefs.js               persisted panel widths / collapsed sections
       src/components/
         ui.jsx                 shared design-system primitives
         FieldRenderer.jsx      ◄── recursive dynamic form (enums, arrays, bitfields)
+        ByteRuler.jsx          ◄── the payload's bytes, lit by field
         Inspector.jsx          compose | inspect
+        LinkOverview.jsx       the workspace's resting view: this unit's links
         Console.jsx            unified sent+received log stream, hide-by-opCode
         Sidebar.jsx            connections list
+        Resizer.jsx            draggable divider between the three columns
         ConnectionModal.jsx    create/edit modal
         MessagesTable.jsx      messages a selected connection may send
 ```
@@ -57,6 +66,29 @@ cd gsim/web && npm run build
 ```
 
 ## Design notes
+
+### The byte ruler, and why the encoder is mirrored in the browser
+
+The Inspector shows the payload's actual bytes under the message header, with a
+field's range lighting up as you point at it and the reverse. `web/src/lib/
+bytes.js` produces those bytes in the browser rather than asking the server for
+them, which needs justifying, because core is the only thing that actually
+encodes what goes on the wire.
+
+It is a mirror in the same sense `schema.js`'s `defaultPayload` already was: a
+read-out, never a trust boundary. `Structure.to_bytes` composes one
+`struct.Struct` per field and concatenates with no padding, so a field's wire
+position is the sum of the widths before it -- and every input that needs is
+already in the form schema. The one thing that used to be an assumption,
+endianness, is not one any more: `core_gateway/schema.py` reads it off each
+field's own packer format and carries it as `endian`. If the mirror and core
+ever disagree, core is right and the mirror is the bug.
+
+What this buys, beyond seeing the bytes: zero-fill stops being a footnote in the
+compose footer and becomes visible, a counted array's length byte can be watched
+tracking its list, and `inspect` mode gets a job that is not "compose, greyed
+out".
+
 
 ### Threading: why every core-touching route is `def`, not `async def`
 

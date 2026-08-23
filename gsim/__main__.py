@@ -69,12 +69,17 @@ class Api:
         )
         return result[0] if result else None
 
-    def save_config_file(self, contents: str) -> bool:
-        """Native "save file" dialog for the Sidebar's Save button -- writes
-        `contents` (a JSON string the caller has already formatted) to the
-        chosen path. Returns False if the user cancelled, so the caller can
-        tell "saved" from "nothing happened" without a raised exception either
-        way -- cancelling a save is not an error.
+    def save_config_file(self, contents: str) -> str | bool:
+        """Native "save file" dialog for the Save button -- writes `contents`
+        (a JSON string the caller has already formatted) to the chosen path.
+
+        Returns the path written, or False if the user cancelled, so the caller
+        can tell "saved" from "nothing happened" without a raised exception
+        either way -- cancelling a save is not an error. The PATH rather than a
+        bare True because the title bar names the file this session is saved
+        to, and this dialog is the only thing that knows which one was picked.
+        Both forms are truthy and falsy in the same places, so a caller testing
+        the old boolean contract is unaffected.
         """
         import webview
 
@@ -88,7 +93,7 @@ class Api:
             return False
         target = result[0] if isinstance(result, (list, tuple)) else result
         Path(target).write_text(contents, encoding="utf-8")
-        return True
+        return str(target)
 
     def load_config_file(self) -> str | None:
         """Native "open file" dialog for the Sidebar's Load button. Returns the
