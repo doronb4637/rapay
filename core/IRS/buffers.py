@@ -20,8 +20,6 @@ class BinaryReader:
         return current
 
     def remaining(self) -> int:
-        """Bytes left to read. Lets a greedy array size itself in one step
-        instead of probing `is_empty()` once per element."""
         return len(self.data) - self._offset
 
     def is_empty(self) -> bool:

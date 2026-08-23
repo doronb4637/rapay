@@ -33,7 +33,7 @@ class ArrayField(BaseField):
         self._bulk = type(item) is Field and len(item.code) == 1
         self._cached = (-1, None)
         if self._bulk and isinstance(self.length, int):
-            self._packer_for(self.length)   # a fixed array resolves its packer once, here
+            self._packer_for(self.length)
 
     def _packer_for(self, count: int):
         """The packer for exactly `count` elements, remembering the last one built.
