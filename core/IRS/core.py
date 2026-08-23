@@ -168,8 +168,6 @@ class Structure(BaseField, metaclass=MessageMeta):
 
     @classmethod
     def from_bytes(cls, reader: BinaryReader, instance: Any = None) -> 'Structure': # TODO change to Self
-        # __new__, not cls(): __init__ only distributes kwargs, and every field is
-        # overwritten immediately below. Matters most for arrays of structures.
         new_instance = cls.__new__(cls)
         for field in cls._fields_:
             object.__setattr__(new_instance, field._name, field.from_bytes(reader, new_instance))
