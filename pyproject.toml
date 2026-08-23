@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rapay-core"
+version = "0.1.0"
+description = "IRS binary parsing engine + connections/tools framework (import name: core)"
+requires-python = ">=3.10"
+dependencies = [
+    "beartype",
+]
+
+[project.optional-dependencies]
+# RTI Connext DDS support (core.connections.dds). Not on PyPI -- install the
+# `rti.connext` distribution from your RTI installation separately if you
+# need DDS connections; core.connections works fully without it.
+dds = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core", "core.*"]
+exclude = [
+    "core.tests", "core.tests.*",
+    "core.IRS.Structures", "core.IRS.Structures.*",
+    "core.IRS.benchmark", "core.IRS.benchmark.*",
+]
