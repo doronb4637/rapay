@@ -673,7 +673,7 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage, opCode: int = None, unit_name: str | None = None) -> None:
+    def send_message(self, data: IrsMessage | dict, opcode: int = None, unit_name: str | None = None) -> None:
         """
         Send `data` tagged with `opcode` to `unit_name` (or the sole
         connected unit if omitted). `opcode` is mandatory: every message
@@ -862,8 +862,8 @@ class Connection(ABC):
 
     def periodic_sending(
         self,
+        data: IrsMessage | dict[str, Any],
         opcode: int,
-        data: IrsMessage,
         interval: int | float,
         unit_name: str | None = None,
     ) -> None:
@@ -889,6 +889,8 @@ class Connection(ABC):
         `unit_name` is optional when this connection has exactly one
         connected unit, matching `send_message`/`receive_message`.
         """
+        if opCode is None and hasattr(data, '_opCode'):
+            opCode = data._opCode
         opcode = validated_opCode(opcode)
         interval_seconds = float(interval)
         if interval_seconds <= 0:
