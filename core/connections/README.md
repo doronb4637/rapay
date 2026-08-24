@@ -154,12 +154,58 @@ collapse into one routing slot. Lookups: `endpoint_for(name)`,
 hands it to read loops on the event-loop thread, so mutating it afterwards
 would leave those caches describing a configuration that no longer exists.
 
+## 3a. Structures: connection-level default, per-unit override
+
+`Structures` names the IRS message-layout module(s) a link uses -- a Python
+dotted name (`"Radar.radar_link"`) or a real filesystem path to a `.py` file
+under `IRS/Structures`, either way resolved to the same namespace by
+`tools.general.resolve_module_name`. It can be set at two levels in one
+config, and both can be present at once:
+
+```json
+"unitCode": 22,
+"Structures": ["Shared.default_link"],
+"connections": {
+  "RadarUnit":   {"port": 2000, "unitCode": 7, "Structures": ["Radar.radar_link"]},
+  "TrackerUnit": {"port": 2001, "unitCode": 8}
+}
+```
+
+- The **connection-level** `"Structures"` (top-level, beside `"unitCode"`) is
+  the default for every peer that doesn't name its own.
+- Each **`connections[name]["Structures"]`** overrides that one peer
+  specifically.
+
+Above, `RadarUnit` uses `Radar.radar_link`; `TrackerUnit` has no override, so
+it falls back to the connection-level `Shared.default_link`.
+
+Two rules keep this from becoming ambiguous:
+
+- **The connection-level form is only legal with exactly one configured
+  unit, or on multicast** (one sender fanning out to many receivers over a
+  single shared IRS). With two or more unicast peers it would scope all of
+  them into one namespace -- the exact collision namespacing exists to
+  prevent -- so `ConnectionConfig.from_json` raises `ValueError` at load
+  time rather than letting it happen silently.
+- **An empty scope means unscoped, not "no layouts."** A peer naming no
+  `Structures` at either level searches every module `IRS.REGISTRY` knows,
+  and a lookup matching two different modules raises `IRSAmbiguousError`
+  naming both, rather than silently picking whichever imported last.
+
+Resolution happens once, in `ConnectionConfig.from_json`
+(`resolve_structures`), and is cached per peer as `UnitEndpoint.structures`;
+`Connection` reads it through `self._structures_for(unit_name)`. Every IRS
+call this package makes -- `irs_to_bytes`/`parse_irs` in `_encode`/`_decode`,
+and the eager `validate_irs` that `receive_message`/`handle_on_receive` run
+at registration time -- is scoped to that peer's resolved namespace, never to
+the whole registry.
+
 ## 4. opcode: mandatory on send, subscription key on receive
 
 Every message now carries an `opcode`, and the API is:
 
 ```python
-connection.send_message(data: bytes, opcode: int, unit_name: str | None = None) -> None
+connection.send_message(data: bytes, opcode: int | None = None, unit_name: str | None = None) -> None
 connection.receive_message(opcode: int, unit_name: str | None = None,
                             timeout: float | int | None = None,
                             trigger_function: Callable[[], Any] | None = None) -> tuple[str, bytes]
@@ -168,12 +214,17 @@ connection.handle_on_receive(opcode: int, callback_func: Callable[[bytes], Any],
 connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-`opcode` is **mandatory** on `send_message` -- every message declares what
-kind of message it is. `unit_name` stays optional wherever exactly one unit
-is connected (auto-resolved from `config.connections`); otherwise it's required
-and validated, with strict unit filtering: a `receive_message()` call only
-ever returns a message matching **both** the requested `opcode` and the
-resolved `unit_name`.
+Every message declares what kind of message it is. `opcode` may be omitted
+(or passed as `None`) on `send_message` only when `data` is an IRS message
+object with its own `_opCode` -- it is auto-detected from there; a raw
+`bytes` payload has no such attribute, so `opcode` is effectively mandatory
+for it. Everywhere else (`receive_message`, `handle_on_receive`,
+`stop_on_receive`) `opcode` stays required -- those are subscribing to a
+route, and there is no message object to read one from. `unit_name` stays
+optional wherever exactly one unit is connected (auto-resolved from
+`config.connections`); otherwise it's required and validated, with strict
+unit filtering: a `receive_message()` call only ever returns a message
+matching **both** the requested `opcode` and the resolved `unit_name`.
 
 ## 5. Subscribe-or-drop message filtering
 
@@ -266,7 +317,8 @@ it:
 | Multicast / DDS | `_do_start` -- group joined / entities built | unit disconnect |
 
 `_mark_unit_connected()` / `_mark_unit_disconnected()` are idempotent, run on
-the loop thread, and are the single trigger for the echo lifecycle (§6).
+the loop thread, and are the single trigger for the echo lifecycle (§6) and
+for on-connect handlers (§5e).
 
 ```python
 connection.wait_for_connected_units(target: int | str | list[str],
@@ -329,6 +381,56 @@ the same route, executor-thread execution (so a route method calls
 `self.unitConnection.send_message(...)` synchronously, no `async`/`await`),
 eager `validate_irs()`, and exceptions logged and swallowed rather than
 killing the read loop.
+
+## 5e. Sending on connect: `handle_on_connect`
+
+```python
+connection.handle_on_connect(callback_func: Callable[[str], Any], unit_name: str | None = None) -> None
+connection.stop_on_connect(unit_name: str | None = None) -> bool
+```
+
+The connect-time counterpart to `handle_on_receive` (§5b) -- a standing
+callback, invoked the moment `unit_name` (or the sole connected unit, if
+omitted) gains a usable peer per the §5c table. There is no opcode: a connect
+event isn't a message, so this is keyed by unit alone in
+`self._connect_callbacks: dict[unit_name, callback]`, registered/removed
+through the loop thread the same way `_callbacks` is.
+
+The callback receives the unit's name and runs on an executor thread, never
+the event loop -- exactly like an on-receive callback, for exactly the same
+reason (§5b): it is free to call `send_message` to greet the peer the instant
+it connects, and running it inline on the loop thread that scheduled it would
+deadlock that call. A unit already carrying a callback must be released with
+`stop_on_connect()` first, the same exclusive-slot rule `handle_on_receive`
+enforces for a route. Registering it before `start()` -- the normal order,
+since a unit can't be connected before the connection has started -- means
+nothing is missed; registering it on an already-connected unit does not fire
+retroactively, only on that unit's *next* transition into connected.
+
+`CompositeUnit.handle_on_connect` forwards to its receive-capable member --
+the same member `handle_on_receive` and `install_handler` (via
+`_config_unit_codes`) already treat as canonical for resolving a composite's
+unit names, so this doesn't introduce a second answer to "which member owns
+this unit."
+
+**Declarative form:** `handlers.py`'s `@on_connect` is `@route`'s counterpart
+for this event -- tag one `UnitHandler` method, no opcode (a handler already
+answers for exactly one peer, so there's only one connect event to tag):
+
+```python
+class TestHandler(UnitHandler):
+    unitCode = 0x01
+
+    @on_connect
+    def greet(self, unit_name: str) -> None:
+        self.unitConnection.send_message(hello, HELLO_OPCODE)
+```
+
+Two `@on_connect`-tagged methods on one handler is a `TypeError` at
+class-definition time, same spirit as two `@route` methods claiming one
+opcode. `install_handler` wires the tagged method in via an ordinary
+`unit.handle_on_connect(bound_method, unit_name=...)` call -- no new
+mechanism, same as §5d's routes.
 
 ## 6. The echo lifecycle
 
@@ -464,21 +566,26 @@ disconnect at exactly `EchoTimeout`.
 ## 6a. Periodic sending
 
 ```python
-connection.periodic_sending(opcode: int, data: bytes, interval: int | float,
+connection.periodic_sending(data: bytes, opcode: int | None, interval: int | float,
                             unit_name: str | None = None) -> None
 connection.stop_periodic(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-`periodic_sending` behaves exactly like `send_message` but keeps sending in
-the background every `interval` seconds. Tasks are tracked in
-`self._periodic_tasks`, keyed by the same `(unit_code, opcode)` route key as
-subscriptions. Calling it twice for one route **replaces** the sender -- the
-old task is cancelled and awaited before the new one is stored, so two
-senders can never overlap and quietly double the rate. A send that fails is
-logged and retried next tick rather than killing a schedule the caller
-believes is still running. `stop_periodic` returns whether anything was
-actually running. Both are forwarded by `CompositeUnit` to its send-capable
-member.
+`data` comes first, `opcode` second -- matching `send_message`'s own
+`(data, opcode, unit_name)` order, since `periodic_sending` behaves exactly
+like `send_message` but keeps sending in the background every `interval`
+seconds. `opcode` may be `None` if `data` is an IRS message object carrying
+its own `_opCode` (the same auto-detection `send_message` does); a raw
+`bytes` payload has no such attribute and needs `opcode` given explicitly.
+
+Tasks are tracked in `self._periodic_tasks`, keyed by the same
+`(unit_code, opcode)` route key as subscriptions. Calling it twice for one
+route **replaces** the sender -- the old task is cancelled and awaited before
+the new one is stored, so two senders can never overlap and quietly double
+the rate. A send that fails is logged and retried next tick rather than
+killing a schedule the caller believes is still running. `stop_periodic`
+returns whether anything was actually running. Both are forwarded by
+`CompositeUnit` to its send-capable member.
 
 ## 7. The Composite Connection Challenge
 

@@ -334,7 +334,8 @@ transitions on the loop thread:
 | Multicast / DDS | `_do_start` (group join / entities built) | unit disconnect |
 
 `_mark_unit_connected` / `_mark_unit_disconnected` are idempotent and are the **only** things that
-arm or disarm a unit's echo. Every transition fires `_notify_state_change()`, which *swaps in* a
+arm or disarm a unit's echo; `_mark_unit_connected` is also the single trigger for an on-connect
+callback (section 5c). Every transition fires `_notify_state_change()`, which *swaps in* a
 fresh `asyncio.Event` rather than clearing the old one, so concurrent waiters can't consume each
 other's wake-up.
 
@@ -348,6 +349,39 @@ Blocks the calling thread until the target is met; returns `True` when met, `Fal
 Unknown unit names and counts exceeding what's configured raise `ValueError` in the caller's
 thread rather than becoming a wait that could never succeed. `CompositeUnit` waits on each member
 in turn against one shared deadline.
+
+### 5c. Sending on connect (`handle_on_connect`)
+
+The connect-time counterpart to `handle_on_receive` (section 5): a standing callback invoked the
+moment a unit gains a usable peer, so a handler can greet it (`send_message`) without polling
+`active_units`. No opcode — a connect event isn't a message — so it's keyed by unit name alone in
+`self._connect_callbacks: dict[unit_name, callback]`, mutated through the loop thread the same way
+`_callbacks` is, and fired from `_mark_unit_connected` (section 5a) the same tick the unit's echo is
+armed.
+
+```python
+connection.handle_on_connect(callback_func: Callable[[str], Any], unit_name: str | None = None) -> None
+connection.stop_on_connect(unit_name: str | None = None) -> bool
+```
+
+Runs on an executor thread, never the event loop — same reasoning as an on-receive callback: it may
+call back into this connection's sync API, and `_mark_unit_connected` always runs ON the loop thread,
+so running the callback inline there would deadlock the first `send_message` inside it. A unit
+already carrying a callback must be released with `stop_on_connect()` first, the same exclusive-slot
+rule `handle_on_receive` enforces per route. Registering it on a unit that is *already* connected
+does not fire retroactively — only the next transition into connected does — which is a non-issue for
+the normal ordering (`install_handler` runs before `start()`, so nothing is ever missed) and is
+called out explicitly for the one case it matters: registering by hand on a connection already
+running.
+
+**Declarative form**: `handlers.py`'s `@on_connect` tags one `BaseUnitHandler` method — no opcode,
+since a handler already answers for exactly one peer, so there's only one connect event to tag.
+`__init_subclass__` collects it the same way it collects `@route` methods, and rejects two
+`@on_connect`-tagged methods on one class with a `TypeError` at class-definition time. Installing it
+is, like section 5b's routes, nothing but an ordinary `unit.handle_on_connect(bound_method,
+unit_name=...)` call — no new dispatch tier. `CompositeUnit.handle_on_connect` forwards to the
+receive-capable member, matching `_config_unit_codes`'s existing choice of that member as canonical
+for resolving a composite's unit names in `install_handler`.
 
 ### 6. The echo lifecycle
 

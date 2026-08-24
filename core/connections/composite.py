@@ -18,7 +18,7 @@ import time
 
 import atexit
 
-from .base import ConnectedTarget, Connection, IrsMessage, ReceiveCallback, TriggerFunction
+from .base import ConnectCallback, ConnectedTarget, Connection, IrsMessage, ReceiveCallback, TriggerFunction
 
 
 class CompositeUnit:
@@ -126,10 +126,26 @@ class CompositeUnit:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         return self._receiver.stop_on_receive(opcode, unit_name)
 
+    def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None:
+        """Standing on-connect handler, registered on the same member
+        `handle_on_receive` uses -- the receive-capable one. Not a coin
+        flip: `install_handler` (`handlers.py`) already treats that member's
+        `config.unit_codes` as canonical for resolving a `UnitHandler`'s
+        `unitCode` on a composite, so a connect handler installed the same
+        way fires on the same member it was resolved against."""
+        if self._receiver is None:
+            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
+        self._receiver.handle_on_connect(callback_func, unit_name)
+
+    def stop_on_connect(self, unit_name: str | None = None) -> bool:
+        if self._receiver is None:
+            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
+        return self._receiver.stop_on_connect(unit_name)
+
     def periodic_sending(
         self,
-        opcode: int,
         data: IrsMessage,
+        opcode: int | None,
         interval: int | float,
         unit_name: str | None = None,
     ) -> None:
@@ -138,7 +154,7 @@ class CompositeUnit:
         member, periodic or not."""
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
-        self._sender.periodic_sending(opcode, data, interval, unit_name)
+        self._sender.periodic_sending(data, opcode, interval, unit_name)
 
     def stop_periodic(self, opcode: int, unit_name: str | None = None) -> bool:
         if self._sender is None:

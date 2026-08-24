@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from core.connections.config import ConnectionConfig
 from core.connections.framing import unpack_header
-from core.connections.handlers import UnitHandler, route
+from core.connections.handlers import UnitHandler, on_connect, route
 from core.connections.manager import ConnectionManager
 
 # receive_message() refuses routes IRS doesn't know, so the layouts have to be
@@ -562,14 +562,14 @@ def test_periodic_sending():
     mgr.start_all()
 
     # unit_name omitted: both sides have exactly one connected unit.
-    client.periodic_sending(TICK_OPCODE, b"tick", 0.2)
+    client.periodic_sending(b"tick", TICK_OPCODE, 0.2)
     for i in range(3):
         unit, payload = _received(server.receive_message(TICK_OPCODE, timeout=2))
         assert payload == b"tick", payload
     print("received 3 consecutive ticks from one periodic_sending() call")
 
     # Task replacement: same (unitCode, opcode) route -> old sender cancelled.
-    client.periodic_sending(TICK_OPCODE, b"tock", 0.2)
+    client.periodic_sending(b"tock", TICK_OPCODE, 0.2)
     time.sleep(0.5)  # let any already-queued "tick" land and be dropped
     for i in range(2):
         unit, payload = _received(server.receive_message(TICK_OPCODE, timeout=2))
@@ -709,6 +709,110 @@ def test_class_handler_unknown_unit_code_raises():
         print("confirmed: the failed connection was never registered with the manager")
 
     mgr.shutdown_all()
+
+
+def test_on_connect_callback():
+    print("\n=== handle_on_connect: fires once, off the loop thread, can send ===")
+    GREETING_OPCODE = 40
+    mgr = ConnectionManager()
+
+    server = mgr.create("connect_hook_server", {
+        "protocol": "tcp", "unitCode": 120, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"ConnectClient": {"port": 25300, "unitCode": 61}},
+    })
+    client = mgr.create("connect_hook_client", {
+        "protocol": "tcp", "unitCode": 61, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"ConnectServer": {"port": 25300, "unitCode": 120}},
+    })
+
+    seen: list[str] = []
+
+    def greet(unit_name: str) -> None:
+        seen.append(unit_name)
+        # Proves this runs off the loop thread: send_message() marshals onto
+        # it and blocks for the result, which would deadlock here if this
+        # callback were instead running inline on that same thread.
+        server.send_message(b"welcome", GREETING_OPCODE, unit_name=unit_name)
+
+    # Registered before start(), same as install_handler always does for a
+    # class-based handler -- the realistic ordering, not just the easy one.
+    server.handle_on_connect(greet, "ConnectClient")
+
+    try:
+        server.handle_on_connect(lambda _u: None, "ConnectClient")
+        raise AssertionError("a second on-connect callback for one unit should be refused")
+    except RuntimeError as exc:
+        print(f"confirmed: on-connect callback slot is exclusive ({exc})")
+
+    server.start()
+    client.start()
+
+    unit, payload = _received(client.receive_message(GREETING_OPCODE, timeout=3))
+    assert payload == b"welcome", payload
+    assert unit == "ConnectServer", unit
+    print(f"greeted immediately on connect: {payload!r}")
+
+    deadline = time.monotonic() + 2
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert seen == ["ConnectClient"], seen
+    print("confirmed: callback ran exactly once, with the connecting unit's name")
+
+    assert server.stop_on_connect("ConnectClient") is True
+    assert server.stop_on_connect("ConnectClient") is False, "second stop should report nothing running"
+    print("confirmed: stop_on_connect() reports whether anything was registered")
+
+    mgr.shutdown_all()
+    print("On-connect-hook connections fully torn down")
+
+
+def test_class_handler_on_connect():
+    print("\n=== @on_connect: handler_class greets its peer via handle_on_connect ===")
+    GREETING_OPCODE = 41
+    mgr = ConnectionManager()
+
+    class GreeterHandler(UnitHandler):
+        unitCode = 61  # ConnectClient's code, as seen from the server's config
+
+        @on_connect
+        def greet(self, unit_name: str) -> None:
+            self.unitConnection.send_message(b"class-hello", GREETING_OPCODE, unit_name=unit_name)
+
+    server = mgr.create("class_connect_server", {
+        "protocol": "tcp", "unitCode": 121, "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"ConnectClient": {"port": 25301, "unitCode": 61}},
+    }, handler_class=GreeterHandler)
+    client = mgr.create("class_connect_client", {
+        "protocol": "tcp", "unitCode": 61, "side": "client", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"ConnectServer": {"port": 25301, "unitCode": 121}},
+    })
+    mgr.start_all()
+
+    unit, payload = _received(client.receive_message(GREETING_OPCODE, timeout=3))
+    assert payload == b"class-hello", payload
+    print(f"class-routed connect handler greeted: {payload!r}")
+
+    mgr.shutdown_all()
+    print("Class-handler-on-connect connections fully torn down")
+
+
+def test_on_connect_handler_collision_raises():
+    print("\n=== @on_connect: two tagged methods on one handler is a definition-time error ===")
+    try:
+        class DoubleGreeter(UnitHandler):
+            unitCode = 61
+
+            @on_connect
+            def greet_a(self, unit_name: str) -> None:
+                pass
+
+            @on_connect
+            def greet_b(self, unit_name: str) -> None:
+                pass
+
+        raise AssertionError("two @on_connect methods on one handler should be rejected")
+    except TypeError as exc:
+        print(f"confirmed: duplicate @on_connect tags refused at class definition ({exc})")
 
 
 class _WarningTrap(logging.Handler):
@@ -993,7 +1097,7 @@ def test_irs_parser_roundtrip():
         tick = _track_report(12, "UNKNOWN", 180)
         received_msgs: list[TrackReport] = []
         server.handle_on_receive(OPCODE, received_msgs.append)
-        client.periodic_sending(OPCODE, tick, 0.2)
+        client.periodic_sending(tick, OPCODE, 0.2)
         time.sleep(0.7)
         client.stop_periodic(OPCODE)
         assert received_msgs, "no periodic messages arrived"
@@ -1171,4 +1275,7 @@ if __name__ == "__main__":
     test_class_handler_routes_message()
     test_class_handler_route_exclusive_with_subscription()
     test_class_handler_unknown_unit_code_raises()
+    test_on_connect_callback()
+    test_class_handler_on_connect()
+    test_on_connect_handler_collision_raises()
     print("\nALL TESTS PASSED")

@@ -33,6 +33,7 @@ UnitName = str
 RouteKey = tuple[UnitCode, OpCode]
 TriggerFunction = Callable[[], Any]
 ReceiveCallback = Callable[[IrsMessage], Any]
+ConnectCallback = Callable[[UnitName], Any]
 ConnectedTarget = UnitCode | UnitName | Iterable[UnitName]
 
 
@@ -168,6 +169,9 @@ class Connection(ABC):
         self._state_event: asyncio.Event = asyncio.Event()
         self._subscriptions: dict[RouteKey, Future[IrsMessage]] = {}
         self._callbacks: dict[RouteKey, ReceiveCallback] = {}
+        # Keyed by unit_name, not RouteKey -- a unit either has a peer or it
+        # doesn't; there is no opcode dimension to a connect event.
+        self._connect_callbacks: dict[UnitName, ConnectCallback] = {}
         self._periodic_tasks: dict[RouteKey, Task[None]] = {}
         # Resolved PER UNIT at config load (see config.EchoSettings.resolve):
         self._echo: EchoSettings = config.echo
@@ -252,6 +256,7 @@ class Connection(ABC):
         self._echo_tasks.clear()
         self._last_echo_at.clear()
         self._callbacks.clear()
+        self._connect_callbacks.clear()
         self._active_units.clear()
         self._notify_state_change()  # release anyone parked in wait_for_connected_units
 
@@ -301,6 +306,9 @@ class Connection(ABC):
         self._active_units.add(unit_name)
         logger.info(f"Unit {unit_name} connected")
         self._start_unit_echo(unit_name)
+        callback = self._connect_callbacks.get(unit_name)
+        if callback is not None:
+            self._track(self._run_connect_callback(callback, unit_name))
         self._notify_state_change()
 
     def _mark_unit_disconnected(self, unit_name: str) -> None:
@@ -613,6 +621,20 @@ class Connection(ABC):
                 "on-receive callback for unit %s opcode %s raised", unit_name, opcode
             )
 
+    async def _run_connect_callback(self, callback: ConnectCallback, unit_name: str) -> None:
+        """Run one on-connect callback off the event-loop thread. Same
+        reasoning as `_run_callback`: the callback is ordinary synchronous
+        user code that may call back into this connection's sync API, and
+        `_mark_unit_connected` -- which schedules this -- always runs ON the
+        loop thread, so running the callback inline there would deadlock the
+        first `send_message` inside it."""
+        try:
+            await self._loop_thread.loop.run_in_executor(None, callback, unit_name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a bad callback must not kill the caller's read loop
+            logger.exception("on-connect callback for unit %s raised", unit_name)
+
     # ------------------------------------------------------------------ #
     # Subscription internals (all run on the loop thread)
     # ------------------------------------------------------------------ #
@@ -673,7 +695,7 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage | dict, opcode: int = None, unit_name: str | None = None) -> None:
+    def send_message(self, data: IrsMessage | dict, opcode: int | None = None, unit_name: str | None = None) -> None:
         """
         Send `data` tagged with `opcode` to `unit_name` (or the sole
         connected unit if omitted). `opcode` is mandatory: every message
@@ -694,12 +716,12 @@ class Connection(ABC):
         taken as already-encoded and sent through unchanged, so a caller that
         assembles its own payload still works.
         """
-        if opCode is None and hasattr(data, '_opCode'):
-            opCode = data._opCode
-        opCode = validated_opCode(opCode)
+        if opcode is None and hasattr(data, '_opCode'):
+            opcode = data._opCode
+        opcode = validated_opCode(opcode)
         unit = self._resolve_unit(unit_name)
-        payload = self._encode(opCode, data, unit)
-        self._loop_thread.await_coroutine(self._do_send(unit, payload, opCode))
+        payload = self._encode(opcode, data, unit)
+        self._loop_thread.await_coroutine(self._do_send(unit, payload, opcode))
 
     def wait_for_connected_units(
         self, target: ConnectedTarget, timeout: float | int | None = None
@@ -860,10 +882,53 @@ class Connection(ABC):
         removed: bool = self._loop_thread.await_coroutine(self._unregister_callback(route_key))
         return removed
 
+    def handle_on_connect(
+        self,
+        callback_func: ConnectCallback,
+        unit_name: str | None = None,
+    ) -> None:
+        """
+        Register a standing handler, invoked the moment `unit_name` (or the
+        sole connected unit, if omitted) gains a usable peer -- the
+        connect-time counterpart to `handle_on_receive`, keyed by unit
+        instead of by (unit, opcode) route since a connect event has no
+        opcode.
+
+        The callback receives the unit's name and runs on an executor
+        thread, never the event loop -- exactly like an on-receive callback
+        (see `_run_callback`) -- so it is free to call back into this
+        connection's sync API, typically `send_message`, to greet a peer the
+        instant it connects. An exception raised inside it is logged and
+        swallowed, the same as an on-receive callback.
+
+        A unit already carrying a callback must be released with
+        `stop_on_connect()` first, same rule as `handle_on_receive`.
+
+        If the unit is already connected when this is called, nothing fires
+        retroactively -- this only arms the *next* connect, mirroring
+        `wait_for_connected_units()`'s own "already true" special case being
+        the caller's to check first via `active_units`.
+        """
+        if not callable(callback_func):
+            raise TypeError(f"callback_func must be callable, got {callback_func!r}")
+        unit = self._resolve_unit(unit_name)
+        self._loop_thread.await_coroutine(self._register_connect_callback(unit, callback_func))
+
+    def stop_on_connect(self, unit_name: str | None = None) -> bool:
+        """
+        Remove the standing callback registered for this unit by
+        `handle_on_connect`. Returns True if one was registered, False if
+        there was nothing to remove. A callback already running is left to
+        finish.
+        """
+        unit = self._resolve_unit(unit_name)
+        removed: bool = self._loop_thread.await_coroutine(self._unregister_connect_callback(unit))
+        return removed
+
     def periodic_sending(
         self,
         data: IrsMessage | dict[str, Any],
-        opcode: int,
+        opcode: int | None,
         interval: int | float,
         unit_name: str | None = None,
     ) -> None:
@@ -889,8 +954,8 @@ class Connection(ABC):
         `unit_name` is optional when this connection has exactly one
         connected unit, matching `send_message`/`receive_message`.
         """
-        if opCode is None and hasattr(data, '_opCode'):
-            opCode = data._opCode
+        if opcode is None and hasattr(data, '_opCode'):
+            opcode = data._opCode
         opcode = validated_opCode(opcode)
         interval_seconds = float(interval)
         if interval_seconds <= 0:
@@ -932,6 +997,17 @@ class Connection(ABC):
 
     async def _unregister_callback(self, route_key: RouteKey) -> bool:
         return self._callbacks.pop(route_key, None) is not None
+
+    async def _register_connect_callback(self, unit_name: UnitName, callback: ConnectCallback) -> None:
+        if unit_name in self._connect_callbacks:
+            raise RuntimeError(
+                f"unit {unit_name!r} already has an on-connect callback; "
+                f"call stop_on_connect() first"
+            )
+        self._connect_callbacks[unit_name] = callback
+
+    async def _unregister_connect_callback(self, unit_name: UnitName) -> bool:
+        return self._connect_callbacks.pop(unit_name, None) is not None
 
     # -- periodic sending internals (all run on the loop thread) ---------- #
     async def _start_periodic(self,
