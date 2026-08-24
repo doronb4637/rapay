@@ -3,16 +3,15 @@ from __future__ import annotations
 
 import mimetypes
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from gsim import __version__
 from gsim.api.routes import behaviours, connections, events, files, messages
 from gsim.core_gateway import get_runtime
-
-WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "ui_dist"
+from gsim.paths import WEB_DIST, seed_user_data
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -46,9 +45,14 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Installed, the picker directories live under %LOCALAPPDATA% and are
+    # empty until this copies the bundled structures/configs across (see
+    # gsim/paths.py). A no-op in a checkout.
+    seed_user_data()
+
     app = FastAPI(
         title="GSim API",
-        version="0.1.0",
+        version=__version__,
         summary="Generic Simulator -- UI and API over the core connection framework.",
         lifespan=lifespan,
     )

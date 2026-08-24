@@ -27,15 +27,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from gsim.core_gateway.bootstrap import CORE_ROOT
+#: Where each kind of picker starts -- `<repo-root>/core/IRS/Structures` and
+#: `<repo-root>/configs/GsimConfig` in a checkout, `%LOCALAPPDATA%\GSim\...`
+#: in the installed app (`gsim/paths.py`). The native dialogs in
+#: `gsim/__main__.py` import the same two constants, so desktop and browser
+#: modes land in the same place.
+from gsim.paths import CONFIGS_DIR, STRUCTURES_DIR
 
 router = APIRouter(prefix="/api/files", tags=["files"])
-
-#: Where each kind of picker starts. `structures` matches the directory the
-#: native dialog opens at, so desktop and browser modes land in the same place.
-STRUCTURES_DIR = CORE_ROOT / "IRS" / "Structures"
-#: <repo-root>/configs/GsimConfig -- the existing home of exported sessions.
-CONFIGS_DIR = CORE_ROOT.parent / "configs" / "GsimConfig"
 
 
 class SaveFileRequest(BaseModel):
