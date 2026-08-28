@@ -49,12 +49,18 @@ git status --porcelain core   # must be empty / show only pre-existing untracked
 # UI dev server with hot reload -- proxies /api and /ws to :8765 (see vite.config.js)
 cd gsim/web && npm install && npm run dev
 
-# production bundle -- FastAPI serves gsim/web/dist at "/" when it exists (app.py)
+# production bundle -- FastAPI serves gsim/web/ui_dist at "/" when it exists (app.py)
 cd gsim/web && npm run build
+
+# the shippable Windows installer: UI -> PyInstaller onedir -> dist/GSim-<version>-x64.msi
+powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 
 # core's own test suite must stay green -- GSim changes should never break it
 .venv/Scripts/python.exe -m pytest      # from the repo root; see core/tests/README.md
 ```
+
+The installer build uses `.venv3.10`, not `.venv` -- PyInstaller is installed in
+that one. Everything else stays on `.venv`.
 
 Run Python commands with the repo-root `.venv` (`.venv/Scripts/python.exe`), not a bare `python` --
 it is the interpreter with `fastapi`, `pywebview`, `uvicorn`, `rti.connext`, and `pytest` installed.
@@ -68,9 +74,13 @@ process two `IRS` module objects (see `core/IRS/_alias.py`).
 
 ```
 core/                        UNTOUCHED. connections/ IRS/ tools/ annotations.py -- see core/*/CLAUDE.md
+GSim.spec                    PyInstaller recipe (onedir) -- paired with gsim/paths.py, see 14
+installer/GSim.wxs           WiX v5 authoring for the MSI (+ License.rtf)
+scripts/build_installer.ps1  UI -> .exe -> .msi, in that order
 gsim/
   __main__.py                 PyWebView desktop launcher + `--server` headless mode
                                 (js_api: browse_structures_file, save_config_file, load_config_file)
+  paths.py                    every path that differs between a checkout and the installed app
   core_gateway/                THE ONLY PACKAGE THAT IMPORTS core
     bootstrap.py                puts <repo-root> on sys.path so `core...` resolves (must import first)
     schema.py                   IRS message class -> JSON form schema (recursive)
@@ -496,6 +506,45 @@ up a TCP client before its server and starting it once the server is up. `Connec
 `index.html` is the only stable filename and the only thing naming the current hashes — if the shell
 caches it, the app keeps loading the previous build's bundle and a fix that is provably present in
 `dist/` simply never appears.
+
+### 14. Packaging: the frozen app and the MSI
+
+`scripts/build_installer.ps1` is three steps that each consume the previous one:
+`npm run build` -> `gsim/web/ui_dist`, `PyInstaller GSim.spec` -> `dist/GSim/` (onedir: `GSim.exe`
+beside `_internal/`), `wix build installer/GSim.wxs` -> `dist/GSim-<version>-x64.msi`. The MSI is
+per-machine (Program Files), with Start Menu + Desktop shortcuts and a real Add/Remove Programs
+entry; `<Files Include="...">` harvests the whole PyInstaller output, so adding a dependency needs
+no edit to the .wxs.
+
+Four things about the frozen app are load-bearing, and three of them are invisible until it is
+actually installed:
+
+- **`GSim.spec`'s `datas` and `gsim/paths.py` are one contract.** Every read-only directory
+  `paths.py` resolves under `BUNDLE_ROOT` has to be copied into the bundle at the SAME relative
+  path. The old spec put the UI at `_internal/ui_dist` while `app.py` looked in
+  `gsim/web/ui_dist` -- the app started, served its API, and opened on a blank page. Edit the two
+  files together.
+- **`core` ships as DATA as well as being imported.** `bootstrap.py` checks `CORE_ROOT` exists on
+  disk and refuses to start otherwise, and structures modules are loaded from real `.py` files by
+  path (`tools.general.import_modules`), which the PYZ archive cannot serve.
+- **A windowed build has no `sys.stdout`/`sys.stderr`** -- both are `None`. That is not just "no
+  logs": uvicorn's logging config names `ext://sys.stderr`, so `dictConfig` raises and the app exits
+  with status 1 the instant it is double-clicked, printing nothing anywhere. `__main__._attach_streams`
+  points them at `%LOCALAPPDATA%\GSim\logs\gsim.log` before anything else runs, which is also the
+  only diagnostic an installed user can send back. Build with `GSIM_BUILD_CONSOLE=1` to get the same
+  bundle with a console attached when something still dies at startup.
+- **The install directory is read-only.** Program Files is not writable by a non-elevated user, so
+  when frozen `STRUCTURES_DIR`/`CONFIGS_DIR` move to `%LOCALAPPDATA%\GSim` and are seeded once from
+  the bundled copies (`paths.seed_user_data`, called from `create_app()`). Seeding is all-or-nothing
+  per directory and never overwrites: once the user owns it, a later version silently restoring a
+  structures file they deleted would be worse than shipping an update they copy in by hand.
+  In a checkout none of this applies -- `paths.py` returns exactly the repo paths GSim has always
+  used, so `python -m gsim` is unchanged.
+
+`gsim/__init__.py`'s `__version__` is the only place the version is written: the spec generates the
+.exe's VERSIONINFO resource from it and the build script passes it to WiX as `ProductVersion`. Keep
+it `major.minor.patch` -- MSI upgrade detection ignores a fourth field, so two builds differing only
+there would not upgrade each other.
 
 ### 13. Compose drafts outlive the form
 

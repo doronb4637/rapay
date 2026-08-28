@@ -9,7 +9,9 @@ exactly as they would if GSim were running headless (`--server`).
 from __future__ import annotations
 
 import argparse
+import os
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -18,21 +20,22 @@ from urllib.request import urlopen
 import uvicorn
 
 from gsim.api.app import create_app
-from gsim.core_gateway.bootstrap import CORE_ROOT
 
 #: Native window / taskbar icon. Must be a real .ico container -- pywebview's
 #: WinForms backend loads it via `System.Drawing.Icon(path)`, which rejects a
 #: bare PNG ("Argument 'picture' must be a picture that can be used as an
 #: Icon.") even though the file renders fine everywhere else. Regenerate with
 #: `python gsim/assets/make_icon.py` (also writes gsim.png alongside it).
-ICON = Path(__file__).resolve().parent / "assets" / "gsim.ico"
-
+#:
 #: Where each dialog starts, when the directory exists -- falls back to the OS
 #: default (an empty directory argument) otherwise. Deliberately the same
 #: constants the server-side picker uses (`gsim/api/routes/files.py`), so the
-#: desktop and browser modes open in the same place.
-STRUCTURES_DIR = CORE_ROOT / "IRS" / "Structures"
-CONFIGS_DIR = CORE_ROOT.parent / "configs" / "GsimConfig"
+#: desktop and browser modes open in the same place; `gsim/paths.py` is what
+#: makes all three correct in a checkout AND in the installed app.
+from gsim.paths import CONFIGS_DIR, DATA_ROOT, ICON, STRUCTURES_DIR
+
+#: Where a windowed build's stdout/stderr go -- see `_attach_streams`.
+LOG_FILE = DATA_ROOT / "logs" / "gsim.log"
 
 
 def _start_dir(directory: Path, create: bool = False) -> str:
@@ -113,6 +116,32 @@ class Api:
         return Path(result[0]).read_text(encoding="utf-8")
 
 
+def _attach_streams() -> None:
+    """Give the process real `sys.stdout`/`sys.stderr` when Windows has not.
+
+    A PyInstaller **windowed** build starts with no console and both streams set
+    to None. That is not merely "no logs": uvicorn configures logging from a
+    dict naming `ext://sys.stderr`, so `logging.config.dictConfig` raises before
+    the server ever binds and the app exits with status 1 the instant it is
+    double-clicked -- silently, because the thing that would have printed the
+    traceback is the very stream that is missing. It cost the first packaged
+    build, which looked like "the .exe does nothing".
+
+    So point them at a log file under the per-user data directory (the install
+    directory is read-only), which doubles as the only diagnostic an installed
+    user can send back, and fall back to the null device if even that cannot be
+    opened. `line_buffering` so a crash does not lose the lines that explain it.
+    """
+    if sys.stderr is not None and sys.stdout is not None:
+        return
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        stream = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        stream = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stderr = stream
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -131,6 +160,9 @@ def _wait_until_up(port: int, timeout: float = 15.0) -> None:
 
 
 def main() -> None:
+    # Before argparse: a usage error also writes to the stream that is missing.
+    _attach_streams()
+
     parser = argparse.ArgumentParser(prog="gsim")
     parser.add_argument("--port", type=int, default=None, help="default: an OS-assigned free port")
     parser.add_argument("--server", action="store_true",

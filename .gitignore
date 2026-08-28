@@ -32,6 +32,9 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...except the one that IS source: GSim.spec is the packaging recipe the MSI
+# build reads (scripts/build_installer.ps1), not a PyInstaller scratch file.
+!GSim.spec
 
 # Installer logs
 pip-log.txt
