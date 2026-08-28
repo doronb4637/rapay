@@ -16,7 +16,7 @@ connection_framework/
   multicast.py    MulticastConnection (direction derived from config.side)
   dds.py          DdsConnection (RTI Connext; native payloads, no framing)
   composite.py    CompositeUnit -- combines direction-limited connections into one Unit
-  handlers.py     BaseUnitHandler/route -- class-based sugar over handle_on_receive
+  handlers.py     UnitHandler/route -- class-based sugar over handle_on_receive
   manager.py      ConnectionManager -- factory + centralized absolute-shutdown
 ```
 
@@ -280,7 +280,7 @@ exception propagates unchanged.
 Where `receive_message` subscribes, takes one message and unsubscribes,
 `handle_on_receive(opcode, callback_func, unit_name)` registers
 `callback_func(payload)` permanently for that route until `stop_on_receive()`
-or `stop()`.
+or `close()`.
 
 Callbacks run **on an executor thread, never on the event loop**. That is not
 an optimization: user callbacks may block, and one that called back into the
@@ -343,15 +343,15 @@ caller's own thread, rather than becoming a wait that quietly expires.
 `CompositeUnit` forwards the call to each member in turn against one shared
 deadline, so a composite is "connected" only once both of its directions are.
 
-## 5d. Class-based handlers (`BaseUnitHandler`)
+## 5d. Class-based handlers (`UnitHandler`)
 
 `handlers.py` is declarative sugar over §5b: instead of calling
 `handle_on_receive()` by hand for every opcode a unit answers, subclass
-`BaseUnitHandler`, set `unitCode` to the *peer's* configured code (§3's
+`UnitHandler`, set `unitCode` to the *peer's* configured code (§3's
 "theirs" code), and tag each handling method with `@route(opCode=...)`:
 
 ```python
-class TestHandler(BaseUnitHandler):
+class TestHandler(UnitHandler):
     unitCode = 0x01
 
     @route(opCode=0xFFFF)
@@ -361,7 +361,7 @@ class TestHandler(BaseUnitHandler):
 manager.create("unit_name", config_data, handler_class=TestHandler)
 ```
 
-`@route` just tags the method with its opcode; `BaseUnitHandler.__init_subclass__`
+`@route` just tags the method with its opcode; `UnitHandler.__init_subclass__`
 builds the real `dict[opcode, method_name]` once, at class-definition time, by
 walking the MRO -- so a subclass overriding and re-tagging a route method
 replaces it, and two methods claiming the same opcode is a `TypeError` right
@@ -612,12 +612,12 @@ delegate to the right member, forwarding the same `opcode`/`unit_name`/
 
 ```python
 beacon = mgr.create_composite("BeaconUnit", {
-    "transport": {"protocol": "multicast", "side": "sender", ...},
-    "receive": {"protocol": "udp", "side": "server", "mode": "receive_only", ...},
+  "transport": {"protocol": "multicast", "side": "sender", ...},
+  "receive": {"protocol": "udp", "side": "server", "mode": "receive_only", ...},
 })
 beacon.start()
 beacon.send_message(b"...", opCode=20)
-unit, payload = beacon.receive_message(opCode=21)
+unit, payload = beacon.receive_message(opcode=21)
 beacon.close()
 ```
 
@@ -631,7 +631,7 @@ beacon.close()
 
 ## 8. Lifecycle: absolute teardown
 
-`Connection.stop()` closes every socket/transport (`_do_stop()`), then
+`Connection.close()` closes every socket/transport (`_do_stop()`), then
 cancels and `await`s every tracked background task, and finally cancels any
 `receive_message()` calls still parked on a subscription so they don't hang
 forever. Every async task the framework starts -- read loops, in-flight echo
@@ -731,7 +731,7 @@ shared profile.
   on a repeat call for the same route, and confirmed silence after stopping.
 - One subscriber per route: a second concurrent `receive_message()` for the
   same `(unit_code, opcode)` is rejected with `RuntimeError`.
-- Class-based handlers (`BaseUnitHandler`/`@route`): `ConnectionManager.create(...,
+- Class-based handlers (`UnitHandler`/`@route`): `ConnectionManager.create(...,
   handler_class=...)` installs a class's routed methods as ordinary
   `handle_on_receive` callbacks and answers a request end-to-end; a
   class-routed opcode refuses a competing `receive_message()` exactly like a

@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from core.tools.general import resolve_module_name, validated_opCode, validated_unitCode
+from core.tools.general import resolve_module_name, validated_opcode, validated_unitcode
 from core.annotations import *
 
 DEFAULT_ECHO_INTERVAL: float = 1.0
@@ -138,7 +138,7 @@ def _as_opcode(value: Any, field_name: str) -> UnitCode:
     uses 'tools.general.validated_opCode' for allowing both HEX and DEC integers
     also validate UInt16 size."""
     try:
-        opcode = validated_opCode(value)
+        opcode = validated_opcode(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"config['{field_name}'] must be an integer opcode, got {value!r}") from exc
     if not 0 <= opcode <= 0xFFFF:
@@ -151,7 +151,7 @@ def _as_unit_code(value: Any, field_name: str) -> int:
     uses 'tools.general.validated_opCode' for allowing both HEX and DEC integers
     also validate UInt8 size."""
     try:
-        code = validated_unitCode(value)
+        code = validated_unitcode(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"config['{field_name}'] must be an integer unit code, got {value!r}") from exc
     if not 0 <= code <= 0xFF:

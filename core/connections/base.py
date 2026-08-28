@@ -22,7 +22,7 @@ from typing import Any, Callable, Coroutine, Iterable
 
 from core.annotations import *
 from core.IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
-from core.tools.general import validated_opCode
+from core.tools.general import extract_opcode
 
 from .config import ConnectionConfig, EchoSettings
 from .framing import pack_message
@@ -400,15 +400,12 @@ class Connection(ABC):
         (`ConnectionConfig` is frozen), so re-resolving each interval would
         only be work."""
         assert echo.send_opcode is not None
-        payload = b""
         while True:
-            # Sleep first: there is no value in an echo at t=0, and it keeps
-            # one interval between the peer appearing and the first heartbeat.
             await asyncio.sleep(echo.interval)
             if unit_name not in self._active_units:
                 return  # peer dropped between ticks; _mark_unit_connected re-arms
             try:
-                await self._do_send(unit_name, payload, echo.send_opcode)
+                await self._do_send(unit_name, b"", echo.send_opcode)
             except asyncio.CancelledError:
                 raise
             except ConnectionError as exc:
@@ -442,20 +439,20 @@ class Connection(ABC):
         """
         while True:
             last_seen = self._last_echo_at.get(unit_name)
+            # None == unit diconnected
             if last_seen is None:
-                # Unit already gone (disconnected by another path).
                 return
             remaining = (last_seen + echo.timeout) - time.monotonic()
             if remaining > 0:
                 await asyncio.sleep(remaining)
-                continue  # re-check: an echo may have moved the deadline
+                continue
             elapsed = time.monotonic() - last_seen
             logger.warning(
                 "no echo from unit %s for %.2fs (EchoTimeout=%.2fs) -- disconnecting it",
                 unit_name, elapsed, echo.timeout,
             )
             await self._disconnect_unit(unit_name)
-            return  # this unit is gone; nothing left for the watchdog to watch
+            return
 
     async def _disconnect_unit(self, unit_name: str) -> None:
         """
@@ -464,15 +461,11 @@ class Connection(ABC):
         """
         unit_code = self._unit_codes.get(unit_name)
 
-        # 1. Stop repeating sends at a dead unit -- they would fail forever.
         for route_key in [key for key in self._periodic_tasks if key[0] == unit_code]:
             task = self._periodic_tasks.pop(route_key)
             if not task.done():
                 task.cancel()
 
-        # 2. Fail parked receive_message() calls now instead of making them
-        #    sit out a full timeout on a link we know is dead, and drop
-        #    standing callbacks that can never fire again.
         for route_key in [key for key in self._subscriptions if key[0] == unit_code]:
             future = self._subscriptions.pop(route_key)
             if not future.done():
@@ -482,13 +475,12 @@ class Connection(ABC):
         for route_key in [key for key in self._callbacks if key[0] == unit_code]:
             del self._callbacks[route_key]
 
-        # 3. Mark it down: stops its echo, releases unit-state waiters.
+        # stops echo and releases unit-state waiters.
         self._mark_unit_disconnected(unit_name)
-
-        # 4. Finally close the protocol-level resources for this unit.
+        # 4. close on protocol-level.
         try:
             await self._do_disconnect_unit(unit_name)
-        except Exception:  # noqa: BLE001 - teardown must not raise into the watchdog
+        except Exception:
             logger.exception("error disconnecting unit %s", unit_name)
 
     # ------------------------------------------------------------------ #
@@ -716,9 +708,7 @@ class Connection(ABC):
         taken as already-encoded and sent through unchanged, so a caller that
         assembles its own payload still works.
         """
-        if opcode is None and hasattr(data, '_opCode'):
-            opcode = data._opCode
-        opcode = validated_opCode(opcode)
+        opcode = extract_opcode(opcode)
         unit = self._resolve_unit(unit_name)
         payload = self._encode(opcode, data, unit)
         self._loop_thread.await_coroutine(self._do_send(unit, payload, opcode))
@@ -793,7 +783,7 @@ class Connection(ABC):
         return True
 
     def receive_message(
-        self, opCode: int, unitName: str | None = None,
+        self, opcode: int | str | IrsMessage, unitName: str | None = None,
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None
     ) -> tuple[str, IrsMessage]:
@@ -822,7 +812,8 @@ class Connection(ABC):
         this connection's sync API, and if it raises, the subscription is
         released and the exception propagates unchanged.
         """
-        unit, route_key = self._resolve_route(unitName, opCode)
+        opcode = extract_opcode(opcode)
+        unit, route_key = self._resolve_route(unitName, opcode)
         validate_irs(*route_key, self._structures_for(unit))
         future: asyncio.Future[IrsMessage] = self._loop_thread.await_coroutine(self._subscribe(route_key))
         if trigger_function is not None:
@@ -839,7 +830,7 @@ class Connection(ABC):
 
     def handle_on_receive(
         self,
-        opcode: int,
+        opcode: int | str | IrsMessage,
         callback_func: ReceiveCallback,
         unit_name: str | None = None,
     ) -> None:
@@ -867,17 +858,19 @@ class Connection(ABC):
         """
         if not callable(callback_func):
             raise TypeError(f"callback_func must be callable, got {callback_func!r}")
+        opcode = extract_opcode(opcode)
         unit, route_key = self._resolve_route(unit_name, opcode)
         validate_irs(*route_key, self._structures_for(unit))
         self._loop_thread.await_coroutine(self._register_callback(route_key, callback_func))
 
-    def stop_on_receive(self, opcode: int, unit_name: str | None = None) -> bool:
+    def stop_on_receive(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
         """
         Remove the standing callback registered for this route by
         `handle_on_receive`. Returns True if one was registered, False if
         there was nothing to remove. Callbacks already running are left to
         finish.
         """
+        opcode = extract_opcode(opcode)
         _unit, route_key = self._resolve_route(unit_name, opcode)
         removed: bool = self._loop_thread.await_coroutine(self._unregister_callback(route_key))
         return removed
@@ -954,9 +947,7 @@ class Connection(ABC):
         `unit_name` is optional when this connection has exactly one
         connected unit, matching `send_message`/`receive_message`.
         """
-        if opcode is None and hasattr(data, '_opCode'):
-            opcode = data._opCode
-        opcode = validated_opCode(opcode)
+        opcode = extract_opcode(opcode)
         interval_seconds = float(interval)
         if interval_seconds <= 0:
             raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
@@ -966,7 +957,7 @@ class Connection(ABC):
             self._start_periodic(unit, route_key, payload, opcode, interval_seconds)
         )
 
-    def stop_periodic(self, opcode: int, unit_name: str | None = None) -> bool:
+    def stop_periodic(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
         """
         Stop the periodic sender started for this (unit, opcode) route.
         Returns True if one was running, False if there was nothing to stop.
@@ -975,7 +966,7 @@ class Connection(ABC):
         the two agree on which route is being addressed however the caller
         spelled the opcode.
         """
-        opcode = validated_opCode(opcode)
+        opcode = extract_opcode(opcode)
         _unit, route_key = self._resolve_route(unit_name, opcode)
         stopped: bool = self._loop_thread.await_coroutine(self._stop_periodic(route_key))
         return stopped

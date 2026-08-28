@@ -149,11 +149,19 @@ def _import_from_file(path: Path, module_name: str) -> None:
         raise ImportError(
             f"structures file {path} failed to import: {type(exc).__name__}: {exc}") from exc
 
-def validated_opCode(opCode: OpCode | str) -> OpCode:
+def validated_opcode(opCode: OpCode | str) -> OpCode:
     if isinstance(opCode, int):
         return opCode
     return int(opCode, 0)
 
 
-def validated_unitCode(unitCode: UnitCode | str) -> UnitCode:
-    return validated_opCode(unitCode)
+def validated_unitcode(unitCode: UnitCode | str) -> UnitCode:
+    return validated_opcode(unitCode)
+
+def extract_opcode(opcode: int | str | IrsMessage) -> int:
+    valid = getattr(opcode, "_opCode", False)
+    if valid:
+        return valid
+    return validated_opcode(opcode)
+
+
