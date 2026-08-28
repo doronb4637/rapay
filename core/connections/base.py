@@ -542,6 +542,20 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # IRS codec boundary
     # ------------------------------------------------------------------ #
+    def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
+        """
+        Raise if this connection could never deliver `route_key`.
+
+        Subscribing to a message our own side doesn't define is OUR bug, so it
+        is caught here -- at the subscribing call -- rather than becoming a
+        `receive_message` that quietly never returns. IRS-backed connections
+        answer that question by asking IRS. Connections whose payloads are
+        native (DDS) have their own notion of a route that exists and override
+        this; what they must not do is skip the check, which is how the
+        question stops being asked at all.
+        """
+        validate_irs(*route_key, self._structures_for(unit_name))
+
     def _encode(self, opcode: int, message: IrsMessage, unit_name: UnitName) -> Any:
         """
         Application message -> wire payload, stamped with OUR unit code: the
@@ -814,7 +828,7 @@ class Connection(ABC):
         """
         opcode = extract_opcode(opcode)
         unit, route_key = self._resolve_route(unitName, opcode)
-        validate_irs(*route_key, self._structures_for(unit))
+        self._validate_route(unit, route_key)
         future: asyncio.Future[IrsMessage] = self._loop_thread.await_coroutine(self._subscribe(route_key))
         if trigger_function is not None:
             try:
@@ -860,7 +874,7 @@ class Connection(ABC):
             raise TypeError(f"callback_func must be callable, got {callback_func!r}")
         opcode = extract_opcode(opcode)
         unit, route_key = self._resolve_route(unit_name, opcode)
-        validate_irs(*route_key, self._structures_for(unit))
+        self._validate_route(unit, route_key)
         self._loop_thread.await_coroutine(self._register_callback(route_key, callback_func))
 
     def stop_on_receive(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
@@ -1057,8 +1071,10 @@ class Connection(ABC):
         ...
 
     @abstractmethod
-    async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
+    async def _do_send(self, unit_name: str, data: Any, opcode: int) -> None:
         """Frame (if applicable) and transmit one message to `unit_name`.
+        `data` is wire bytes on framed connections and a typed native sample
+        on the ones that do their own serialization (DDS).
         Raise `ConnectionError` if the unit currently has no usable peer --
         the periodic and echo senders treat that as retryable."""
         ...

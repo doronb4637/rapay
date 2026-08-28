@@ -30,10 +30,15 @@ Skip the slower, real-timing echo tests during iteration:
 .venv/Scripts/python.exe -m pytest -m "not slow"
 ```
 
-DDS **is** exercised here (`rti.connext` is installed in this `.venv`) --
-`test_manager.py::test_create_rejects_unregistered_protocol` self-skips when
-it detects DDS is registered, since that scenario needs a genuinely
-unregistered protocol to prove anything. True IP multicast stays out of
+DDS is exercised by `test_dds.py` (`rti.connext` is installed in this `.venv`),
+which covers the surrogate topic opcodes, config validation, QoS `topic_filter`
+resolution, type lookup, header extraction and routing -- all without a live
+domain. The one test that puts a real `DomainParticipant` on one is gated behind
+`requires_license`: creating a participant needs an RTI license, and a machine
+without one must not read as a code failure. Separately,
+`test_manager.py::test_create_rejects_unregistered_protocol` self-skips when it
+detects DDS is registered, since that scenario needs a genuinely unregistered
+protocol to prove anything. True IP multicast stays out of
 scope regardless of environment: this sandbox's network namespace has no
 multicast routing, the same constraint `connections/test_framework.py`
 documents; `test_composite.py` uses two directional UDP links in its place,

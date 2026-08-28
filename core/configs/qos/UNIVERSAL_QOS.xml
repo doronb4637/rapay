@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<!--
+  Template universal QoS file.
+
+  One file, one library, profiles by name. This is the normal shape, and the
+  one that connections/dds.py is written against. Per-topic settings live INSIDE a
+  profile as `topic_filter` attributes rather than in separate files: the
+  unfiltered <datawriter_qos>/<datareader_qos> is the profile's baseline, and a
+  filtered one overrides it for the topics whose names match.
+
+  Reading those filters requires the topic-aware QosProvider accessors
+  (set_topic_datawriter_qos, set_topic_datareader_qos, set_topic_name_qos).
+  The profile-only accessors take no topic name and cannot see a filter at all,
+  which is why dds.py uses them only as a fallback.
+
+  Replace this with the deployment's real file; the qos_file key in a
+  connection config points wherever it lives.
+-->
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="http://community.rti.com/schema/7.7.0/rti_dds_qos_profiles.xsd">
+  <qos_library name="MyLib">
+    <qos_profile name="Reliable" is_default_qos="true">
+
+      <datawriter_qos>
+        <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+        <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+      </datawriter_qos>
+
+      <datareader_qos>
+        <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+        <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+      </datareader_qos>
+
+      <!-- Per-topic override: same profile, deeper history for one topic. -->
+      <datawriter_qos topic_filter="StatusTopic">
+        <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>37</depth></history>
+        <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+      </datawriter_qos>
+
+    </qos_profile>
+  </qos_library>
+</dds>

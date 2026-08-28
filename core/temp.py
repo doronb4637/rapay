@@ -47,6 +47,3 @@
 # DTU.send_message(setg, 18)
 # sender, data = Tiful.receive_message(18, timeout=5, trigger_function=send)
 # print(data)
-dict = {'nigga': 'nigga'}
-dict = {}
-print(dict.values())

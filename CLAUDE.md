@@ -13,9 +13,10 @@ rotting.
 
 ```
 IRS            standalone -- imports nothing else in this repo
+DDS            standalone -- @idl.struct type modules; imports only rti (third-party)
   ^
   |
-core           uses IRS + connections + tools + core/annotations.py
+core           uses IRS + DDS + connections + tools + core/annotations.py
   ^
   |
 gsim           uses core (the whole package -- connections, IRS, tools, annotations)
@@ -28,6 +29,15 @@ gsim           uses core (the whole package -- connections, IRS, tools, annotati
   vocabulary (`IrsMessage`, `UnitCode`, `OpCode`, `Namespace`, `NamespaceScope`) for exactly this
   reason: those names are needed by `IRS.REGISTRY` / `IRS.irs_parser` internally, so they live
   inside IRS rather than being borrowed from `core.annotations`.
+- **`core/DDS`** is the topic-based counterpart to `IRS`, and is deliberately almost empty. It holds
+  `Structures/` -- plain Python modules of `@idl.struct` classes -- and no registry, no engine, and
+  no code of its own. The asymmetry with `IRS` is the whole point: a binary IRS payload carries no
+  type information, so *something* has to look up a layout by `(unitCode, opCode)`; a DDS sample
+  carries its type on the wire and RTI matches publishers to subscribers itself, so there is nothing
+  to register. `core/DDS/__init__.py` does not import `rti`, so `core.DDS` stays importable in a
+  process without Connext; only the `Structures/` modules themselves need it. `core.connections.dds`
+  imports the named modules (see `core/connections/CLAUDE.md` section 9) -- the arrow points from
+  `connections` into `DDS`, never the reverse.
 - **`core/annotations.py`** re-exports those same names (`from core.IRS.annotations import ...`)
   purely so `core.connections` and `core.tools` keep one familiar import (`from core.annotations
   import *`) for both the IRS vocabulary and the connections-specific `Task`/`Future` aliases. The

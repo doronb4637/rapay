@@ -1,0 +1,15 @@
+{
+  "protocol": "dds",
+  "side": "publisher",
+  "ip": "0.0.0.0",
+  "unitCode": 22,
+  "connections": {
+    "TrackConsumer": {"port": 77, "unitCode": 7}
+  },
+  "idl_modules": ["core.DDS.Structures.Example.example_topics"],
+  "qos_file": "core/configs/qos/UNIVERSAL_QOS.xml",
+  "qos_profile": "MyLib::Reliable",
+  "topics": [
+    {"topic": "TrackTopic", "type": "Track", "direction": "publish"}
+  ]
+}

@@ -22,7 +22,6 @@ where = ["."]
 include = ["core", "core.*"]
 exclude = [
     "core.tests", "core.tests.*",
-    "core.IRS.Structures", "core.IRS.Structures.*",
     "core.IRS.benchmark", "core.IRS.benchmark.*",
 ]
 

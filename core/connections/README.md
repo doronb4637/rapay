@@ -664,44 +664,116 @@ used to be reported as failures:
   context, including any other `OSError`, is passed to
   `loop.default_exception_handler` unchanged.
 
-## 9. DDS: IDL and QoS files
+## 9. DDS: topics, types and QoS
 
-`dds.py` accepts `idl_file` and `qos_file` paths (plus optional
-`qos_profile`, `topics`, `types`) and documents inline exactly how RTI
-Connext consumes them. The short version:
+`dds.py` is the one protocol here that is not socket-based, and two adaptations
+carry that difference. Both are structural, not cosmetic.
 
-- **IDL answers *what*.** `idl_file` is a **Python module** using the
-  `rti.types` decorators, not a text `.idl`:
+**A topic is not a unit.** On TCP/UDP/multicast, inbound routing comes from the
+transport: which socket a message arrived on identifies the peer. A DDS
+DataReader has no such property -- it serves every publisher on its topic at
+once. So topics and units are separate axes: `config["connections"]` stays the
+list of real remote units, `config["topics"]` is its own list, and the sending
+unit is read off the SAMPLE, from `header.source_unit`. The field names are
+configurable (`config["header"]`); a type with no header still routes when the
+connection has exactly one configured unit, which is the case where the answer
+is unambiguous anyway.
 
-  ```python
-  import rti.types as idl
+**DDS puts no opcode on the wire** -- the topic *is* the message identity. But
+this framework routes on `(unit_code, opcode)`, so each topic gets a stable
+local surrogate derived from its name by `tools.general.topic_opcode`
+(blake2s, 16 bits, matching `framing.py`'s `OpCode` field). Nothing about it is
+transmitted. It exists so `receive_message`, `handle_on_receive`, `@route` and
+`periodic_sending` work over DDS exactly as they do over TCP:
 
-  @idl.struct
-  class Point:
-      x: int = 0
-      y: int = 0
-  ```
+```python
+from core.tools.general import topic_opcode
 
-  `@idl.struct` builds the TypeSupport Connext uses to serialize instances
-  and to publish the type during discovery, so there is no code-generation
-  step at all -- the module is imported by path (in an executor, since an
-  import executes arbitrary module-level code) and the class handed straight
-  to `dds.Topic(...)`. Creating the `Topic` is what actually **registers**
-  the type with the participant. The module is cached in `sys.modules`
-  because DDS type identity is per-class: re-importing would mint two
-  distinct types with the same name. `config["types"]` maps each unit to its
-  class name; a class missing `@idl.struct` is rejected with a message
-  naming the class and file rather than failing deep inside Connext.
-- **QoS answers *how*.** `dds.QosProvider(qos_file)` parses the profiles;
-  nothing is applied until a profile is pulled out per entity kind
-  (`participant_qos_from_profile`, `topic_qos_from_profile`,
-  `datawriter_qos_from_profile`, `datareader_qos_from_profile`) and passed to
-  that entity's **constructor** -- QoS is largely immutable afterwards, which
-  is why every entity is built with its QoS in hand.
+unit, track = subscriber.receive_message(topic_opcode("TrackTopic"), timeout=5)
+```
 
-Writer/reader QoS is what discovery checks for RxO compatibility: mismatch it
-and the pair simply never connects, with no error and no data -- hence one
-shared profile.
+Two topics landing on one opcode would deliver one topic's samples to the
+other's subscriber, silently, so `config.parse_topics` checks every pair at
+**load time** and names both -- with an explicit `"opcode"` key as the escape
+hatch. Guessing at runtime is what this replaces.
+
+### The type modules
+
+`config["idl_modules"]` names Python modules of `@idl.struct` classes -- by
+dotted path (`core.DDS.Structures.Example.example_topics`) or by file path for
+out-of-tree types. There is no text `.idl`, no `rtiddsgen`, and **no
+registration call of this project's own**:
+
+```python
+import rti.types as idl
+
+@idl.struct
+class Track:
+    header: Header = field(default_factory=Header)
+    x: float = 0.0
+```
+
+That absence is the point, and it is why `core/DDS/` is so much smaller than
+`core/IRS/`. IRS needs a registry because a binary payload carries no type
+information: something must look up a layout by `(unitCode, opCode)` or the
+bytes cannot be parsed at all. DDS is the opposite -- the type travels with the
+sample and RTI matches on (topic name, type name, QoS) itself -- so importing
+the module is the whole job. `dds.Topic(...)` is what registers the class with
+the participant.
+
+Two ways this fails **silently**, with discovery succeeding and no sample ever
+arriving: the type NAME (defaults to the Python class name; set `type_name` on
+the topic entry when the peer's type came from real IDL under another name),
+and EXTENSIBILITY (`idl.final` / `idl.extensible` / `idl.mutable` must match the
+peer's IDL). `rtiddsspy -domainId <N>` shows what the peer actually advertises.
+
+### QoS
+
+One universal QoS XML shared by every topic is the normal shape: it is a
+library of named profiles, and per-topic settings live *inside* a profile as
+`topic_filter` attributes. Reading them requires the topic-aware accessors, and
+this matters more than it looks:
+
+```
+set_topic_name_qos(profile, topic)       -> TopicQos
+set_topic_datawriter_qos(profile, topic) -> DataWriterQos
+set_topic_datareader_qos(profile, topic) -> DataReaderQos
+```
+
+The profile-only accessors (`datawriter_qos_from_profile(profile)`) take no
+topic name and therefore **cannot see a `topic_filter` at all** -- they hand
+every topic the profile's baseline and never say so. They are kept strictly as
+the fallback for a file that declares no filters. `core/configs/qos/UNIVERSAL_QOS.xml`
+is a template with a worked example of both.
+
+Nothing applies until a profile is pulled out per entity kind and passed to that
+entity's **constructor** -- QoS is largely immutable afterwards, which is why
+every entity is built with its QoS in hand. Writer/reader QoS is what discovery
+checks for RxO compatibility: mismatch it and the pair never connects, with no
+error and no data.
+
+### Everything else that differs
+
+- **Self-reception is real.** A participant's own DataReader matches its own
+  DataWriter, so a connection that both publishes and subscribes a topic hears
+  itself. `source_unit == our own unit code` is the filter; it costs nothing and
+  is more selective than `ignore_participant`, which would also block a
+  legitimate second process of ours on the same host.
+- **Direction is per topic** (`"publish"` / `"subscribe"` / `"both"`, defaulting
+  from `side`), and `can_send` / `can_receive` are the union across topics -- so
+  a subscribe-only DDS connection cannot be picked as a `CompositeUnit` sender.
+- **Echo is rejected at config load.** The echo lifecycle transmits raw bytes,
+  which a DataWriter cannot accept, so an echo here would never heartbeat and
+  its watchdog would then drop every unit on `EchoTimeout`. DDS LIVELINESS QoS
+  is the mechanism that belongs in that slot.
+- **`_do_send` takes a typed sample, not bytes**, and stamps `source_unit` /
+  `destination_unit` on the way out (values the caller set are never
+  overwritten). The peer routes on those exactly as we do.
+- **`port` is the DDS domain id**; `ip` / `local_ip` are unused. All units on
+  one connection must agree on the domain, since they share one participant.
+- **`rti.asyncio` must stay imported.** `DataReader.take_data_async` does not
+  exist until that import monkey-patches it on. It looks unused to a linter and
+  is what makes the read loop work at all.
 
 ## Verified
 

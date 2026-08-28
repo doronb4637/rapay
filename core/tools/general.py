@@ -165,3 +165,18 @@ def extract_opcode(opcode: int | str | IrsMessage) -> int:
     return validated_opcode(opcode)
 
 
+def topic_opcode(topic_name: str) -> OpCode:
+    """
+    The framework's route key is (unit_code, opcode), but DDS puts no opcode on
+    the wire -- a topic IS the message identity there. This derives a stable
+    local routing handle from the topic name so DDS traffic flows through the
+    same `_subscriptions`/`_callbacks` machinery as everything else.
+
+    Never transmitted, and never seen by a remote unit. Deterministic across
+    processes and restarts so `@route(opCode=topic_opcode("X"))` in a handler
+    and the reader that dispatches under it always agree. Sized to `framing.py`'s
+    uint16 OpCode field; `DdsConnection` rejects a collision between two of its
+    own topics at load time rather than letting it become a silent misroute.
+    """
+    digest = hashlib.blake2s(topic_name.encode("utf-8"), digest_size=2).digest()
+    return int.from_bytes(digest, "little")
