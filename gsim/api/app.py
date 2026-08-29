@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from gsim import __version__
-from gsim.api.routes import behaviours, connections, events, files, messages
+from gsim.api.routes import behaviours, connections, events, files, filters, messages
 from gsim.core_gateway import get_runtime
 from gsim.paths import WEB_DIST, seed_user_data
 
@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     app.include_router(messages.router)
     app.include_router(messages.registry_router)
     app.include_router(behaviours.router)
+    app.include_router(filters.router)
     app.include_router(files.router)
     app.include_router(events.router)
 

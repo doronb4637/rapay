@@ -39,6 +39,7 @@ from core.connections.manager import ConnectionManager
 
 from . import registry as message_registry
 from .behaviours import BehaviourEngine
+from .filters import FilterSet
 from .payloads import prepare_message
 from .timing import wall_time
 
@@ -54,6 +55,11 @@ LOG_LIMIT = 2000
 #: coalesces whatever piled up during one WebSocket write into a single frame,
 #: so the frame rate falls out of how fast the client drains rather than a
 #: constant, and no entry is ever lost on the way.
+#:
+#: The one thing that CAN suppress a message is a user-configured received
+#: filter (`filters.py`), and it is the opposite of sampling rather than a
+#: variant of it: authored per message, and every drop counted and reconcilable
+#: against what arrived.
 
 
 @dataclass
@@ -247,13 +253,21 @@ class PreparedSend:
     payload: dict[str, Any]
 
     def fire(self) -> LogEntry:
-        """Send it and log it."""
+        """Send it and log it.
+
+        `_log` returns `None` only for a filtered RECEIVED message, and this is
+        the send path -- asserted rather than handled, so a future change that
+        made sending filterable fails here instead of returning a null entry to
+        the Send button.
+        """
         self.record.unit.send_message(self.message, self.op_code, self.unit_name)
-        return self.runtime._log(
+        entry = self.runtime._log(
             self.record, "sent", self.record.name, self.record.own_unit_code,
             self.op_code, self.message_name, self.payload, None,
             namespace=self.namespace,
         )
+        assert entry is not None, "the sent direction is never filtered"
+        return entry
 
 
 class GSimRuntime:
@@ -277,6 +291,10 @@ class GSimRuntime:
             is_connection_running=self._is_connection_running,
             publish=self.events.publish,
         )
+        # Received-message filters. Consulted at the top of `_log` and nowhere
+        # else -- see `filters.py` for why suppression here is compatible with
+        # the "every message is published" rule the send path keeps.
+        self.filters = FilterSet(publish=self.events.publish)
         self._watcher = threading.Thread(
             target=self._watch_unit_state, name="gsim-unit-state", daemon=True
         )
@@ -384,6 +402,14 @@ class GSimRuntime:
             buffer = record.sent if direction == "sent" else record.received
             cleared += len(buffer)
             buffer.clear()
+        if direction == "received":
+            # Load-bearing. A link streaming one constant value leaves every
+            # "log on change" filter holding a matching baseline, so without
+            # this the freshly cleared pane sits empty indefinitely and the
+            # filter looks like it broke the console. Clear means start the
+            # record over, and a record whose first entry is suppressed is not
+            # a record.
+            self.filters.forget()
         self.events.publish({"type": "logs.cleared", "direction": direction})
         return cleared
 
@@ -470,6 +496,10 @@ class GSimRuntime:
         record.unit.start()
         record.running = True
         record.start_error = None       # a successful start clears the excuse
+        # Whatever the peer did while the transport was down is unknown, so a
+        # "log on change" filter must not measure the first arrival against a
+        # baseline from before the gap -- see `FilterSet.forget`.
+        self.filters.forget(connection_name)
         # Resumes any behaviour configured on this connection -- see
         # `BehaviourEngine._sync`: "enabled AND connection running" is one
         # condition, so start/stop need no separate resume bookkeeping.
@@ -503,6 +533,10 @@ class GSimRuntime:
         # Before closing: a worker mid-tick would otherwise send into a
         # connection being torn down and log a spurious failure.
         self.behaviours.remove_connection(connection_name)
+        # An edit is a delete (see `replace`), so this drops filters on an edit
+        # too -- deliberate, and the same rule behaviours follow: an edit can
+        # rename or remove the very peer a filter targets.
+        self.filters.remove_connection(connection_name)
         try:
             record.unit.close()
         finally:
@@ -555,6 +589,7 @@ class GSimRuntime:
 
     def shutdown(self) -> None:
         self.behaviours.shutdown()      # stop the workers before their targets vanish
+        self.filters.shutdown()
         self._manager.shutdown_all()
         with self._lock:
             self._conn_records.clear()
@@ -654,8 +689,11 @@ class GSimRuntime:
 
     def _log(self, record: ConnectionRecord, direction: str, unit_name: str, unit_code: int,
              op_code: int, message_name: str, payload: dict[str, Any] | None,
-             error: str | None, namespace: str | None = None) -> LogEntry:
-        """Record one message and stream it. Every message, unconditionally.
+             error: str | None, namespace: str | None = None) -> LogEntry | None:
+        """Record one message and stream it. `None` if a filter rejected it.
+
+        Every SENT message, unconditionally -- only the received direction can
+        be filtered, so the send path may treat the return as non-optional.
 
         There was briefly a per-route rate limit here, and it was a mistake
         worth recording: capping the stream at 60Hz made consecutive console
@@ -664,7 +702,20 @@ class GSimRuntime:
         diagnosed with, and an instrument that reports the sampling period
         instead of the signal is worse than a slow one. Volume is handled by
         batching in `api/routes/events.py`, where it costs no fidelity.
+
+        The one exception is a RECEIVED message a user-configured filter
+        rejects, which returns `None` -- and it is the opposite of that mistake
+        rather than a repeat of it, because it is authored per message and
+        every drop is counted (`filters.py`). Checked HERE, before
+        `next(self._seq)`: a dropped message must not burn a sequence number,
+        since the console reads a `seq` gap as loss and this is not loss. A
+        message that failed to DECODE is never filtered -- an error is exactly
+        what the pane exists to show, and no rule could have been written
+        against a payload that does not exist.
         """
+        if (direction == "received" and error is None and payload is not None
+                and not self.filters.admits(record.name, unit_name, op_code, payload)):
+            return None
         entry = LogEntry(
             seq=next(self._seq),
             direction=direction,

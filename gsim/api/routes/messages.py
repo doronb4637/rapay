@@ -89,6 +89,39 @@ def connection_messages(connection_name: str, unit_name: str | None = None) -> l
     return list_messages(record.own_unit_code, structures)
 
 
+@router.get("/incoming")
+def connection_incoming(connection_name: str, unit_name: str | None = None) -> list[dict[str, Any]]:
+    """Every message this connection can RECEIVE, per peer.
+
+    The mirror of `/messages` above, and genuinely a different query rather than
+    the same one re-labelled: outbound is keyed by OUR unit code (the one
+    `irs_to_bytes` is called with), inbound by THEIRS (the one `parse_irs`
+    decodes under). Asking the outbound question about inbound traffic finds the
+    wrong layouts, or none.
+
+    This is the same lookup `runtime._install_receive_handlers` performs to
+    register callbacks, so the list is exactly the set of messages that can
+    actually arrive -- not a guess, and not merely the ones that already have.
+    A filter you can only configure after being flooded arrives too late.
+    """
+    record = _record(connection_name)
+    peers = record.peers()
+    if unit_name is not None:
+        if unit_name not in peers:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"unknown connected unit {unit_name!r}; known: {sorted(peers)}")
+        peers = {unit_name: peers[unit_name]}
+    return [
+        # `unit_name` rides along on every row because the console labels a
+        # received message with the SENDER's configured name, and the filter
+        # dialog has to key its rules the same way.
+        {**summary, "unit_name": peer_name}
+        for peer_name, peer_code in peers.items()
+        for summary in list_messages(peer_code, record.structures_for(peer_name))
+    ]
+
+
 @router.get("/messages/{op_code}/schema")
 def message_form_schema(connection_name: str, op_code: int,
                         unit_name: str | None = None) -> dict[str, Any]:

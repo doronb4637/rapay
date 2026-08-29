@@ -29,6 +29,7 @@ import Console from './components/Console';
 import ConnectionModal from './components/ConnectionModal';
 import BehaviourModal from './components/BehaviourModal';
 import BehavioursPanel from './components/BehavioursPanel';
+import FilterModal from './components/FilterModal';
 import Resizer from './components/Resizer';
 import { Button, IconButton, StatusDot, cx } from './components/ui';
 
@@ -124,6 +125,10 @@ export default function App() {
   // that fail on send.
   const [destination, setDestination] = useState(null);
   const [behaviours, setBehaviours] = useState([]);
+  // Received filters. Process-wide like behaviours, and for the same reason: a
+  // filter keeps dropping messages while you look at a different connection.
+  const [filters, setFilters] = useState([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   // null | {opCode, payload, messageName, connectionName, unitName}
   const [behaviourDraft, setBehaviourDraft] = useState(null);
   // In-progress compose payloads, keyed by route. ComposeForm is deliberately
@@ -204,6 +209,7 @@ export default function App() {
   useEffect(() => {
     refillLogs();
     api.behaviours().then(setBehaviours, () => {});
+    api.filters().then(setFilters, () => {});
   }, [refillLogs]);
 
   // Changing connection only re-aims the Inspector; the console keeps streaming.
@@ -235,6 +241,10 @@ export default function App() {
           // Behaviours ride the snapshot: they keep firing across a dropped
           // socket, so a reconnect must not leave the panel showing none.
           if (event.behaviours) setBehaviours(event.behaviours);
+          // Filters ride the snapshot too: they keep dropping across a dropped
+          // socket, so a reconnect without them would show a quiet Received
+          // pane with nothing on screen saying why.
+          if (event.filters) setFilters(event.filters);
           // The snapshot does NOT carry log history, and everything that
           // happened while the socket was down was missed -- re-sync it.
           discardPendingLogs();
@@ -244,6 +254,7 @@ export default function App() {
         // The server sends the whole list on any change, so this is a replace,
         // not a merge -- a dropped event cannot leave a stale schedule on screen.
         if (event.type === 'behaviours') return setBehaviours(event.behaviours);
+        if (event.type === 'filters') return setFilters(event.filters);
         if (event.type === 'logs.cleared') {
           const drop = () => [];
           discardPendingLogs(event.direction);
@@ -656,6 +667,8 @@ export default function App() {
               );
             })
           }
+          filters={filters}
+          onOpenFilters={() => setFiltersOpen(true)}
         />
       </div>
 
@@ -707,6 +720,39 @@ export default function App() {
           }
           {...behaviourActions}
           onClose={() => setBehaviourDraft(null)}
+        />
+      )}
+
+      {/* Received filters. Opened from the Received pane, and scoped to the
+          selected connection by default -- the dialog can switch, but starting
+          somewhere other than where the user already is would be a puzzle.
+          Every action re-reads from the server response rather than mutating
+          local state, for the same reason clearing the console does: the
+          `filters` broadcast is for OTHER clients, and while this socket is
+          down none arrives. */}
+      {filtersOpen && (
+        <FilterModal
+          connections={connections}
+          filters={filters}
+          initialConnection={selectedName}
+          onSave={async (connectionName, body) => {
+            await api.setFilter(connectionName, body);
+            setFilters(await api.filters());
+          }}
+          onDelete={async (id) => {
+            await api.deleteFilter(id);
+            setFilters(await api.filters());
+          }}
+          onArm={async (id) => {
+            await api.armFilter(id);
+            setFilters(await api.filters());
+          }}
+          onDisarm={async (id) => {
+            await api.disarmFilter(id);
+            setFilters(await api.filters());
+          }}
+          onDisarmAll={async () => setFilters(await api.disarmAllFilters())}
+          onClose={() => setFiltersOpen(false)}
         />
       )}
 

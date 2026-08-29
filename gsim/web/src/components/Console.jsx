@@ -25,12 +25,14 @@
  * it provokes (this project's layouts routinely reuse one opcode both ways).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, Pause, Trash2, TriangleAlert } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Eye, EyeOff, ListFilter, Pause, Trash2, TriangleAlert } from 'lucide-react';
 import { Badge, EmptyState, IconButton, cx } from './ui';
 import ContextMenu, { useContextMenu } from './ContextMenu';
 import { formatDelta, formatTime } from '../lib/format';
 
-export default function Console({ sent, received, selected, onSelect, onClear, style }) {
+export default function Console({
+  sent, received, selected, onSelect, onClear, filters = [], onOpenFilters, style,
+}) {
   // Which entry the pointer is on, wherever it is. Shared across both panes so
   // one can dim against the other; held here because neither pane owns it.
   const [hovered, setHovered] = useState(null);
@@ -57,6 +59,11 @@ export default function Console({ sent, received, selected, onSelect, onClear, s
         onClear={onClear}
         hovered={hovered}
         onHover={setHovered}
+        // Received only. A filter drops messages before they are ever logged
+        // (server-side, see core_gateway/filters.py) and nothing filters the
+        // sent direction, so the Sent pane has nothing to report here.
+        filters={filters}
+        onOpenFilters={onOpenFilters}
         className="min-h-0 flex-1"
       />
     </div>
@@ -82,6 +89,7 @@ function counterpartOf(entry, other) {
 
 function LogPane({
   title, direction, entries, selected, onSelect, onClear, className, hovered, onHover,
+  filters, onOpenFilters,
 }) {
   const [hidden, setHidden] = useState(() => new Set());
   const [follow, setFollow] = useState(true);
@@ -147,6 +155,16 @@ function LogPane({
   // anything else (including what the freeze is holding back), so the number
   // always explains itself.
   const hiddenCount = source.length - visible.length;
+
+  /* The OTHER suppression, and deliberately a separate number from the one
+     above. `hidden` is this pane's own instant per-opCode mute: local,
+     reversible, and the entries still exist. `dropped` is the server-side
+     filters, which reject a message before it is ever logged -- so those
+     entries are genuinely gone. Conflating them into one "not shown" count
+     would hide exactly the distinction that matters when deciding whether the
+     thing you are looking for can still be recovered. */
+  const armedFilters = (filters ?? []).filter((entry) => entry.armed);
+  const droppedCount = armedFilters.reduce((sum, entry) => sum + entry.dropped, 0);
 
   // Tail the log, but only while the user is already at the bottom -- yanking
   // the viewport while they read scrollback is the classic console sin.
@@ -214,6 +232,17 @@ function LogPane({
             {hiddenCount} hidden
           </span>
         )}
+        {droppedCount > 0 && (
+          <button
+            type="button"
+            onClick={onOpenFilters}
+            title={`${droppedCount.toLocaleString()} messages dropped by ${armedFilters.length} filter${armedFilters.length === 1 ? '' : 's'} before they were logged. Click to review.`}
+            className="tnum flex items-center gap-1 rounded px-1 text-[10px] text-amber-500/90 hover:bg-slate-800"
+          >
+            <ListFilter size={10} />
+            {droppedCount.toLocaleString()} dropped
+          </button>
+        )}
         {/* Without this the freeze reads as the feed having died -- which is
             the same symptom the user came here to report. Deliberately carries
             no "N new" count: `entries` is itself capped at the view limit, so
@@ -244,6 +273,16 @@ function LogPane({
             disabled={hidden.size === 0}
             onClick={() => setHidden(new Set())}
           />
+          {onOpenFilters && (
+            <IconButton
+              icon={ListFilter}
+              title={armedFilters.length
+                ? `${armedFilters.length} filter${armedFilters.length === 1 ? '' : 's'} deciding what gets logged`
+                : 'Filter what gets logged'}
+              onClick={onOpenFilters}
+              className={armedFilters.length ? '!text-amber-400' : undefined}
+            />
+          )}
         </div>
       </header>
 
@@ -265,11 +304,28 @@ function LogPane({
       >
         {visible.length === 0 ? (
           <EmptyState>
-            {entries.length === 0
-              ? isSent
-                ? 'Nothing sent yet.'
-                : 'Nothing received yet.'
-              : 'Everything in this pane is hidden.'}
+            {entries.length === 0 && armedFilters?.length > 0 ? (
+              /* An empty pane with filters armed is ambiguous in the worst
+                 possible way: it looks exactly like a dead link. Say which one
+                 it is, and put the way out one click away -- the pane must
+                 never be the place where the app goes quiet without explaining
+                 itself. */
+              <>
+                Nothing has passed your filters yet.{' '}
+                <button
+                  type="button"
+                  onClick={onOpenFilters}
+                  className="rounded text-sky-400 underline decoration-dotted underline-offset-2 hover:text-sky-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500/70"
+                >
+                  Review {armedFilters.length} filter{armedFilters.length === 1 ? '' : 's'}
+                </button>
+                {droppedCount > 0 && ` — ${droppedCount.toLocaleString()} dropped so far.`}
+              </>
+            ) : entries.length === 0 ? (
+              isSent ? 'Nothing sent yet.' : 'Nothing received yet.'
+            ) : (
+              'Everything in this pane is hidden.'
+            )}
           </EmptyState>
         ) : (
           <ul className="flex flex-col py-1">

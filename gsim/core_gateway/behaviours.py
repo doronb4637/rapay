@@ -493,9 +493,10 @@ class BehaviourEngine:
         `_publish_all` is otherwise called only when something CHANGES --
         configure, enable, an error appearing or clearing. For a slow schedule
         that is enough: each tick sends its own `message.sent` and the panel's
-        numbers are refreshed alongside it. A fast one streams only a 60Hz
-        sample, so without this its `sent_count` / `actual_hz` / `missed_ticks`
-        would sit visibly frozen while it fired thousands of times.
+        numbers are refreshed alongside it. A fast one would otherwise carry its
+        counters only as often as it is reconfigured -- `sent_count` /
+        `actual_hz` / `missed_ticks` sitting visibly frozen while it fired
+        thousands of times.
         """
         while not self._closing.wait(STATS_PERIOD_SECONDS):
             with self._lock:

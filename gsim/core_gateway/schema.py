@@ -193,3 +193,70 @@ def describe_message(message_class: type, unit_code: int, op_code: int) -> dict[
         "doc": (message_class.__doc__ or "").strip() or None,
         "fields": [describe_field(field) for field in message_class._fields_],
     }
+
+
+#: Field kinds a filter RULE can compare against. A rule needs a single value to
+#: put on one side of an operator, which a struct, a bitfield-as-a-whole, or an
+#: array does not have.
+_COMPARABLE = frozenset({"scalar", "enum"})
+
+
+def filter_targets(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every field of one message a received-filter may address, flattened.
+
+    Two different questions, answered per node, because the two halves of a
+    filter can address different things:
+
+    `rule_ok`   -- may a keep/drop rule compare this? Only a single decoded
+                   value: a scalar, an enum, or one bit of a bitfield.
+    `change_ok` -- may the change trigger watch this? Anything reachable,
+                   including a whole struct, a whole bitfield, or an array --
+                   the trigger compares by value, and `==` on a list or a dict
+                   is exactly the right question there.
+
+    **The walk never descends into an array's item.** A dotted path cannot name
+    one of 35 elements, and silently addressing the first would be a lie the
+    user could not see -- so an array is offered as a change subject (compare
+    the whole list) and nothing inside it is offered at all. This is the one
+    place that limitation is decided; `filters.py` only ever sees paths.
+
+    Paths use the same dotted grammar as the byte view's `leafOffsets`
+    (`Position.Latitude`), so a field is spelt one way across the whole UI.
+    """
+    targets: list[dict[str, Any]] = []
+
+    def emit(path: list[str], node: dict[str, Any], rule_ok: bool) -> None:
+        target: dict[str, Any] = {
+            "path": ".".join(path),
+            "name": path[-1],
+            "kind": node.get("kind", "scalar"),
+            "rule_ok": rule_ok,
+        }
+        for key in ("dtype", "enum", "options", "min", "max", "numeric", "struct",
+                    "item_label", "length"):
+            if key in node:
+                target[key] = node[key]
+        targets.append(target)
+
+    def walk(node: dict[str, Any], path: list[str]) -> None:
+        kind = node.get("kind")
+        if kind == "struct":
+            emit(path, node, rule_ok=False)
+            for child in node.get("fields", []):
+                walk(child, [*path, child["name"]])
+            return
+        if kind == "bitfield":
+            emit(path, node, rule_ok=False)
+            for bit in node.get("bits", []):
+                # A bit IS comparable -- `BitField.to_dict` emits one key per
+                # bit, with enum bits as member names, so `Area.fr` resolves.
+                emit([*path, bit["name"]], bit, rule_ok=True)
+            return
+        if kind == "array":
+            emit(path, node, rule_ok=False)     # watchable, never rule-addressable
+            return
+        emit(path, node, rule_ok=kind in _COMPARABLE)
+
+    for field_node in schema.get("fields", []):
+        walk(field_node, [field_node["name"]])
+    return targets

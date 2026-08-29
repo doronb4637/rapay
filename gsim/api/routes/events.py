@@ -78,11 +78,15 @@ async def events(websocket: WebSocket) -> None:
         # Backfill so a reconnecting client is not missing the current state.
         # Behaviours ride along: they keep firing across a dropped socket, so a
         # client that reconnected without them would show an idle Behaviours
-        # panel while traffic was still going out.
+        # panel while traffic was still going out. Filters likewise -- they keep
+        # dropping messages across a reconnect, and a console that reconnected
+        # without them would show a quiet Received pane with nothing on screen
+        # saying why.
         await websocket.send_json({
             "type": "snapshot",
             "connections": runtime.list(),
             "behaviours": runtime.behaviours.list(),
+            "filters": runtime.filters.list(),
         })
         while True:
             for frame in _coalesce(await _drain(queue)):

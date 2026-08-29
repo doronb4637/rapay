@@ -100,6 +100,7 @@ gsim/
     registry.py                 read-only, namespace-scoped view of the IRS registry
     payloads.py                 form payload -> a built IRS message, ready to encode
     behaviours.py               scheduled sending (periodic, ...) -- GSim-driven, see 10
+    filters.py                  which RECEIVED messages are worth logging at all, see 10d
     runtime.py                  GSim's connection registry, message logs, thread bridge
   api/
     app.py                      FastAPI factory; serves gsim/web/dist at "/" if built
@@ -108,6 +109,7 @@ gsim/
       connections.py             create / edit / delete / start / stop / import (Save-Load)
       messages.py                registry query, form schema, send, log history + clear
       behaviours.py              list / upsert / start / stop / delete schedules
+      filters.py                 list / upsert / arm / disarm / delete received filters
       events.py                  WebSocket: live log + connection-state feed
   web/                         React 18 + Vite 5 + Tailwind v4 + lucide-react
     public/favicon.svg           tab icon (matches the Logo mark)
@@ -115,6 +117,7 @@ gsim/
       App.jsx                    shell: [Connections/Messages] | Inspector | [Sent/Received]
       api.js                     fetch wrapper + WebSocket client (auto-reconnect)
       lib/schema.js               client-side mirror of payloads.py's defaulting rules
+      lib/filterTargets.js        client-side mirror of schema.py's filter_targets
       lib/sessionFile.js          Save/Load envelope: build, parse, browser-download fallback
       components/
         ui.jsx                    shared design-system primitives (Button, Field, Badge, ...)
@@ -127,6 +130,7 @@ gsim/
         ContextMenu.jsx            desktop-style right-click menu + useContextMenu()
         BehavioursPanel.jsx        every active schedule, across every connection
         BehaviourModal.jsx         configure/stop/remove one message's schedule
+        FilterModal.jsx            configure what inbound traffic is worth logging (10d)
         ConnectionModal.jsx        create/edit connection form (hex codes, IPv4 mask)
 ```
 
@@ -563,6 +567,89 @@ positionally, so every surface relationship survives. Accents are *darkened*, no
 on near-black is fine, on white it is not. The two dim steps (`slate-600/500`) are measured against
 white rather than mirrored -- a straight inversion put 600 at 2.56:1, unreadable for timestamps.
 Everything now clears 4.39:1, with sent (7.56) and received (7.68) still distinct hues.
+
+That claim was briefly false and is worth knowing why: the block redefined the 400 and 300 steps of
+each accent but **not the 500 step**, which then fell through to Tailwind's own `#f59e0b` /
+`#10b981` — 1.84:1 and 2.54:1 on the light panel. Not decorative: `BehavioursPanel`'s measured-rate
+readout and the console's dropped-message count are both `text-{amber,emerald}-500` at 10px. Both
+are now defined, and measured **as painted** — they are used at `/90` and `/80`, which composites
+them back toward the background — against `slate-800` as well as `slate-900`, since a rule row and a
+selected log row sit on the raised surface. If you add an accent class at a step this block does not
+list, check it: the fallthrough is silent and only visible in light mode.
+
+### 10d. Received filters: dropping messages without becoming the thing §10c warns about
+
+`core_gateway/filters.py` lets a user say, per inbound message, "log this only when ...": keep/drop
+rules on a field value, and a change trigger (whole message, or one named field). Received only —
+nothing filters the sent direction.
+
+This is in obvious tension with §10c, which records a 60Hz console sampler being reverted, and the
+resolution is the whole design:
+
+> Sampling was **implicit, rate-derived, and unannounced**. Filtering is **user-authored,
+> per-message, and counted.** Every rule carries `hits`, every filter carries `dropped` / `logged` /
+> `dropped_by_change`, and they reconcile: `dropped + logged` is exactly what arrived on that route
+> while the filter was armed. Verified at 1kHz — 8009 dropped + 1 logged against a `sent_count` of
+> 8012, the difference being messages in flight at the sampling instant.
+
+An instrument may not quietly lose signal. It may lose signal a human asked it to lose, while
+saying how much. That is the entire licence, and it is why the counters are load-bearing rather
+than a nicety — the UI shows them on the rule row, the message row, the dialog header and the
+Received pane header, and "Show all" (`POST /api/filters/disarm-all`) disarms everything in one
+click without deleting anything.
+
+**Why it is server-side.** `admits()` is consulted at the top of `_log`, before `next(self._seq)`,
+before `record.received.append`, before the EventBus. Client-side hiding was considered and
+rejected on arithmetic: `LOG_LIMIT` is 2000, which at 1kHz is **two seconds** of history, and the
+pane renders 30 rows — so "only when Len changes" would find the interesting entry already evicted
+by the noise it exists to remove. The feature would fail at exactly the rate that motivates it. The
+cost is accepted and real: **a dropped message is gone**, and disarming reveals new traffic, not the
+past.
+
+Ordering before `next(self._seq)` is deliberate too — a dropped message must not burn a sequence
+number, because the console reads a `seq` gap as loss and this is not loss. (Note when testing:
+`seq` is ONE counter shared across both directions and every connection, so consecutive *received*
+entries are never adjacent anyway; the property has to be isolated by stopping other traffic.)
+
+**A decode failure is never filtered.** `_log` checks `error is None and payload is not None` first:
+an error is exactly what the pane exists to show, and no rule could have been written against a
+payload that does not exist.
+
+Load-bearing rules:
+
+- **Keyed by route** `(connection_name, unit_name, op_code)`, like behaviours; `PUT` is an upsert.
+  `unit_name` is the SENDER's peer name, and the route is resolved with **their** unit code — a
+  received message is decoded under `parse_irs(their_code, ...)`. `GET /api/connections/{n}/incoming`
+  is the inbound counterpart of `/messages` for exactly this reason; it is not the same list
+  relabelled.
+- **Two stages, in this order.** Rules decide whether the message is *interesting* (any matching
+  `drop` rejects; if any `keep` exists, one must match), then the change trigger decides whether it
+  is *new*. Stated verbatim in the dialog, because two keeps and a drop is otherwise a guess.
+- **Clearing the Received log calls `filters.forget()`**, and so does starting a connection. Without
+  it, a link streaming one constant value leaves every change filter holding a matching baseline and
+  the freshly cleared pane sits empty forever — which looks exactly like the filter having broken
+  the console. Clear means start the record over; a record whose first entry is suppressed is not a
+  record.
+- **Paths address `to_dict()`'s real shape**, read out of the codec rather than assumed: a scalar is
+  a number, an **enum is its member NAME** (`"ON"`, so `Flag == 2` silently never matches — the UI
+  offers a dropdown and the API refuses a non-member), a struct and a **bitfield** are both nested
+  dicts (so `Area.fr` resolves), and an array is a list.
+- **Nothing inside an array is rule-addressable.** `Areas.fr` cannot name one of 35 elements.
+  `schema.filter_targets` never descends into an array, `routes/filters.py` rejects such a path with
+  a message naming the enclosing array, and the change trigger covers the case instead by comparing
+  the whole list. This is decided in exactly one place — `filters.py` only ever sees paths.
+- **Counters publish on a 2Hz heartbeat**, never per decision, mirroring `BehaviourEngine`'s. At
+  1kHz a per-drop publish would put the load back on the socket that filtering exists to relieve.
+- **Deleting a connection drops its filters**, and so does editing one (`replace` is
+  delete-then-create, §7) — same rule as behaviours, and for the same reason.
+- **Filters are not written to the session file.** Neither are behaviours; consistency wins.
+
+The console keeps its **per-row Hide** unchanged and deliberately separate: `N hidden` is the
+instant, local, per-opCode mute where the entries still exist, `N dropped` is the server-side rules
+where they do not. Merging them into one "not shown" number would hide the one distinction that
+matters when you are deciding whether what you are looking for can still be recovered. An empty
+Received pane with filters armed says so and links to the dialog — a pane that has gone quiet must
+never be indistinguishable from a dead link.
 
 ### 11a. `ContextMenu`'s dismissal is containment-checked, not capture-raced
 

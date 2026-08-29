@@ -73,6 +73,22 @@ export const api = {
   stopBehaviour: (id) => request(`/api/behaviours/${id}/stop`, { method: 'POST' }),
   deleteBehaviour: (id) => request(`/api/behaviours/${id}`, { method: 'DELETE' }),
 
+  // Received filters: which inbound messages are worth logging at all. Upsert
+  // keyed by (connection, unit_name, opCode) like behaviours -- one filter per
+  // inbound route, because two would contradict rather than compose.
+  filters: () => request('/api/filters'),
+  setFilter: (connectionName, body) =>
+    request(`/api/connections/${connectionName}/filters`, { method: 'PUT', body: JSON.stringify(body) }),
+  armFilter: (id) => request(`/api/filters/${id}/arm`, { method: 'POST' }),
+  disarmFilter: (id) => request(`/api/filters/${id}/disarm`, { method: 'POST' }),
+  disarmAllFilters: () => request('/api/filters/disarm-all', { method: 'POST' }),
+  deleteFilter: (id) => request(`/api/filters/${id}`, { method: 'DELETE' }),
+  // What a connection can RECEIVE -- keyed by each PEER's unit code, where
+  // `messages()` above is keyed by ours. Genuinely a different query, not the
+  // same list relabelled.
+  incoming: (id, unitName) =>
+    request(`/api/connections/${id}/incoming${query({ unit_name: unitName })}`),
+
   // Filesystem, for the in-app picker used when no native dialog exists
   // (`--server` + browser tab). The server browses because the browser refuses
   // to hand over real paths, and real paths are exactly what core needs.

@@ -10,20 +10,24 @@ swappable and greppable from one directory.
     schema.py      IRS message class -> JSON form schema
     registry.py    namespace-scoped read-only view of the IRS registry
     payloads.py    form payload -> a built IRS message, ready to encode
+    filters.py     which RECEIVED messages are worth logging at all
     runtime.py     GSim's connection registry, logs, and thread bridge
 """
 from .bootstrap import CORE_ROOT, ensure_core_importable
+from .filters import ACTIONS, EQUALITY_OPERATORS, MODES, OPERATORS, FilterSet
 from .payloads import Prepared, prepare_message
 from .registry import (
     IRSAmbiguousError, IRSDataError, IRSNotFoundError,
-    known_unit_codes, list_messages, message_schema, resolve_route,
+    filter_targets, known_unit_codes, list_messages, message_schema, resolve_route,
 )
 from .runtime import GSimRuntime, get_runtime
 
 __all__ = [
     "CORE_ROOT", "ensure_core_importable",
+    "ACTIONS", "EQUALITY_OPERATORS", "MODES", "OPERATORS", "FilterSet",
     "Prepared", "prepare_message",
     "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
-    "known_unit_codes", "list_messages", "message_schema", "resolve_route",
+    "filter_targets", "known_unit_codes", "list_messages", "message_schema",
+    "resolve_route",
     "GSimRuntime", "get_runtime",
 ]
