@@ -224,7 +224,18 @@ class Connection(ABC):
         atexit.register(self.close)
 
     async def _startup_all(self) -> None:
-        await self._do_start()
+        index = 0
+        while True:
+            try:
+                await self._do_start()
+                return
+            except ConnectionRefusedError as exc:
+                if getattr(exc, 'winerror', None) != 1225:
+                    raise exc
+                index += 1
+                logger.info(f"Server refused connection trying to reconnect, time: {index}")
+                await asyncio.sleep(1)
+
 
     def close(self, timeout: float | int | None = 5.0) -> None:
         """
