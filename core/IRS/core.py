@@ -40,6 +40,10 @@ class ArrayField(BaseField):
         return array
 
     def to_bytes(self, writer: BinaryWriter, value: list[Any]) -> None:
+        if isinstance(self.length, int) and len(value) != self.length:
+            raise ValueError(
+                f"{getattr(self, '_name', '<array>')!r} holds {len(value)} items but is "
+                f"declared as exactly {self.length}")
         for item in value:
             self.baseType.to_bytes(writer, item)
 
@@ -52,7 +56,9 @@ class ArrayField(BaseField):
     def fill(self) -> list[Any]:
         if self.length is None or isinstance(self.length, str):
             return []
-        return [self.baseType.fill()] * self.length
+        if isinstance(self.baseType, Structure):
+            return [type(self.baseType)().fill() for _ in range(self.length)]
+        return [self.baseType.fill() for _ in range(self.length)]
 
 class MessageMeta(type):
     def __new__(cls, name: str, bases: tuple, namespace: dict) -> 'MessageMeta': # TODO change to Self
@@ -85,7 +91,8 @@ class MessageMeta(type):
                     field = field_type()
                     field._name = field_name
                     fields_list.append(field)
-
+                else:
+                    raise TypeError(f"{name}.{field_name}: annotated {field_type!r} with no Type/Size")
         namespace['_fields_'] = tuple(fields_list)
         namespace['__slots__'] = tuple(annotations.keys())
         return type.__new__(cls, name, bases, namespace)
@@ -109,7 +116,13 @@ class Structure(BaseField, metaclass=MessageMeta):
             super().__setattr__(name, value)
             return
         if isinstance(expected_type, type) and issubclass(expected_type, IntEnum):
-                expected_type = expected_type | int | str
+            if value is not None and not isinstance(value, expected_type):
+                try:
+                    expected_type(value) if isinstance(value, int) else expected_type[value]
+                except (KeyError, ValueError):
+                    raise TypeError(f"{self.__class__.__name__}.{name} expects a "
+                                    f"{expected_type.__name__} member, name, value, or None, "
+                                    f"got {value!r}.") from None
         elif not is_bearable(value, expected_type):
             raise TypeError(f"{self.__class__.__name__}.{name} expects {expected_type}, got {type(value).__name__}.")
         super().__setattr__(name, value)
@@ -147,8 +160,18 @@ class Structure(BaseField, metaclass=MessageMeta):
     def fill(self) -> 'Structure':
         """Explicitly fills uninitialized fields with safe default values."""
         for field in self.__class__._fields_:
+            # Does the class already have this field initialized?
             if not hasattr(self, field._name):
-                object.__setattr__(self, field._name, field.fill())
+                value = type(field)().fill() if isinstance(field, Structure) else field.fill()
+                object.__setattr__(self, field._name, value)
+                continue
+            value = getattr(self, field._name)
+            if isinstance(value, Structure):
+                value.fill()
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Structure):
+                        item.fill()
         return self
 
     def _format_repr(self, indent_level: int = 0) -> str:

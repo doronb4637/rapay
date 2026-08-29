@@ -40,7 +40,7 @@ from core.IRS.irs_parser import (
 #: core -- nothing above this package is allowed to reach into IRS directly.
 __all__ = [
     "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
-    "list_messages", "message_schema", "known_unit_codes",
+    "list_messages", "message_schema", "resolve_route", "known_unit_codes",
 ]
 
 from .schema import describe_message
@@ -67,19 +67,25 @@ def list_messages(unit_code: int, namespaces: Sequence[str] | None = None) -> li
     ]
 
 
-def message_schema(unit_code: int, op_code: int,
-                   namespaces: Sequence[str] | None = None) -> dict[str, Any]:
-    """The full recursive form schema for one message. Raises `KeyError` with a
-    UI-presentable message when the route is not registered.
+def resolve_route(unit_code: int, op_code: int,
+                  namespaces: Sequence[str] | None = None) -> tuple[type, str | None]:
+    """`(message class, namespace)` for one route -- everything `message_schema`
+    does before it describes a single field.
 
-    `IRSAmbiguousError` is deliberately NOT converted: "this route means two
-    different things and you did not say which" is a 409, not a 404, and the
-    route layer needs to tell them apart.
+    Split out because the SEND path needs only this. The recursive field walk
+    exists to tell the Inspector which widgets to draw; building the whole thing
+    to read two strings off it was the bulk of the work on every send and every
+    behaviour tick.
+
+    Raises `KeyError` with a UI-presentable message when the route is not
+    registered. `IRSAmbiguousError` is deliberately NOT converted: "this route
+    means two different things and you did not say which" is a 409, not a 404,
+    and the route layer needs to tell them apart.
     """
     try:
         # Resolution, not listing: this goes through the parser so an ambiguous
-        # route raises IRSAmbiguousError here rather than quietly rendering a
-        # form for whichever module happened to be found first.
+        # route raises IRSAmbiguousError here rather than quietly answering with
+        # whichever module happened to be found first.
         message_class = get_message_class(unit_code, op_code, namespaces)
     except IRSNotFoundError as exc:
         raise KeyError(str(exc)) from exc
@@ -89,13 +95,22 @@ def message_schema(unit_code: int, op_code: int,
             f"unit {unit_code} has no message registered for opCode "
             f"0x{op_code:04X}; known: {known}"
         )
-    schema = describe_message(message_class, unit_code, op_code)
-    schema["namespace"] = next(
-        (namespace
-         for route_op_code, _message_cls, namespace in list_routes(unit_code, namespaces)
+    namespace = next(
+        (name
+         for route_op_code, _message_cls, name in list_routes(unit_code, namespaces)
          if route_op_code == op_code),
         None,
     )
+    return message_class, namespace
+
+
+def message_schema(unit_code: int, op_code: int,
+                   namespaces: Sequence[str] | None = None) -> dict[str, Any]:
+    """The full recursive form schema for one message -- what the Inspector
+    renders its form from. Same error contract as `resolve_route`."""
+    message_class, namespace = resolve_route(unit_code, op_code, namespaces)
+    schema = describe_message(message_class, unit_code, op_code)
+    schema["namespace"] = namespace
     return schema
 
 

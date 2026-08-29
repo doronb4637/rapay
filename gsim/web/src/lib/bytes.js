@@ -20,8 +20,11 @@
 import { leafOffsets } from './schema';
 
 /** Enums arrive as a NUMBER while composing and as the member NAME when
- *  inspecting a received message (`EnumField.to_dict` returns `value.name`).
- *  Both have to reach `struct` as the number. */
+ *  inspecting a received message (`EnumField.to_dict` returns `value.name`), or
+ *  as null when unset -- an enum with no 0 member, which `EnumField.to_bytes`
+ *  writes as 0. All three have to reach `struct` as the number, which is why the
+ *  `Number(value)` fallback below is load-bearing rather than incidental:
+ *  `Number(null)` is 0, exactly what goes on the wire. */
 function enumValue(value, options = []) {
   if (typeof value === 'number') return value;
   const byName = options.find((option) => option.name === value);

@@ -20,9 +20,8 @@ from fastapi import APIRouter, HTTPException, status
 from gsim.api.models import BehaviourRequest
 from gsim.core_gateway import (
     IRSAmbiguousError,
-    build_payload,
     get_runtime,
-    message_schema,
+    prepare_message,
 )
 
 router = APIRouter(prefix="/api", tags=["behaviours"])
@@ -43,11 +42,13 @@ def list_behaviours() -> list[dict[str, Any]]:
 def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, Any]:
     """Create or replace the behaviour on one route.
 
-    The payload is normalised HERE, once, by the same `build_payload` the manual
-    send path uses -- zero-filling absent fields and reconciling counted-array
-    lengths. Doing it at configure time rather than per tick means a payload that
-    could never encode fails in this request, where the modal can show why,
-    instead of logging the identical error forever on a worker thread.
+    The payload is normalised HERE, once, by the same `prepare_message` the manual
+    send path uses -- letting IRS's `fill()` supply every absent field and
+    reconciling counted-array lengths. Doing it at configure time rather than per
+    tick means a payload that could never encode fails in this request, where the
+    modal can show why, instead of logging the identical error forever on a worker
+    thread. What is stored is the message's `to_dict()` form, which feeds straight
+    back into `prepare_message` on every tick.
     """
     runtime = get_runtime()
     try:
@@ -57,13 +58,18 @@ def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, 
 
     try:
         # Scoped by destination, exactly as `POST /send` is: the same opcode may
-        # mean different layouts on two links.
-        schema = message_schema(record.own_unit_code, request.op_code,
-                                record.structures_for(request.unit_name))
+        # mean different layouts on two links. Building the real message here is
+        # also the validation -- a payload that could never encode fails now.
+        prepared = prepare_message(record.own_unit_code, request.op_code,
+                                   record.structures_for(request.unit_name),
+                                   request.payload)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        # A value IRS refuses, e.g. a number naming no member of an enum.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     if request.unit_name not in record.peers():
         raise HTTPException(
@@ -78,9 +84,9 @@ def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, 
             unit_name=request.unit_name,
             op_code=request.op_code,
             kind=request.kind,
-            payload=build_payload(schema, request.payload),
+            payload=prepared.payload,
             interval=request.interval,
-            message_name=schema.get("name"),
+            message_name=prepared.name,
             enabled=request.enabled,
         )
     except ValueError as exc:

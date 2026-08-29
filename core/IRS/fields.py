@@ -31,8 +31,8 @@ class Field(BaseField):
     def to_dict(self, value: Any) -> Any:
         return value
 
-    def fill(self) -> int:
-        if self.packer.format in Floats:
+    def fill(self) -> int | float:
+        if self.packer.format[-1] in Floats:
             return 0.0
         return 0
 
@@ -44,28 +44,41 @@ class EnumField(BaseField):
         enum_fmt = getattr(enum_class, '_baseType_', Byte)
         self.packer = get_packer(enum_fmt)
 
-    def from_bytes(self, reader: BinaryReader, instance: Any = None) -> IntEnum:
+    def from_bytes(self, reader: BinaryReader, instance: Any = None) -> IntEnum | None:
         packer = self.packer
         value = packer.unpack_from(reader.data, reader.offset(packer.size))[0]
-        try:
-            # value2member_map is identical to self.enum_class(value) but works much faster
-            return self.enum_class._value2member_map_[value]
-        except (KeyError, ValueError):
-            raise RuntimeError(f"Invalid Enum: {value}")
-        except Exception as e:
-            raise
+        # value2member_map is identical to self.enum_class(value) but works much faster
+        member = self.enum_class._value2member_map_.get(value)
+        if member is not None:
+            return member
+        if value == 0:
+            return None
+        raise ValueError(
+            f"{self.enum_class.__qualname__}: {value} is not a defined member")
 
     def to_bytes(self, writer: BinaryWriter, value: Any) -> None:
-        raw_val = value.value if isinstance(value, self.enum_class) else value
+        if value is None:
+            raw_val = 0
+        elif isinstance(value, self.enum_class):
+            raw_val = value.value
+        else:
+            raw_val = value
         writer.buffer += self.packer.pack(raw_val)
 
-    def from_dict(self, value: str | int) -> IntEnum:
+    def from_dict(self, value: str | int | None) -> IntEnum | None:
+        if value is None:
+            return None
         return self.enum_class[value] if isinstance(value, str) else self.enum_class(value)
 
-    def to_dict(self, value: Any) -> str:
-        return value.name if isinstance(value, self.enum_class) else str(value)
+    def to_dict(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, self.enum_class):
+            return value.name
+        return self.enum_class(value).name
 
-    def fill(self) -> int:
+    def fill(self) -> IntEnum | None:
+        """None is the deliberate to_bytes writes it as 0"""
         try:
             return self.enum_class(0)
         except (KeyError, ValueError):

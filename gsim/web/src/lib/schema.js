@@ -1,11 +1,13 @@
 /**
- * Client-side mirror of gsim/core_gateway/payloads.py.
+ * Client-side mirror of IRS's own `fill()` (core/IRS: `Field.fill`,
+ * `EnumField.fill`, `ArrayField.fill`, `Structure.fill`), which is what the
+ * server defaults a payload with -- see gsim/core_gateway/payloads.py.
  *
  * The server re-normalises every payload before encoding, so this is not a
  * trust boundary -- it exists so the form starts out fully populated (every
  * input controlled from first render) and so the user can see exactly what
- * will be sent. The two must agree on defaults; if they ever drift, the
- * server wins.
+ * will be sent. The two must agree on defaults; if they ever drift, `fill()`
+ * is the authority.
  */
 
 /** The zero value for one schema node. */
@@ -15,10 +17,12 @@ export function defaultFor(node) {
       return node.numeric === 'float' ? 0.0 : 0;
     case 'enum': {
       const options = node.options ?? [];
-      // Prefer the member whose value is 0 (the conventional UNKNOWN/unset
-      // member); EnumField.from_bytes rejects any value with no member.
+      // The member whose value is 0 (the conventional UNKNOWN/unset member), or
+      // null when the enum declares none -- matching `EnumField.fill()`, which
+      // leaves it explicitly UNSET rather than guessing at a member the spec
+      // never nominated. It reaches the wire as 0 either way.
       const zero = options.find((option) => option.value === 0);
-      return zero ? zero.value : options[0]?.value ?? 0;
+      return zero ? zero.value : null;
     }
     case 'struct':
       return Object.fromEntries(node.fields.map((f) => [f.name, defaultFor(f)]));

@@ -38,6 +38,7 @@ from core.connections.manager import ConnectionManager
 
 from . import registry as message_registry
 from .behaviours import BehaviourEngine
+from .payloads import prepare_message
 
 #: Per-connection ring buffers. Bounded so a chatty link cannot grow without
 #: limit; the UI streams live events and only re-reads these on (re)connect.
@@ -487,18 +488,26 @@ class GSimRuntime:
     # -- messaging -------------------------------------------------------
     def send(self, connection_name: str, unit_name: str, op_code: int,
              payload: dict[str, Any]) -> dict[str, Any]:
-        """Encode + send, and log it. `payload` is a plain dict: core's
-        `_encode` hands any non-`bytes` to `irs_to_bytes`, which calls
-        `message_class.from_dict()` itself -- so no IRS object is built here."""
+        """Normalise, encode, send, and log it.
+
+        The payload is built into a real IRS message here rather than handed to
+        core as a dict. `_encode` passes any non-`bytes` straight to
+        `irs_to_bytes`, which calls `message.to_bytes()` on a message and does its
+        own route lookup + `from_dict` on a dict -- so building it once here is
+        also what stops that work happening twice per send.
+
+        What is logged is the message's own `to_dict()`, which is why a sent entry
+        spells enums as member names exactly as a received one always has.
+        """
         record = self.get(connection_name)
         # Scoped by the DESTINATION: our own unit code is the same for every
         # peer, so it alone cannot say which link's layout this opcode means.
         structures = record.structures_for(unit_name)
-        schema = message_registry.message_schema(record.own_unit_code, op_code, structures)
-        record.unit.send_message(payload, op_code, unit_name)
+        prepared = prepare_message(record.own_unit_code, op_code, structures, payload)
+        record.unit.send_message(prepared.message, op_code, unit_name)
         entry = self._log(record, "sent", record.name, record.own_unit_code,
-                          op_code, schema["name"], payload, None,
-                          namespace=schema.get("namespace"))
+                          op_code, prepared.name, prepared.payload, None,
+                          namespace=prepared.namespace)
         return entry.as_dict()
 
     # -- internals -------------------------------------------------------

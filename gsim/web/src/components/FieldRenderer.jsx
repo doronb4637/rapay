@@ -248,6 +248,22 @@ function resolveEnumValue(value, options) {
   return Number.isFinite(asNumber) ? asNumber : '';
 }
 
+/**
+ * Whether "unset" is a real choice for this enum -- true when it declares no 0
+ * member. IRS's `EnumField.fill()` leaves such a field `None` rather than
+ * nominating a member the specification never did, and writes it to the wire as
+ * 0; without an option for it the dropdown could show the state but never
+ * return to it.
+ */
+function hasUnsetOption(options = []) {
+  return !options.some((option) => option.value === 0);
+}
+
+/** A <select>'s string value back to a payload value; '' is the unset option. */
+function enumChoice(raw) {
+  return raw === '' ? null : parseInt(raw, 10);
+}
+
 /* ------------------------------------------------------------------ */
 /* Enums -> styled <select>                                            */
 /* ------------------------------------------------------------------ */
@@ -285,8 +301,9 @@ function EnumField({ node, value, onChange, readOnly, path = [] }) {
           value={resolved}
           className="!px-2 !py-1"
           {...focusProps}
-          onChange={(event) => onChange(parseInt(event.target.value, 10))}
+          onChange={(event) => onChange(enumChoice(event.target.value))}
         >
+          {hasUnsetOption(node.options) && <option value="">— unset —</option>}
           {node.options.map((option) => (
             <option key={option.value} value={option.value}>
               {option.name} · {option.value}
@@ -647,13 +664,14 @@ function CompactArrayItem({ node, value, onChange, onRemove, readOnly, index, pa
           value={resolved}
           title={node.enum}
           {...focusProps}
-          onChange={(event) => onChange(parseInt(event.target.value, 10))}
+          onChange={(event) => onChange(enumChoice(event.target.value))}
           className={cx(
             'rounded border border-slate-700 bg-slate-950/60 py-0.5 pl-1 pr-5 text-[10px] text-slate-100',
             'cursor-pointer appearance-none transition-colors hover:border-slate-600',
             'focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/40',
           )}
         >
+          {hasUnsetOption(node.options) && <option value="">—</option>}
           {node.options.map((option) => (
             <option key={option.value} value={option.value}>
               {option.name}

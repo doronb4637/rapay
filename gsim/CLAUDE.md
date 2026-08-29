@@ -27,14 +27,27 @@ a decision to make unilaterally.
 > fault was inside `core/IRS`'s own module identity and produced two GSim-visible symptoms --
 > `IRSNotFoundError` against an empty registry, and "No widget for this IRS field type" for every
 > field, because `schema.py`'s `isinstance` ladder was testing against the other copy's classes.
-> Neither was fixable from `gsim/`. Everything GSim needs from `core` is obtained by importing it and
+> Neither was fixable from `gsim/`.
+>
+> Used a third time, also with explicit user authorisation: fixing `IRS`'s `fill()` and the codec
+> edges around it (`core/IRS/core.py`, `fields.py`, `bitfields.py`, plus a new
+> `core/tests/test_irs_fill.py`), so GSim could delete its own copy of the defaulting rules.
+> `fill()` had no callers and no coverage — GSim was its first real consumer, which is what
+> surfaced the faults: a fixed array of structs filled with N references to one CLASS-level object
+> (editing one element changed every message of that type built afterwards, process-wide);
+> `fill()` never descending into a present-but-partial child; `None` being the intended "unset" for
+> a no-0-member enum while every other method in the codec rejected it; enum attributes never
+> validated at all; and a field with no wire format silently vanishing from `_fields_`. None of it
+> was reachable from `gsim/`.
+
+Everything GSim needs from `core` is obtained by importing it and
 wrapping it, never by changing it. This is enforced structurally (see Architecture ยง1) and should be
 checked mechanically before any commit:
 
 ```bash
 grep -rn "^from connections\|^import connections\|^from IRS\|^import IRS\|^from tools\|^import tools" gsim --include=*.py | grep -v core_gateway
 # must print nothing
-git status --porcelain core   # must be empty / show only pre-existing untracked scaffolding
+git status --porcelain core   # only the authorised changes above; nothing new without asking
 ```
 
 ## Commands
@@ -85,7 +98,7 @@ gsim/
     bootstrap.py                puts <repo-root> on sys.path so `core...` resolves (must import first)
     schema.py                   IRS message class -> JSON form schema (recursive)
     registry.py                 read-only, namespace-scoped view of the IRS registry
-    payloads.py                 zero-fill + counted-array sync before encoding
+    payloads.py                 form payload -> a built IRS message, ready to encode
     behaviours.py               scheduled sending (periodic, ...) -- GSim-driven, see 10
     runtime.py                  GSim's connection registry, message logs, thread bridge
   api/
@@ -202,27 +215,45 @@ distinction `payloads.py` (ยง4) has to reconcile on the way out.
 
 ### 4. Payload normalization: `payloads.py`
 
-Two concrete `core`/`IRS` behaviors make this module mandatory, both confirmed against the real
-encoder (not assumed from reading the source):
+**IRS's `fill()` owns absence.** Every field nobody set gets its safe default at any depth, from
+the IRS field objects themselves. GSim used to carry a second copy of that table (`_default_for`,
+walking the JSON form schema) written before `Message.fill()` existed; it is gone.
 
-1. **A missing field is not a clean error.** `Structure.from_dict` only assigns keys that are
-   present, leaving the slot unset; `to_bytes` then does `getattr(target, field.name)` and raises a
-   bare `AttributeError: 'SetGeneralFlag' object has no attribute 'value'` from inside `IRS`.
-   `BitField.from_dict` is stricter still (`data[name]` -> `KeyError`). `payloads.normalise()`
-   zero-fills every absent/blank field recursively, which is what makes "empty fields default to 0"
-   real rather than aspirational.
-2. **A counted array's length field is not maintained by `IRS`.** `ArrayField.to_bytes` iterates the
-   list and never writes the count; `from_bytes` reads exactly `getattr(instance, count_field)`
-   items on the way back in. A mismatch raises nothing on send -- the receiver just mis-parses.
-   `normalise()`'s second pass overwrites the counted field with `len()` of its sibling array after
-   every other field has been materialized (order matters: the count field must exist before it can
-   be overwritten).
+`prepare_message(unit_code, op_code, namespaces, raw)` resolves the route once
+(`registry.resolve_route` -- **not** `message_schema`, which builds a recursive widget description
+the send path has no use for), runs the small pre-pass below, then
+`message_class.from_dict(...).fill()`. It returns the built message, its name, its namespace, and
+its `to_dict()` form for the log. `runtime.send()` and `PUT /behaviours` are its only callers.
 
-`build_payload(schema, raw)` is the public entry point `gsim/api/routes/messages.py` calls before
-`runtime.send()`. Nothing converts the resulting dict into an IRS object: `irs_to_bytes` already
-accepts a plain dict and calls `message_class.from_dict()` itself, and `Connection._encode` passes
-any non-`bytes` value straight through to it -- so the Inspector's form state *is* the wire payload,
-with zero serialization step in GSim.
+Three things stay GSim's, because IRS neither can nor should decide them:
+
+1. **Blanks.** An untouched input submits `""`, which is not "unset" to anything in IRS -- it
+   reaches `struct.pack` and raises `required argument is not an integer`. Dropping it lets
+   `fill()` treat the field as absent, which is what the user meant.
+2. **Fixed-array size.** A `[Data, 9]` field given 3 items is a short frame, and core now rejects
+   it outright (`ArrayField.to_bytes`). GSim pads and truncates instead: a form should be forgiving
+   about how many rows you happened to fill in.
+3. **Counted-array lengths.** `ArrayField.to_bytes` never writes the count and `from_bytes` reads
+   exactly `getattr(instance, count_field)` items, so a disagreement raises nothing on send -- the
+   receiver just mis-parses. The count is DERIVED from the list, never taken from the form. This
+   one cannot be fixed in IRS: `to_bytes(writer, value)` has no access to the sibling holding it.
+
+**An enum with no `0` member is left explicitly unset (`None`), not guessed at.** That is what
+`EnumField.fill()` returns, `to_bytes` writes it as `0`, `from_bytes` reads a `0` back as `None`
+(reachable only when the enum declares no `0` member), and `to_dict`/`from_dict` pass it through.
+`web/src/lib/schema.js` mirrors this and `FieldRenderer.jsx` offers an "— unset —" option so the
+state is reachable in the form, not just displayable.
+
+A NON-zero value no member defines is a different thing -- a sender contradicting the shared
+specification -- and still raises (`ValueError`, wrapped by `Connection._decode` into
+`IRSDataError`), so the message is dropped and logged. Bitfield enum *bits* differ deliberately:
+they decode to `None` with a deduped warning instead, because `BitField.from_bytes` stores the
+whole packed integer without inspecting any bit, so a raise there would come from a property read
+long after the decode.
+
+A built message -- not a dict -- is handed to `send_message`: `Connection._encode` passes any
+non-`bytes` straight to `irs_to_bytes`, which calls `message.to_bytes()` on a message but repeats
+the route lookup and `from_dict` on a dict.
 
 ### 5. `runtime.py`: GSim's own registry, logs, and the thread bridge
 
@@ -243,6 +274,11 @@ with zero serialization step in GSim.
   the peer's **configured name**. Core's callback signature is `callback(message)` with no route
   context, so this closure is the only place that name is available -- it is what lets the console
   label a received message with the sender's name from the config, not our own connection's name.
+- **`LogEntry.payload`** -- always the message's own `to_dict()`, in BOTH directions, so a sent
+  entry spells enums as member names (`"ON"`) exactly as a received one always has. The two panes
+  used to disagree, sent being the raw numeric form the browser submitted. `resolveEnumValue`
+  (`FieldRenderer.jsx`) and `enumValue` (`lib/bytes.js`) normalise both shapes, so this is not a
+  client concern -- but `GET /api/logs/sent` and stored behaviour payloads carry the names now.
 - **`LogEntry.unit_code`** -- the unit code a log entry's layout is registered under: our own on
   send, the peer's on receive. The Inspector's "inspect" mode fetches the schema by this code
   (`GET /api/schema/{unit_code}/{op_code}`), never by the connection's own code, because a received
@@ -350,12 +386,11 @@ find-and-replace across class strings.
 nested structs and array items, so a struct inside an array inside a struct needs no special case at
 any depth. State flows by composition (`value` + `onChange(next)`, narrowed at each level) rather
 than by field paths, which is what makes the form's root state *already be* the exact payload dict
-`api.send()` submits -- no serialization step on the client either, mirroring ยง4's dict-in/dict-out
-design on the server side. `lib/schema.js`'s `defaultFor`/`defaultPayload` are a client-side mirror
-of `payloads.normalise()`'s zero-fill rules, kept only so the form starts fully populated and
-controlled from first render -- the server re-normalizes every payload before encoding regardless,
-so this mirror is not a trust boundary and the two must simply agree, with the server as tiebreaker
-if they ever drift.
+`api.send()` submits -- no serialization step on the client either, mirroring ยง4's dict-in design
+on the server side. `lib/schema.js`'s `defaultFor`/`defaultPayload` are a client-side mirror of
+IRS's own `fill()`, kept only so the form starts fully populated and controlled from first render
+-- the server re-normalizes every payload before encoding regardless, so this mirror is not a trust
+boundary and the two must simply agree, with `fill()` as tiebreaker if they ever drift.
 
 `Console.jsx` renders two stacked panes, Sent above Received, each with its own independent
 hidden-opCode set. Keeping the sets separate matters because this project's IRS layouts routinely

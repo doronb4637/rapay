@@ -1,3 +1,4 @@
+import logging
 import struct
 from enum import IntEnum, EnumMeta
 from typing import Any, Callable
@@ -6,27 +7,39 @@ from .buffers import BinaryReader, BinaryWriter, get_packer
 from .fields import BaseField
 from .constants import *
 
+logger = logging.getLogger("IRS.bitfields")
 
-# TODO make sure EDIAN is a namespace wide constant and if so delete the use of endian var in this function
-# Get the endian immediately from module.
-def baseType(byte_size: int, endian: str | None = None) -> Callable[[type], type]:
+_warned_bits: set[tuple[str, str, int]] = set()
+
+
+def _warn_once(enum_class: type[IntEnum], field_name: str, value: int) -> None:
+    key = (enum_class.__qualname__, field_name, value)
+    if key in _warned_bits:
+        return
+    _warned_bits.add(key)
+    logger.warning(
+        "%s.%s: %d is not a defined member of %s -- reading as None",
+        enum_class.__qualname__, field_name, value, enum_class.__qualname__)
+
+
+def baseType(byte_size: int) -> Callable[[type], type]:
     """Give an IntEnum or BitField its wire size and byte order.
 
     `endian` defaults to whatever the declaring module declared (`ENDIAN = bigEndian`
     at the top of a structures file).
     """
     def wrapper(cls: EnumMeta | BitFieldMeta) -> EnumMeta | BitFieldMeta:
-        resolved_endian = module_endian(cls.__module__) if endian is None else endian
+        endian = module_endian(cls.__module__)
         fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(byte_size, UInt8) if isinstance(byte_size, int) else byte_size
         if isinstance(cls, BitFieldMeta):
-            cls._packer_ = get_packer(resolved_endian + fmt)
+            cls._packer_ = get_packer(endian + fmt)
             # Safety Enum Configurations
             allocated_bits = cls._packer_.size * 8
             actual_bits = sum(bits for _, _, bits in cls._fields_)
             if actual_bits > allocated_bits: raise ValueError(f"BitField '{cls.__name__}' defines {actual_bits} bits, "
                     f"but its @baseType only allocates {allocated_bits} bits.")
         else:
-            cls._baseType_ = resolved_endian + fmt
+            cls._baseType_ = endian + fmt
         return cls
     return wrapper
 
@@ -36,16 +49,13 @@ def _make_bit_property(name: str, shift: int, bits: int, enum_class: type[IntEnu
 
     def getter(self):
         value = (self._value >> shift) & mask
-        if enum_class:
-            # value2member_map is identical to self.enum_class(value) but works much faster
-            try:
-                return enum_class._value2member_map_[value]
-            except (KeyError, ValueError):
-                raise Warning(f"Enum '{enum_class.name}', Value '{value}' is not defined.")
-                return None
-            except Exception as e:
-                raise
-        return value
+        if enum_class is None:
+            return value
+        # value2member_map is identical to enum_class(value) but works much faster
+        member = enum_class._value2member_map_.get(value)
+        if member is None and value != 0:
+            _warn_once(enum_class, name, value)
+        return member
 
     def setter(self, value):
         if enum_class:
@@ -111,18 +121,21 @@ class BitField(BaseField, metaclass=BitFieldMeta):
         enum_map = getattr(cls, '__enum_map__', {})
 
         for name, _, _ in cls._fields_:
-            val = data[name]  # Strict: Raises KeyError if missing
-            if name in enum_map:
-                val = enum_map[name][val].value if isinstance(val, str) else enum_map[name](val).value
+            val = data.get(name)
+            if val is None:
+                continue
+            # TODO make sure the 2 line below are useless
+            # if name in enum_map:
+            #     val = enum_map[name][val].value if isinstance(val, str) else enum_map[name](val).value
             setattr(instance, name, val)
         return instance
 
-    def to_dict(self, value: Any = None) -> dict:
+    def to_dict(self, value: Any = None) -> dict: # TODO change anno : Any to : Self
         target = value if value is not None else self
         result = {}
         for name, _, _ in self.__class__._fields_:
             result[name] = getattr(target, name)
-            if name in self.__class__.__enum_map__:
+            if name in self.__class__.__enum_map__ and result[name] is not None:
                 result[name] = result[name].name
         return result
 

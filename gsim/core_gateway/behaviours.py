@@ -63,9 +63,10 @@ class Behaviour:
     op_code: int
     kind: str
     payload: dict[str, Any]
-    #: Already normalised by `build_payload` at configure time, exactly as the
+    #: Already normalised by `prepare_message` at configure time, exactly as the
     #: manual send path does -- so a tick cannot fail on a missing field that
-    #: the Inspector would have zero-filled.
+    #: IRS's `fill()` would have supplied. Held in `to_dict()` form, which feeds
+    #: straight back into `prepare_message` on every tick.
     interval: float = 1.0
     message_name: str | None = None
     enabled: bool = True

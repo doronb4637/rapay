@@ -15,7 +15,6 @@ from gsim.core_gateway import (
     IRSAmbiguousError,
     IRSDataError,
     IRSNotFoundError,
-    build_payload,
     get_runtime,
     list_messages,
     message_schema,
@@ -106,41 +105,36 @@ def message_form_schema(connection_name: str, op_code: int,
 
 @router.post("/send")
 def send_message(connection_name: str, request: SendMessageRequest) -> dict[str, Any]:
-    """Normalise the form payload, then send it.
+    """Send one composed message.
 
-    `build_payload` is what makes the Inspector's rules real: absent fields
-    become 0 (otherwise IRS raises a bare `AttributeError` from inside
-    `to_bytes`) and every counted array's length field is reconciled with its
-    list (otherwise the receiver silently mis-parses).
+    Normalisation lives in `runtime.send` (via `prepare_message`) rather than
+    here: it resolves the route ONCE and builds the IRS message the encoder
+    actually needs, so this route is only the HTTP error mapping.
     """
-    record = _record(connection_name)
+    _record(connection_name)
     try:
-        # Scoped by destination: the same opcode may mean different layouts on
-        # two links, and only the peer says which.
-        schema = message_schema(record.own_unit_code, request.op_code,
-                                record.structures_for(request.unit_name))
+        return get_runtime().send(connection_name, request.unit_name, request.op_code,
+                                  request.payload)
     except KeyError as exc:
+        # No layout registered for this route -- the request named an opcode this
+        # link's structures do not define.
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    payload = build_payload(schema, request.payload)
-    try:
-        return get_runtime().send(connection_name, request.unit_name, request.op_code, payload)
-    except ValueError as exc:
-        # Unknown unit name for this connection.
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ConnectionError as exc:
         # No live peer on that unit yet (e.g. UDP server before first inbound).
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except (IRSDataError, IRSNotFoundError) as exc:
-        # The payload core actually got couldn't be encoded, or no layout
-        # resolved for this route -- reported rather than left as a bare 500,
-        # so the toast says what core actually objected to.
+        # The payload core actually got couldn't be encoded -- reported rather
+        # than left as a bare 500, so the toast says what core objected to.
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except RuntimeError as exc:
         # E.g. a receive_only unit (UDP client side never bound to send).
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        # An unknown unit name for this connection, or a value IRS refuses while
+        # the message is being built (a number naming no member of an enum).
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/logs/{direction}")
