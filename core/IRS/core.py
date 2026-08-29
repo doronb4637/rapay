@@ -119,7 +119,7 @@ class Structure(BaseField, metaclass=MessageMeta):
             if value is not None and not isinstance(value, expected_type):
                 try:
                     expected_type(value) if isinstance(value, int) else expected_type[value]
-                except (KeyError, ValueError):
+                except (KeyError, ValueError, TypeError):
                     raise TypeError(f"{self.__class__.__name__}.{name} expects a "
                                     f"{expected_type.__name__} member, name, value, or None, "
                                     f"got {value!r}.") from None

@@ -22,14 +22,17 @@ def _warn_once(enum_class: type[IntEnum], field_name: str, value: int) -> None:
         enum_class.__qualname__, field_name, value, enum_class.__qualname__)
 
 
-def baseType(byte_size: int) -> Callable[[type], type]:
+def baseType(byte_size: int, imposed_endian: str = None) -> Callable[[type], type]:
     """Give an IntEnum or BitField its wire size and byte order.
 
     `endian` defaults to whatever the declaring module declared (`ENDIAN = bigEndian`
     at the top of a structures file).
     """
     def wrapper(cls: EnumMeta | BitFieldMeta) -> EnumMeta | BitFieldMeta:
-        endian = module_endian(cls.__module__)
+        if imposed_endian is None:
+            endian = module_endian(cls.__module__)
+        else:
+            endian = imposed_endian
         fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(byte_size, UInt8) if isinstance(byte_size, int) else byte_size
         if isinstance(cls, BitFieldMeta):
             cls._packer_ = get_packer(endian + fmt)

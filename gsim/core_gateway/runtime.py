@@ -25,6 +25,7 @@ Three things about `core` drive this design:
 """
 from __future__ import annotations
 
+import asyncio
 import itertools
 import threading
 import time
@@ -39,10 +40,20 @@ from core.connections.manager import ConnectionManager
 from . import registry as message_registry
 from .behaviours import BehaviourEngine
 from .payloads import prepare_message
+from .timing import wall_time
 
 #: Per-connection ring buffers. Bounded so a chatty link cannot grow without
 #: limit; the UI streams live events and only re-reads these on (re)connect.
 LOG_LIMIT = 2000
+
+#: EVERY message is published. A 1kHz route is genuinely ~1000 events a second
+#: per direction, and the console has to be able to show that a 1ms schedule is
+#: really firing at 1ms -- a sampled feed makes consecutive rows read as the
+#: sampling period, which is indistinguishable from the scheduler being slow.
+#: What keeps that affordable is BATCHING, not dropping: `api/routes/events.py`
+#: coalesces whatever piled up during one WebSocket write into a single frame,
+#: so the frame rate falls out of how fast the client drains rather than a
+#: constant, and no entry is ever lost on the way.
 
 
 @dataclass
@@ -105,10 +116,29 @@ class EventBus:
             targets = list(self._subscribers)
         for loop, queue in targets:
             try:
-                loop.call_soon_threadsafe(queue.put_nowait, event)
+                loop.call_soon_threadsafe(self._offer, queue, event)
             except RuntimeError:
                 # Loop already closed (client went away mid-publish).
                 self.unsubscribe(queue)
+
+    @staticmethod
+    def _offer(queue, event: dict[str, Any]) -> None:
+        """Enqueue one event, dropping it if the subscriber is behind.
+
+        Runs ON the subscriber's loop, not in the publisher -- `put_nowait` was
+        passed straight to `call_soon_threadsafe` before, so its `QueueFull`
+        surfaced as an 'Exception in callback' traceback on uvicorn's loop for
+        every event after the queue filled, rather than anywhere the publisher
+        could see. A full queue only means the browser is not draining as fast
+        as we publish, which a fast behaviour can genuinely cause; dropping is
+        the correct response and has to be quiet to be useful. Nothing is lost
+        permanently -- the ring buffers are the record, and a client re-syncs
+        from the snapshot + `GET /api/logs/{direction}` backfill.
+        """
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
 
 
 @dataclass
@@ -189,6 +219,43 @@ class ConnectionRecord:
         }
 
 
+@dataclass(frozen=True)
+class PreparedSend:
+    """One resolved route plus its built IRS message, ready to fire N times.
+
+    Built by `GSimRuntime.sender()`. Holding the built message across ticks is
+    safe because nothing mutates it -- `Connection._encode` only calls
+    `to_bytes()` on it (~6us), and the log payload is its `to_dict()` captured
+    at build time. When a per-tick mutator is eventually added (a counter, a
+    timestamp -- the extensibility `behaviours.py` was built around), mutating
+    THIS message in place before `fire()` is precisely the seam it wants; the
+    log payload would then be re-derived per tick and nothing else changes.
+
+    It holds the `ConnectionRecord`, not the connection's name, so a tick does
+    no dictionary lookup and cannot be re-pointed at a connection that was
+    deleted and recreated under the same name. Its validity window is the
+    caller's to manage -- for a behaviour, that is exactly its worker's
+    lifetime, since `_sync` tears the worker down on stop, edit and delete.
+    """
+    runtime: GSimRuntime
+    record: ConnectionRecord
+    unit_name: str
+    op_code: int
+    message: Any
+    message_name: str
+    namespace: str | None
+    payload: dict[str, Any]
+
+    def fire(self) -> LogEntry:
+        """Send it and log it."""
+        self.record.unit.send_message(self.message, self.op_code, self.unit_name)
+        return self.runtime._log(
+            self.record, "sent", self.record.name, self.record.own_unit_code,
+            self.op_code, self.message_name, self.payload, None,
+            namespace=self.namespace,
+        )
+
+
 class GSimRuntime:
     """Process-wide singleton holding every GSim connection."""
 
@@ -206,7 +273,7 @@ class GSimRuntime:
         # entry; see behaviours.py's docstring for why core's own
         # `periodic_sending` is not used here.
         self.behaviours = BehaviourEngine(
-            send=self.send,
+            sender=self.sender,
             is_connection_running=self._is_connection_running,
             publish=self.events.publish,
         )
@@ -412,12 +479,19 @@ class GSimRuntime:
 
     def stop(self, connection_name: str) -> ConnectionRecord:
         record = self.get(connection_name)
-        record.unit.close()
+        # Behaviours are paused BEFORE the transport goes down, matching
+        # `delete()` -- a worker firing into a connection being torn down logs
+        # a spurious failure for every tick in the gap. Closing first made that
+        # gap real: at the old 16ms floor it cost a stray error or two, but a
+        # 1ms schedule books ~1800 of them, which then sit on the behaviour as
+        # `last_error` after a perfectly ordinary stop. `_sync` reads
+        # `is_connection_running`, so `running` has to be false before the call.
         record.running = False
+        self.behaviours.sync_connection(connection_name)
+        record.unit.close()
         # `close()` drops every standing callback (core's `_shutdown_all`), so
         # they are genuinely gone and the next start must put them back.
         record.handlers_installed = False
-        self.behaviours.sync_connection(connection_name)   # pauses them
         self._publish_state(record)
         return record
 
@@ -486,6 +560,39 @@ class GSimRuntime:
             self._conn_records.clear()
 
     # -- messaging -------------------------------------------------------
+    def sender(self, connection_name: str, unit_name: str, op_code: int,
+               payload: dict[str, Any]) -> PreparedSend:
+        """Resolve a route and build its message ONCE, for firing repeatedly.
+
+        This exists because `prepare_message` costs ~160us for a 35-element
+        `ArrayOfAreas` (route lookup + `from_dict` + `fill()` + `to_dict()`),
+        which is a sixth of the entire budget for a 1 ms behaviour -- spent
+        re-deriving a payload that, for `periodic`, cannot have changed. A
+        behaviour worker builds one of these when it starts and fires it every
+        tick; the manual send path builds one and fires it once.
+
+        Deliberately the only new entry point: `send()` below is now written in
+        terms of it, so a scheduled tick and the Send button still travel
+        exactly ONE code path. That identity is the whole reason
+        `behaviours.py` drives its own schedules instead of using core's
+        `periodic_sending` -- it must not be quietly given up for speed.
+
+        Raises the same things `send()` always did (`KeyError` for an unknown
+        connection or unresolvable route, `IRSAmbiguousError`, `ValueError`),
+        and raises them at BUILD time, so a schedule that could never produce a
+        valid message fails when it is configured rather than once per tick.
+        """
+        record = self.get(connection_name)
+        # Scoped by the DESTINATION: our own unit code is the same for every
+        # peer, so it alone cannot say which link's layout this opcode means.
+        structures = record.structures_for(unit_name)
+        prepared = prepare_message(record.own_unit_code, op_code, structures, payload)
+        return PreparedSend(
+            runtime=self, record=record, unit_name=unit_name, op_code=op_code,
+            message=prepared.message, message_name=prepared.name,
+            namespace=prepared.namespace, payload=prepared.payload,
+        )
+
     def send(self, connection_name: str, unit_name: str, op_code: int,
              payload: dict[str, Any]) -> dict[str, Any]:
         """Normalise, encode, send, and log it.
@@ -499,16 +606,7 @@ class GSimRuntime:
         What is logged is the message's own `to_dict()`, which is why a sent entry
         spells enums as member names exactly as a received one always has.
         """
-        record = self.get(connection_name)
-        # Scoped by the DESTINATION: our own unit code is the same for every
-        # peer, so it alone cannot say which link's layout this opcode means.
-        structures = record.structures_for(unit_name)
-        prepared = prepare_message(record.own_unit_code, op_code, structures, payload)
-        record.unit.send_message(prepared.message, op_code, unit_name)
-        entry = self._log(record, "sent", record.name, record.own_unit_code,
-                          op_code, prepared.name, prepared.payload, None,
-                          namespace=prepared.namespace)
-        return entry.as_dict()
+        return self.sender(connection_name, unit_name, op_code, payload).fire().as_dict()
 
     # -- internals -------------------------------------------------------
     def _install_receive_handlers(self, record: ConnectionRecord) -> None:
@@ -557,6 +655,16 @@ class GSimRuntime:
     def _log(self, record: ConnectionRecord, direction: str, unit_name: str, unit_code: int,
              op_code: int, message_name: str, payload: dict[str, Any] | None,
              error: str | None, namespace: str | None = None) -> LogEntry:
+        """Record one message and stream it. Every message, unconditionally.
+
+        There was briefly a per-route rate limit here, and it was a mistake
+        worth recording: capping the stream at 60Hz made consecutive console
+        rows land ~16.7ms apart, which is exactly what the ORIGINAL scheduling
+        bug looked like. The console is the instrument this whole area is
+        diagnosed with, and an instrument that reports the sampling period
+        instead of the signal is worse than a slow one. Volume is handled by
+        batching in `api/routes/events.py`, where it costs no fidelity.
+        """
         entry = LogEntry(
             seq=next(self._seq),
             direction=direction,
@@ -567,7 +675,7 @@ class GSimRuntime:
             message_name=message_name,
             payload=payload,
             error=error,
-            timestamp=time.time(),
+            timestamp=wall_time(),
             namespace=namespace,
         )
         (record.sent if direction == "sent" else record.received).append(entry)

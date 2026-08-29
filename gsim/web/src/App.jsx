@@ -83,7 +83,17 @@ export default function App() {
     }
   };
   const queueLogEntry = (direction, entry) => {
-    pendingLogsRef.current[direction].push(entry);
+    const pending = pendingLogsRef.current[direction];
+    pending.push(entry);
+    // Never hold more than the pane can show. `requestAnimationFrame` does not
+    // fire at all while the window is minimised or fully occluded -- so without
+    // this the buffer grows at the FULL send rate for as long as that lasts,
+    // which under a 1kHz behaviour is ~2000 entries (~5MB) a second, retained,
+    // for a view that will only ever render the last LOG_VIEW_LIMIT of them.
+    // Trimming here costs nothing: `flushPendingLogs` slices to the same cap.
+    if (pending.length > LOG_VIEW_LIMIT) {
+      pending.splice(0, pending.length - LOG_VIEW_LIMIT);
+    }
     if (flushHandleRef.current === null) {
       flushHandleRef.current = requestAnimationFrame(flushPendingLogs);
     }
@@ -264,6 +274,18 @@ export default function App() {
           setSent(drop);
           setReceived(drop);
           return refresh();
+        }
+        // One frame, N entries. The server coalesces whatever piled up while it
+        // was writing the previous frame (see api/routes/events.py), so under a
+        // fast behaviour this arrives as batches rather than as a thousand
+        // separate socket messages a second -- but it carries EVERY entry, so
+        // the timestamps the console renders are the real send times. The
+        // singular form is still handled: it is what a lone event looks like
+        // when nothing had to be batched.
+        if (event.type === 'messages') {
+          event.entries.forEach((entry) =>
+            queueLogEntry(entry.direction === 'sent' ? 'sent' : 'received', entry));
+          return;
         }
         if (event.type === 'message.sent' || event.type === 'message.received') {
           queueLogEntry(event.entry.direction === 'sent' ? 'sent' : 'received', event.entry);

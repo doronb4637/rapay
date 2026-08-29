@@ -3,7 +3,7 @@ Behaviours: scheduled sending, configured per message route.
 
 Same threading rule as the rest of the API (`def`, never `async def`): although
 these handlers do not themselves block on core, `PUT` normalises a payload and
-resolves a schema, and the engine they hand it to drives `runtime.send()` on its
+resolves a schema, and the engine they hand it to drives `runtime.sender()` on its
 own worker threads.
 
 `PUT` is an upsert keyed by `(connection, unit_name, op_code)` rather than a
@@ -47,8 +47,9 @@ def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, 
     reconciling counted-array lengths. Doing it at configure time rather than per
     tick means a payload that could never encode fails in this request, where the
     modal can show why, instead of logging the identical error forever on a worker
-    thread. What is stored is the message's `to_dict()` form, which feeds straight
-    back into `prepare_message` on every tick.
+    thread. What is stored is the message's `to_dict()` form, which the engine's worker
+    hands to `runtime.sender()` once, when it starts -- a tick fires the message
+    built from it rather than rebuilding it.
     """
     runtime = get_runtime()
     try:

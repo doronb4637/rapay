@@ -412,17 +412,92 @@ and are not reliably orderable against each other.
 ### 10. Behaviours: scheduled sending, and why core's `periodic_sending` is unused
 
 A behaviour is "keep sending THIS message to THIS peer, like THIS". `core_gateway/behaviours.py`
-owns them; `BehaviourEngine` runs one daemon thread per active behaviour and calls
-`GSimRuntime.send()` — **the same call the manual Send button makes**.
+owns them; `BehaviourEngine` runs one daemon thread per active behaviour and fires it through
+`GSimRuntime.sender()` — **the same construction the manual Send button goes through**.
 
 Core *has* `Connection.periodic_sending(opcode, data, interval, unit_name)`, and it works, but it is
 deliberately not used here. Its send loop calls `_do_send` directly on core's own event loop, so it
-never passes through `runtime.send()` and GSim would log nothing for a schedule actively producing
-traffic — while the *receiving* GSim connection would still log every tick, since inbound callbacks
-are unaffected. The console would contradict itself: a silent Sent pane beside a filling Received
-pane. It also encodes its payload **once** at schedule time, which makes anything varying per tick
-(a counter, a timestamp, jitter) impossible through it by construction — and more behaviour shapes
-are the stated direction.
+never passes through `runtime`'s send path and GSim would log nothing for a schedule actively
+producing traffic — while the *receiving* GSim connection would still log every tick, since inbound
+callbacks are unaffected. The console would contradict itself: a silent Sent pane beside a filling
+Received pane. It also encodes its payload **once** at schedule time, which makes anything varying
+per tick (a counter, a timestamp, jitter) impossible through it by construction — and more behaviour
+shapes are the stated direction.
+
+And, measured after a `0.001s` schedule was reported firing at 16 ms: **it would not be faster
+either.** That is the third reason, and the one that closes the question:
+
+| 1 ms requested, Python 3.11.7 / Win10 | actual |
+| --- | --- |
+| `threading.Event.wait(0.001)` — what the engine used to pace with | **15.30 ms** |
+| `asyncio.sleep(0.001)` — what `periodic_sending` paces with (Proactor loop) | **15.47 ms** |
+| `time.sleep(0.001)` — high-resolution waitable timer since CPython 3.11 | 1.79 ms |
+
+Both of the first two bottom out on `WaitForSingleObjectEx`, whose timeout is rounded up to the
+Windows system timer tick (15.6 ms). The bottleneck was never *where the loop lived*, it was the
+sleep primitive — which is why an empty `ArrayOfAreas` and a 35-struct one both measured 16 ms.
+
+### 10b. How a 1 ms behaviour is actually made to fire at 1 ms
+
+Four things, all in `gsim/`; `core/` is untouched.
+
+- **`core_gateway/timing.py`** is the only place that knows about any of this. `sleep_until(deadline,
+  stop)` sleeps most of the way with `time.sleep` and closes the last ~2 ms with a `time.sleep(0)`
+  yielding spin (measured p99 0.8 µs against an absolute deadline); it yields rather than busy-looping
+  on `perf_counter` because a bare Python loop holds the GIL for a whole switch interval and would
+  starve core's event loop thread — the very thread each send marshals onto.
+  `high_resolution_clock()` is a refcounted context holding `winmm.timeBeginPeriod(1)` **and**
+  `sys.setswitchinterval(0.001)`; both are process/system-wide, so it is scoped to an actually-running
+  sub-15 ms schedule rather than taken for the life of the process.
+- **`BehaviourEngine._pace` schedules against absolute deadlines**, not `sleep(interval)` after the
+  work. That distinction is worth 20% on its own: a 1 ms tick doing ~250 µs of encode/send/log has a
+  real period of 1.25 ms under fixed sleeps. An overrun **skips** the missed ticks and realigns —
+  never a catch-up burst, which would misrepresent the traffic pattern the schedule exists to
+  reproduce — and counts them in `missed_ticks`, alongside a smoothed `actual_hz`.
+- **`runtime.sender()` builds the message once per worker**, not once per tick: `prepare_message` is
+  ~160 µs for a 35-element `ArrayOfAreas`, a sixth of the whole 1 ms budget, re-derived from a payload
+  that (for `periodic`) cannot have changed. `PreparedSend` holds the resolved route and the built
+  message; `runtime.send()` is now written in terms of it, so a scheduled tick and the Send button
+  still travel exactly one code path.
+- **`LogEntry.timestamp` comes from `timing.wall_time()`, not `time.time()`.** `time.time()` on
+  Windows is `GetSystemTimeAsFileTime`, granular to the *same* 15.6 ms tick
+  (`time.get_clock_info('time').resolution` says so outright) — a perfectly paced 1 ms behaviour
+  logged with it still reads as 16 ms steps, and the fix looks like it did nothing. `wall_time()`
+  anchors one wall-clock reading to `perf_counter` and adds the monotonic delta.
+
+Measured end to end afterwards, Tiful→DTU over TCP loopback, `ArrayOfAreas` at `interval=0.001`:
+p50 gap **0.999 ms**, p99 1.06 ms, ~9997 sends per 10 s, `Len=0` and `Len=35` alike.
+
+### 10c. The console streams EVERY message — batched, never sampled
+
+`runtime._log` publishes unconditionally, in both directions. A 1 kHz behaviour really does put
+~1000 events a second per direction on the socket, and that is correct: the console is the
+instrument this project's timing is diagnosed with, and it has to be able to show that a 1 ms
+schedule is firing at 1 ms.
+
+**A rate limit was tried here first, and reverted — the reason is worth keeping.** Capping the
+stream at 60 Hz per route made consecutive console rows land ~16.7 ms apart, so the pane read
+`+17ms` on every row while the scheduler was genuinely at 1.000 ms. That is *indistinguishable from
+the original bug*. An instrument that reports its own sampling period instead of the signal is worse
+than a slow one, because it invalidates the measurement everyone will reach for next time.
+
+What makes full fidelity affordable is **coalescing in `api/routes/events.py`**, which costs no
+fidelity at all. The handler awaits one `send_json` at a time and drains everything the publisher
+queued while that write was in flight into the next frame (`{"type": "messages", "entries": [...]}`).
+The frame rate therefore falls out of how fast the client actually drains — one frame per message
+when it keeps up, one per hundred when it does not — with no configured rate, no timer, and no
+guess about browser speed. `_coalesce` merges only *consecutive* message events and leaves
+everything else in place, because `logs.cleared` and `connection.deleted` tell the client to empty a
+pane: entries published before one must not arrive after it, or the pane refills with what was just
+cleared.
+
+Verified with a second WebSocket client against a live 1 kHz schedule: 5390 entries delivered,
+**zero gaps in `seq`**, and `actual_hz` still 1000.0 with the browser console open.
+
+`BehavioursPanel` still shows `actual_hz` for any schedule above ~20 Hz — *whether or not it is on
+target*, green when meeting the request and amber when short. The console is truthful but it is not
+a rate meter; above roughly 20 rows a second, reading a rate off `+Nms` deltas on rows that replace
+themselves faster than they can be counted is not something to ask of anyone.
 
 Load-bearing rules:
 
@@ -437,6 +512,17 @@ Load-bearing rules:
   transient. The error lands on the behaviour (`last_error`, `error_count`) and the engine publishes
   only on a *change* of error state, never per tick, so a fast failing schedule cannot flood the
   WebSocket.
+- **`actual_hz` is re-seeded by the worker that owns it**, at the top of `_pace`, not only in
+  `set()`. `_stop_worker` signals the outgoing worker without joining it, so its final sample can
+  land *after* `set()` has reset the average — editing a 1 ms schedule to 0.5 s then read 550 Hz for
+  half a minute while the moving average crawled down. `_tick` likewise refuses to touch any counter
+  once its `stop` is set: the message really went out, but a replacement worker may already own
+  those numbers.
+- **`runtime.stop()` pauses behaviours BEFORE closing the transport**, matching `delete()`. Closing
+  first leaves a gap in which the worker fires into a connection being torn down and books a spurious
+  failure per tick; at the old 16 ms floor that cost a stray error or two, at 1 ms it booked ~1800 and
+  left `last_error` set after an ordinary stop. `_sync` reads `is_connection_running`, so `running`
+  must be cleared before the call.
 - **Payload is normalised once**, at configure time, by the same `build_payload` the manual path uses
   (§4) — a payload that could never encode fails in the `PUT`, where the modal shows why, instead of
   logging the identical error forever on a worker thread.
