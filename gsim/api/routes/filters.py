@@ -26,7 +26,7 @@ from gsim.api.models import FilterRequest
 from gsim.core_gateway import (
     EQUALITY_OPERATORS,
     IRSAmbiguousError,
-    filter_targets,
+    field_targets,
     get_runtime,
     message_schema,
 )
@@ -71,7 +71,7 @@ def set_filter(connection_name: str, request: FilterRequest) -> dict[str, Any]:
     except IRSAmbiguousError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    targets = {target["path"]: target for target in filter_targets(schema)}
+    targets = {target["path"]: target for target in field_targets(schema)}
     for rule in request.rules:
         _check_rule(rule, targets, schema["name"])
     if request.change_field and request.change_field not in targets:

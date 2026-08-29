@@ -14,20 +14,28 @@ swappable and greppable from one directory.
     runtime.py     GSim's connection registry, logs, and thread bridge
 """
 from .bootstrap import CORE_ROOT, ensure_core_importable
+from .behaviours import (
+    LEGACY_KINDS as BEHAVIOUR_LEGACY_KINDS,
+    MAX_DELAY_MS as BEHAVIOUR_MAX_DELAY_MS,
+    MODES as BEHAVIOUR_MODES,
+    TRIGGERS as BEHAVIOUR_TRIGGERS,
+)
 from .filters import ACTIONS, EQUALITY_OPERATORS, MODES, OPERATORS, FilterSet
 from .payloads import Prepared, prepare_message
 from .registry import (
     IRSAmbiguousError, IRSDataError, IRSNotFoundError,
-    filter_targets, known_unit_codes, list_messages, message_schema, resolve_route,
+    field_targets, known_unit_codes, list_messages, message_schema, resolve_route,
 )
 from .runtime import GSimRuntime, get_runtime
 
 __all__ = [
     "CORE_ROOT", "ensure_core_importable",
     "ACTIONS", "EQUALITY_OPERATORS", "MODES", "OPERATORS", "FilterSet",
+    "BEHAVIOUR_LEGACY_KINDS", "BEHAVIOUR_MAX_DELAY_MS", "BEHAVIOUR_MODES",
+    "BEHAVIOUR_TRIGGERS",
     "Prepared", "prepare_message",
     "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
-    "filter_targets", "known_unit_codes", "list_messages", "message_schema",
+    "field_targets", "known_unit_codes", "list_messages", "message_schema",
     "resolve_route",
     "GSimRuntime", "get_runtime",
 ]

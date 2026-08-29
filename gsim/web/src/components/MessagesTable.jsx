@@ -18,10 +18,12 @@ export default function MessagesTable({
   connectionName, peers = [], destination, onDestinationChange,
   activeOpCode, onCompose, behaviours = [], className,
 }) {
-  // Behaviours are keyed by route, so at most one can match a row: this
-  // connection, this destination, this opCode.
-  const behaviourFor = (opCode) =>
-    behaviours.find(
+  // A route can hold several behaviours -- one per trigger -- so this is a
+  // list, not a lookup. The badge summarises them: one rule shows what it does,
+  // several show how many there are, because at that point the panel is the
+  // place to read them and the badge only has to say "look here".
+  const behavioursFor = (opCode) =>
+    behaviours.filter(
       (behaviour) =>
         behaviour.connection_name === connectionName &&
         behaviour.unit_name === destination &&
@@ -145,21 +147,34 @@ export default function MessagesTable({
                         well as in the Behaviours panel so the message you
                         configured carries the evidence -- otherwise a row that
                         is quietly firing looks identical to one that is not. */}
-                    {behaviourFor(message.op_code) && (
-                      <span
-                        title={`Sending every ${behaviourFor(message.op_code).interval}s`}
-                        className={cx(
-                          'flex shrink-0 items-center gap-0.5 rounded px-1 py-px',
-                          'font-mono text-[9px] ring-1 ring-inset',
-                          behaviourFor(message.op_code).active
-                            ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
-                            : 'bg-slate-800 text-slate-500 ring-slate-700',
-                        )}
-                      >
-                        <Repeat size={9} />
-                        {behaviourFor(message.op_code).interval}s
-                      </span>
-                    )}
+                    {behavioursFor(message.op_code).length > 0 && (() => {
+                      const rules = behavioursFor(message.op_code);
+                      const live = rules.some((rule) => rule.active);
+                      const only = rules.length === 1 ? rules[0] : null;
+                      return (
+                        <span
+                          title={rules
+                            .map((rule) => (rule.trigger === 'immediate'
+                              ? `Periodic sending, every ${rule.interval}s`
+                              : rule.trigger === 'on_connect'
+                                ? `On ${rule.unit_name} connect: ${rule.mode === 'once' ? 'send once' : `periodic sending, every ${rule.interval}s`}`
+                                : `On ${rule.trigger_unit_name ?? rule.unit_name} ${rule.trigger_op_code_hex}: ${rule.mode === 'once' ? 'send once' : `periodic sending, every ${rule.interval}s`}`))
+                            .join('\n')}
+                          className={cx(
+                            'flex shrink-0 items-center gap-0.5 rounded px-1 py-px',
+                            'font-mono text-[9px] ring-1 ring-inset',
+                            live
+                              ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
+                              : 'bg-slate-800 text-slate-500 ring-slate-700',
+                          )}
+                        >
+                          <Repeat size={9} />
+                          {only
+                            ? (only.mode === 'once' ? '1x' : `${only.interval}s`)
+                            : `${rules.length} rules`}
+                        </span>
+                      );
+                    })()}
                     {/* Hex is the form every IRS document and every log row
                         uses; the decimal is a rare lookup, so it waits in the
                         tooltip rather than doubling the width of every row. */}

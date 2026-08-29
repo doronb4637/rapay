@@ -188,6 +188,72 @@ opCodes rather than marking entries is what makes "all current and future
 messages" fall out for free: new entries are filtered on render, so nothing has
 to be re-marked as it streams in.
 
+## Behaviours
+
+A behaviour is a rule: **when** something happens, **then** send a message. Open one from the
+Compose footer or from a row in the Behaviours panel.
+
+### When — the trigger
+
+| trigger | fires | send once |
+| --- | --- | --- |
+| **periodic sending** | as soon as the behaviour and its connection are both running | not offered — it is the schedule itself |
+| **the unit connects** | the moment that peer has a usable link — handshakes, init bursts | default |
+| **a message arrives** | on each matching message from that peer | default |
+
+The unit picker only appears when the connection has more than one peer; with one, its name is
+printed in the sentence instead.
+
+"The unit connects" fires immediately if the peer is *already* connected when you save the rule —
+core's on-connect callback only arms the next transition, so waiting for one would look like the
+rule was broken.
+
+### Then — the action
+
+**Send once**, or **periodic sending** every N seconds. "The unit connects" and "a message arrives"
+default to send once — the ordinary request/response shape — and offer periodic sending as a
+deliberate second choice. "Periodic sending" as a *trigger* has no event to repeat on, so under it
+send once is not offered at all. Reactive triggers also take a **wait** in milliseconds before
+sending — a response latency, honoured to well under a millisecond rather than rounded up to the
+Windows timer tick.
+
+A periodic action started by "a message arrives" **restarts** on each matching message, carrying
+whatever values that message brought. One schedule, never two — re-triggering replaces it.
+
+### Only if — the condition
+
+"A message arrives" takes an optional field check: `only if Len > 3`, `only if Flag is ON`. Arrivals
+that fail it are counted as skipped rather than silently ignored, so a typo in a condition does not
+look like a dead link.
+
+Enums compare by **member name** (`ON`), not by number, and only with `is` / `is not` — ordering
+member names alphabetically means nothing.
+
+### Copy from the incoming message
+
+Forward values from the message that triggered the rule into the one you send: echo a transaction
+id, mirror a state. Each row is `source field → target field`, and once traffic flows it shows the
+**last value that actually travelled it** — a mapping reading a field that is not there looks
+exactly like a working one until it shows you a number.
+
+Both ends must be the same kind: an enum travels as a member name and a number as a number, so
+copying one into the other is refused when you save it, not once per message on a worker thread.
+
+### What a rule can address
+
+Conditions and mappings name a field by dotted path (`Header.Mode`), reaching into structs and into
+a bitfield's individual bits. **Nothing inside a repeating array** — a single path cannot name one
+of 35 elements, so those fields are not offered.
+
+### Rules per message
+
+One rule per outbound message *per trigger*, so "greet on connect" and "answer a poll" can both
+send the same message. Two always-on periodic schedules on one message still collide, because that
+would silently double its rate.
+
+Every send goes through the same path as the Send button, so it appears in the Sent console with a
+real timestamp — including reactive ones. Behaviours are not saved in session files.
+
 ## Known core issues GSim works around (no changes made)
 
 - `tools.file_functions.read_unit_config` is an unimplemented stub (`...`), so

@@ -201,7 +201,7 @@ def describe_message(message_class: type, unit_code: int, op_code: int) -> dict[
 _COMPARABLE = frozenset({"scalar", "enum"})
 
 
-def filter_targets(schema: dict[str, Any]) -> list[dict[str, Any]]:
+def field_targets(schema: dict[str, Any]) -> list[dict[str, Any]]:
     """Every field of one message a received-filter may address, flattened.
 
     Two different questions, answered per node, because the two halves of a

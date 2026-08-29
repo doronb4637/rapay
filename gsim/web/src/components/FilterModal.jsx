@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { Badge, Button, EmptyState, IconButton, Input, Select, StatusDot, cx } from './ui';
-import { filterTargets, operatorsFor, valueControl } from '../lib/filterTargets';
+import { fieldTargets, operatorsFor, valueControl } from '../lib/fieldTargets';
 import { hexTitle } from '../lib/format';
 
 //: How a message qualifies once the rules have admitted it. Amber throughout
@@ -113,7 +113,7 @@ export default function FilterModal({
     if (!selected) { setTargets([]); return; }
     let cancelled = false;
     api.schemaByUnit(selected.unit_code, selected.op_code, selected.namespace).then(
-      (schema) => !cancelled && setTargets(filterTargets(schema)),
+      (schema) => !cancelled && setTargets(fieldTargets(schema)),
       (err) => !cancelled && setError(err.message),
     );
     return () => { cancelled = true; };

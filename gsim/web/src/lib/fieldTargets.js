@@ -1,14 +1,19 @@
 /**
- * One message's schema -> the fields a received filter may address.
+ * One message's schema -> the fields a rule may address.
  *
- * The client-side mirror of `core_gateway/schema.py`'s `filter_targets`, kept
- * only so the dialog can populate its pickers without a second round trip. The
- * server re-validates every rule against its own copy before storing it (see
- * `api/routes/filters.py`), so this is not a trust boundary -- the two must
- * simply agree, with the server as tiebreaker. Same arrangement, and the same
- * reasoning, as `lib/schema.js`'s mirror of IRS's `fill()`.
+ * Four pickers are built from this, and they are all the same question asked of
+ * the same shape: a received filter's keep/drop rule, a behaviour's trigger
+ * condition, and both ends of a behaviour's value forwarding.
  *
- * Two questions per field, because the halves of a filter address different
+ * The client-side mirror of `core_gateway/schema.py`'s `field_targets`, kept
+ * only so a dialog can populate its pickers without a second round trip. The
+ * server re-validates every path against its own copy before storing it (see
+ * `api/routes/filters.py` and `api/routes/behaviours.py`), so this is not a
+ * trust boundary -- the two must simply agree, with the server as tiebreaker.
+ * Same arrangement, and the same reasoning, as `lib/schema.js`'s mirror of
+ * IRS's `fill()`.
+ *
+ * Two questions per field, because the halves of a rule address different
  * things:
  *
  *   ruleOk    can a keep/drop rule compare this? Only a single decoded value:
@@ -33,7 +38,7 @@
 /** Field kinds that carry a single value an operator can be applied to. */
 const COMPARABLE = new Set(['scalar', 'enum']);
 
-export function filterTargets(schema) {
+export function fieldTargets(schema) {
   const targets = [];
 
   const emit = (path, node, ruleOk) => {

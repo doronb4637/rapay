@@ -66,6 +66,16 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .fieldpath import EQUALITY_OPERATORS, OPERATORS, Condition, resolve_path
+
+#: Re-exported: several callers reach for these through `filters` because this
+#: is where they used to live, and the API layer imports them by name.
+__all__ = [
+    "ACTIONS", "EQUALITY_OPERATORS", "MODES", "OPERATORS",
+    "FilterSet", "MessageFilter", "Rule",
+    "MODE_ALL", "MODE_CHANGE", "MODE_FIELD_CHANGE",
+]
+
 #: How a message qualifies for logging once the rules have admitted it.
 MODE_ALL = "all"                    # every arrival
 MODE_CHANGE = "change"              # only when any field differs from the last logged
@@ -82,55 +92,18 @@ ACTIONS: tuple[str, ...] = ("keep", "drop")
 #: that filtering exists to relieve.
 STATS_PERIOD_SECONDS = 0.5
 
-#: "This filter has not logged anything yet", distinct from "the field this
-#: filter watches is not present in the payload" -- `None` is a legitimate
-#: decoded value (an enum with no 0 member), so neither can be spelt `None`.
+#: "This filter has not logged anything yet." Distinct from `fieldpath.ABSENT`
+#: ("the field it watches is not in the payload") and from `None` (a legitimate
+#: decoded value: an enum with no 0 member), so it needs its own identity.
 _NO_PREVIOUS = object()
-_ABSENT = object()
-
-
-def _numeric(left: Any, right: Any) -> bool:
-    """Are both sides orderable as numbers? Enum values arrive as member-name
-    strings, so `<` on them would compare alphabetically and mean nothing."""
-    return isinstance(left, (int, float)) and isinstance(right, (int, float))
-
-
-#: Operator -> comparison. Ordering operators refuse non-numeric operands rather
-#: than raising: `admits()` runs on a core executor thread inside the receive
-#: callback, and an exception there would take out the decode path for a typo.
-OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
-    "==": lambda left, right: left == right,
-    "!=": lambda left, right: left != right,
-    "<": lambda left, right: _numeric(left, right) and left < right,
-    "<=": lambda left, right: _numeric(left, right) and left <= right,
-    ">": lambda left, right: _numeric(left, right) and left > right,
-    ">=": lambda left, right: _numeric(left, right) and left >= right,
-}
-
-#: The operators that mean anything against a member-name string. Enforced at
-#: the API edge (`api/models.py`) so a nonsense rule fails in the PUT, where the
-#: modal can show why, rather than silently never matching.
-EQUALITY_OPERATORS: tuple[str, ...] = ("==", "!=")
-
-
-def resolve_path(payload: Any, parts: tuple[str, ...]) -> Any:
-    """Walk a dotted path into a `to_dict()` payload, or `_ABSENT`.
-
-    Refuses to index into a list on purpose -- see the module docstring: a path
-    that crosses an array cannot name one element, and silently taking the first
-    would be a lie the user could not see.
-    """
-    cursor: Any = payload
-    for part in parts:
-        if not isinstance(cursor, dict) or part not in cursor:
-            return _ABSENT
-        cursor = cursor[part]
-    return cursor
 
 
 @dataclass
 class Rule:
-    """One condition, and how many messages it has decided about.
+    """One condition, what it does with a match, and how many it has decided.
+
+    The comparison itself is a `fieldpath.Condition`, shared verbatim with a
+    behaviour's trigger condition -- a rule is that plus an action and a count.
 
     `hits` reads differently per action, which is why it is not called
     `dropped`: on a `drop` rule it is how many it rejected, on a `keep` rule how
@@ -142,17 +115,13 @@ class Rule:
     op: str
     value: Any
     hits: int = 0
-    #: The path pre-split, so the hot path does no string work per message.
-    parts: tuple[str, ...] = field(default=(), repr=False)
+    condition: Condition = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.parts = tuple(self.path.split("."))
+        self.condition = Condition(path=self.path, op=self.op, value=self.value)
 
     def matches(self, payload: Any) -> bool:
-        current = resolve_path(payload, self.parts)
-        if current is _ABSENT:
-            return False
-        return OPERATORS[self.op](current, self.value)
+        return self.condition.matches(payload)
 
     def as_dict(self) -> dict[str, Any]:
         return {

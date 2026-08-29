@@ -320,6 +320,7 @@ class GSimRuntime:
             sender=self.sender,
             is_connection_running=self._is_connection_running,
             publish=self.events.publish,
+            is_unit_connected=self._is_unit_connected,
         )
         # Received-message filters. Consulted at the top of `_log` and nowhere
         # else -- see `filters.py` for why suppression here is compatible with
@@ -329,6 +330,24 @@ class GSimRuntime:
             target=self._watch_unit_state, name="gsim-unit-state", daemon=True
         )
         self._watcher.start()
+
+    def _is_unit_connected(self, connection_name: str, unit_name: str) -> bool:
+        """Does ONE peer have a usable link right now?
+
+        Read straight off core's own `active_units` rather than from any state
+        GSim caches, so it cannot disagree with what actually drives the echo
+        lifecycle. Used to fire an `on_connect` behaviour armed against a peer
+        that is already up -- core's `handle_on_connect` deliberately does not
+        fire retroactively.
+        """
+        with self._lock:
+            record = self._conn_records.get(connection_name)
+        if record is None or not record.running:
+            return False
+        try:
+            return unit_name in (getattr(record.unit, "active_units", None) or set())
+        except Exception:       # noqa: BLE001 - a torn-down unit reads as "no"
+            return False
 
     def _is_connection_running(self, connection_name: str) -> bool:
         """Unknown connection reads as "not running" rather than raising -- the
@@ -534,7 +553,7 @@ class GSimRuntime:
         """
         record = self.get(connection_name)
         if not record.handlers_installed:
-            self._install_receive_handlers(record)
+            self._install_handlers(record)
             record.handlers_installed = True
         with self._lock:
             if record.connecting:
@@ -771,6 +790,34 @@ class GSimRuntime:
         return self.sender(connection_name, unit_name, op_code, payload).fire().as_dict()
 
     # -- internals -------------------------------------------------------
+    def _install_handlers(self, record: ConnectionRecord) -> None:
+        """Register everything this connection needs core to call us back on:
+        one receive callback per (peer, opcode), and one connect callback per
+        peer.
+
+        The connect half exists for `on_connect` behaviours. It is registered
+        here rather than by the behaviour engine because core allows exactly one
+        on-connect callback per unit (`core/connections/CLAUDE.md` 5c) -- GSim
+        owns it once and fans out to however many behaviours are watching, the
+        same arrangement the receive callbacks already use.
+        """
+        for unit_name in record.peers():
+            record.unit.handle_on_connect(
+                self._make_connect_callback(record, unit_name), unit_name=unit_name)
+        self._install_receive_handlers(record)
+
+    def _make_connect_callback(self, record: ConnectionRecord,
+                               unit_name: str) -> Callable[[str], None]:
+        def _on_connect(_unit: str) -> None:
+            # Runs on a core executor thread. Must not raise: core logs and
+            # swallows, but a failed handshake with no explanation is worse.
+            try:
+                self.behaviours.on_unit_connected(record.name, unit_name)
+            except Exception:   # noqa: BLE001
+                logger.exception("on-connect behaviours for %s/%s raised",
+                                 record.name, unit_name)
+        return _on_connect
+
     def _install_receive_handlers(self, record: ConnectionRecord) -> None:
         """Register one standing callback per (peer, opcode) that peer may send.
 
@@ -810,6 +857,12 @@ class GSimRuntime:
                 error = None
             except Exception as exc:  # noqa: BLE001
                 payload, error = None, f"{type(exc).__name__}: {exc}"
+            # Behaviours see the message BEFORE the log does, and regardless of
+            # what a Received filter decides about it. Filters govern what the
+            # console shows; behaviours govern how this simulated unit acts, and
+            # a muted log line must never silently stop a handshake reply.
+            if error is None:
+                self.behaviours.on_message(record.name, unit_name, op_code, payload)
             self._log(record, "received", unit_name, peer_code, op_code, message_name,
                       payload, error, namespace=namespace)
         return _on_message

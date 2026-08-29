@@ -424,6 +424,10 @@ export default function App() {
       unitName: behaviour.unit_name,
       opCode: behaviour.op_code,
       messageName: behaviour.message_name,
+      // The rule's own id, so the dialog edits THIS one. A route can hold
+      // several behaviours now (one per trigger), and matching on the route
+      // alone would open whichever happened to be found first.
+      id: behaviour.id,
       // Reuse the stored payload: the compose form is not necessarily showing
       // this route, so its current state is the wrong thing to save.
       payload: behaviour.payload,
@@ -710,19 +714,31 @@ export default function App() {
           messageName={behaviourDraft.messageName}
           opCode={behaviourDraft.opCode}
           destination={behaviourDraft.unitName}
-          existing={behaviours.find(
-            (behaviour) =>
-              behaviour.connection_name === behaviourDraft.connectionName &&
-              behaviour.unit_name === behaviourDraft.unitName &&
-              behaviour.op_code === behaviourDraft.opCode,
-          )}
-          onSubmit={({ kind, interval }) =>
+          connectionName={behaviourDraft.connectionName}
+          peers={peers}
+          // A route can now hold several rules -- one per trigger -- so opening
+          // the dialog from a Messages row edits the one it was opened for, and
+          // otherwise starts a new one. `behaviourDraft.id` is set when the
+          // Behaviours panel opens an existing rule; a Messages row has no id
+          // and falls back to the route's `immediate` rule, which is the one
+          // that badge has always meant.
+          existing={
+            behaviourDraft.id
+              ? behaviours.find((behaviour) => behaviour.id === behaviourDraft.id)
+              : behaviours.find(
+                  (behaviour) =>
+                    behaviour.connection_name === behaviourDraft.connectionName &&
+                    behaviour.unit_name === behaviourDraft.unitName &&
+                    behaviour.op_code === behaviourDraft.opCode &&
+                    behaviour.trigger === 'immediate',
+                )
+          }
+          onSubmit={(rule) =>
             api.setBehaviour(behaviourDraft.connectionName, {
               unit_name: behaviourDraft.unitName,
               op_code: behaviourDraft.opCode,
-              kind,
-              interval,
               payload: behaviourDraft.payload,
+              ...rule,
             })
           }
           {...behaviourActions}

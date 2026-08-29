@@ -28,6 +28,24 @@ export default function BehavioursPanel({
 
   const running = behaviours.filter((behaviour) => behaviour.active).length;
 
+  /* What fires this rule, as a phrase. A reactive behaviour spends most of its
+     life having fired nothing, so a row reading only "every 0.5s" would be
+     describing an action that may never happen -- the stimulus is the more
+     useful half, and it is what tells two rules on one message apart. */
+  const triggerOf = (behaviour) => {
+    if (behaviour.trigger === 'on_connect') return `on ${behaviour.unit_name} connect`;
+    if (behaviour.trigger === 'on_received') {
+      const source = behaviour.trigger_unit_name ?? behaviour.unit_name;
+      return `on ${source} ${behaviour.trigger_op_code_hex ?? ''}`.trim();
+    }
+    return null;
+  };
+
+  /* And what it does when it fires. The measured rate replaces the requested
+     interval once there is one (see `rateOf`), so this is only the fallback. */
+  const actionOf = (behaviour) =>
+    (behaviour.mode === 'once' ? 'once' : `every ${behaviour.interval}s`);
+
   // Above this many sends a second, reading the rate off the console means
   // eyeballing the +Nms deltas on rows that are replacing themselves faster
   // than they can be counted. The console is truthful (it carries every entry,
@@ -40,6 +58,8 @@ export default function BehavioursPanel({
   // is "no" leaves the good case indistinguishable from an unanswered one.
   // Amber when genuinely short of the request, green when meeting it.
   const rateOf = (behaviour) => {
+    // A one-shot has no rate; `actual_hz` is only meaningful for a schedule.
+    if (behaviour.mode === 'once') return null;
     if (!behaviour.active || !behaviour.actual_hz || !behaviour.interval) return null;
     const requested = 1 / behaviour.interval;
     const short = behaviour.actual_hz < requested * 0.95;
@@ -129,7 +149,18 @@ export default function BehavioursPanel({
                     {behaviour.message_name ?? behaviour.op_code_hex}
                   </span>
                   <span className="block truncate font-mono text-[10px] text-slate-500">
-                    {nameOf(behaviour.connection_name)} → {behaviour.unit_name} ·{' '}
+                    {/* The rule as a sentence: what fires it, then what it
+                        does. The trigger is emerald because it is an arrival --
+                        the same coding the console and the dialog use. */}
+                    {triggerOf(behaviour) && (
+                      <>
+                        <span className="text-emerald-500/80">{triggerOf(behaviour)}</span>
+                        <span className="text-slate-700"> · </span>
+                      </>
+                    )}
+                    {!triggerOf(behaviour) && (
+                      <>{nameOf(behaviour.connection_name)} → {behaviour.unit_name} · </>
+                    )}
                     {/* The measured rate REPLACES the interval once there is
                         one, rather than sitting beside it: this line is narrow
                         enough to truncate, and in a rail that can only fit one
@@ -140,7 +171,10 @@ export default function BehavioursPanel({
                           {rateOf(behaviour).label}
                         </span>
                       )
-                      : `every ${behaviour.interval}s`}
+                      : actionOf(behaviour)}
+                    {behaviour.delay_ms > 0 && (
+                      <span className="text-amber-500/90"> +{behaviour.delay_ms}ms</span>
+                    )}
                   </span>
                 </button>
 
@@ -148,6 +182,10 @@ export default function BehavioursPanel({
                   className="tnum shrink-0 font-mono text-[10px] text-slate-500"
                   title={[
                     `${behaviour.sent_count} sent`,
+                    behaviour.trigger !== 'immediate'
+                      ? `${behaviour.fired_count} times triggered` : null,
+                    behaviour.rejected_count
+                      ? `${behaviour.rejected_count} arrivals skipped by the condition` : null,
                     behaviour.actual_hz ? `${behaviour.actual_hz.toFixed(1)} Hz measured` : null,
                     behaviour.missed_ticks ? `${behaviour.missed_ticks} ticks missed` : null,
                   ].filter(Boolean).join('\n')}

@@ -26,6 +26,10 @@ from gsim.core_gateway import (
     ACTIONS as FILTER_ACTIONS,
     MODES as FILTER_MODES,
     OPERATORS as FILTER_OPERATORS,
+    BEHAVIOUR_LEGACY_KINDS,
+    BEHAVIOUR_MAX_DELAY_MS,
+    BEHAVIOUR_MODES,
+    BEHAVIOUR_TRIGGERS,
 )
 
 #: A connection's name IS its identifier -- every route addresses it as
@@ -271,25 +275,109 @@ class SendMessageRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class BehaviourRequest(BaseModel):
-    """Configure (or reconfigure) the behaviour on one message route.
+class BehaviourCondition(BaseModel):
+    """An optional gate on the incoming message, for an `on_received` trigger.
 
-    There is at most one behaviour per `(connection, unit_name, op_code)`, so
-    this is an upsert -- see `core_gateway/behaviours.py` for why the route is
-    the key. `kind` is validated against the engine's own `KINDS` rather than a
-    duplicated `Literal`, so adding a behaviour shape there does not require
+    Exactly the shape a filter rule uses minus the action, because it is exactly
+    the same question -- both end up as one `core_gateway.fieldpath.Condition`.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, description="Dotted field path on the INCOMING message.")
+    op: str = Field(default="==", description="One of == != < <= > >=")
+    #: An enum decodes to its member NAME, so a condition against one carries a
+    #: string ("ON"); a scalar carries a number. The route checks the value
+    #: against the field's own kind, where the schema is resolvable.
+    value: float | int | str | None = None
+
+    @field_validator("op")
+    @classmethod
+    def _known_operator(cls, value: str) -> str:
+        if value not in FILTER_OPERATORS:
+            raise ValueError(f"must be one of {sorted(FILTER_OPERATORS)}")
+        return value
+
+
+class BehaviourMapping(BaseModel):
+    """Copy one field from the incoming message into the outgoing one."""
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    #: `from` is a Python keyword, so the field is `source`/`target` internally
+    #: and aliased on the wire -- the JSON stays readable as `{from, to}`.
+    source: str = Field(alias="from", min_length=1,
+                        description="Dotted path on the INCOMING message.")
+    target: str = Field(alias="to", min_length=1,
+                        description="Dotted path on the OUTGOING message.")
+
+
+class BehaviourRequest(BaseModel):
+    """Configure (or reconfigure) one behaviour.
+
+    An upsert keyed by `(connection, unit_name, op_code, trigger,
+    trigger_unit_name, trigger_op_code)` -- the outbound route plus what fires
+    it. Two rules sending one message on two different stimuli are different
+    behaviours; two always-on periodic schedules on one route are the same one,
+    which is the collision the key exists to force (see
+    `core_gateway/behaviours.py`).
+
+    `trigger`/`mode` are validated against the engine's own tuples rather than
+    duplicated `Literal`s, so adding a trigger there does not require
     remembering to widen this too.
     """
     model_config = ConfigDict(extra="forbid")
 
     unit_name: str = Field(min_length=1, description="Which configured peer to send to.")
     op_code: int = Field(ge=0, le=0xFFFF)
-    kind: str = Field(default="periodic", description="Behaviour shape, e.g. 'periodic'.")
-    #: Seconds between sends. Only meaningful for `periodic`; kept optional so a
-    #: future one-shot/burst kind need not send a meaningless value.
+    #: The legacy spelling of (trigger, mode). Kept working, and it wins when
+    #: given, so a caller written before triggers existed needs no migration.
+    kind: str | None = Field(default=None, description="Legacy shape name, e.g. 'periodic'.")
+    trigger: str = Field(default="immediate",
+                         description="'immediate', 'on_connect' or 'on_received'.")
+    mode: str = Field(default="periodic", description="'once' or 'periodic'.")
+    #: Which peer's message fires this, and which message. `on_received` only.
+    trigger_unit_name: str | None = None
+    trigger_op_code: int | None = Field(default=None, ge=0, le=0xFFFF)
+    condition: BehaviourCondition | None = None
+    #: Response latency before the send (or before a periodic action's first
+    #: tick). Milliseconds, because that is the unit a protocol timing budget is
+    #: written in; the engine converts once.
+    delay_ms: float = Field(default=0.0, ge=0, le=BEHAVIOUR_MAX_DELAY_MS)
+    mappings: list[BehaviourMapping] = Field(default_factory=list)
+    #: Seconds between sends. Only meaningful when `mode` is 'periodic'.
     interval: float = Field(default=1.0, gt=0)
     payload: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+
+    @field_validator("trigger")
+    @classmethod
+    def _known_trigger(cls, value: str) -> str:
+        if value not in BEHAVIOUR_TRIGGERS:
+            raise ValueError(f"must be one of {list(BEHAVIOUR_TRIGGERS)}")
+        return value
+
+    @field_validator("mode")
+    @classmethod
+    def _known_mode(cls, value: str) -> str:
+        if value not in BEHAVIOUR_MODES:
+            raise ValueError(f"must be one of {list(BEHAVIOUR_MODES)}")
+        return value
+
+    @model_validator(mode="after")
+    def _trigger_consistency(self) -> "BehaviourRequest":
+        """Refuse a request that describes a rule that cannot exist, here rather
+        than in the engine, so the modal gets a field-level reason."""
+        trigger = BEHAVIOUR_LEGACY_KINDS[self.kind][0] if self.kind else self.trigger
+        if trigger == "on_received" and self.trigger_op_code is None:
+            raise ValueError("trigger 'on_received' needs trigger_op_code")
+        if trigger != "on_received":
+            if self.condition is not None:
+                raise ValueError(
+                    "a condition tests the incoming message, so it needs trigger 'on_received'")
+            if self.mappings:
+                raise ValueError(
+                    "value forwarding reads the incoming message, so it needs "
+                    "trigger 'on_received'")
+        return self
 
 
 class FilterRule(BaseModel):

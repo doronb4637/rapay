@@ -101,6 +101,8 @@ gsim/
     payloads.py                 form payload -> a built IRS message, ready to encode
     behaviours.py               scheduled sending (periodic, ...) -- GSim-driven, see 10
     filters.py                  which RECEIVED messages are worth logging at all, see 10d
+    fieldpath.py                addressing one field + comparing it -- shared by 10d and 10f
+    delay.py                    one thread for every delayed response, see 10f
     runtime.py                  GSim's connection registry, message logs, thread bridge
   api/
     app.py                      FastAPI factory; serves gsim/web/dist at "/" if built
@@ -117,7 +119,7 @@ gsim/
       App.jsx                    shell: [Connections/Messages] | Inspector | [Sent/Received]
       api.js                     fetch wrapper + WebSocket client (auto-reconnect)
       lib/schema.js               client-side mirror of payloads.py's defaulting rules
-      lib/filterTargets.js        client-side mirror of schema.py's filter_targets
+      lib/fieldTargets.js         client-side mirror of schema.py's field_targets
       lib/sessionFile.js          Save/Load envelope: build, parse, browser-download fallback
       components/
         ui.jsx                    shared design-system primitives (Button, Field, Badge, ...)
@@ -129,7 +131,7 @@ gsim/
         Console.jsx                Sent + Received panes, process-wide, hide-by-opCode
         ContextMenu.jsx            desktop-style right-click menu + useContextMenu()
         BehavioursPanel.jsx        every active schedule, across every connection
-        BehaviourModal.jsx         configure/stop/remove one message's schedule
+        BehaviourModal.jsx         the WHEN/THEN rule composer, see 10
         FilterModal.jsx            configure what inbound traffic is worth logging (10d)
         ConnectionModal.jsx        create/edit connection form (hex codes, IPv4 mask)
 ```
@@ -413,11 +415,24 @@ is still clear which connection owns it. Entries are ordered by the server-assig
 counter shared across every record -- because wall-clock timestamps originate on different threads
 and are not reliably orderable against each other.
 
-### 10. Behaviours: scheduled sending, and why core's `periodic_sending` is unused
+### 10. Behaviours: a trigger, an action, and why core's `periodic_sending` is still unused
 
-A behaviour is "keep sending THIS message to THIS peer, like THIS". `core_gateway/behaviours.py`
-owns them; `BehaviourEngine` runs one daemon thread per active behaviour and fires it through
-`GSimRuntime.sender()` — **the same construction the manual Send button goes through**.
+A behaviour is a rule: **when** something happens, **then** send a message.
+`core_gateway/behaviours.py` owns them, and everything fires through `GSimRuntime.sender()` —
+**the same construction the manual Send button goes through**.
+
+`trigger` and `mode` are two fields rather than one flat list of shapes, because they are genuinely
+orthogonal — every trigger can drive either action:
+
+| trigger | fires when | mode |
+| --- | --- | --- |
+| `immediate` | enabled and its connection is running (the original, and only, old shape) | `once` / `periodic` |
+| `on_connect` | that peer gains a usable link | `once` / `periodic` |
+| `on_received` | a chosen inbound message arrives, optionally past a condition | `once` / `periodic` |
+
+`kind="periodic"` is kept as the legacy spelling of `immediate` + `periodic` (`LEGACY_KINDS`), so a
+caller written before triggers existed needs no migration — and `set(kind=...)` still wins over the
+pair when given.
 
 Core *has* `Connection.periodic_sending(opcode, data, interval, unit_name)`, and it works, but it is
 deliberately not used here. Its send loop calls `_do_send` directly on core's own event loop, so it
@@ -503,15 +518,76 @@ target*, green when meeting the request and amber when short. The console is tru
 a rate meter; above roughly 20 rows a second, reading a rate off `+Nms` deltas on rows that replace
 themselves faster than they can be counted is not something to ask of anyone.
 
+**The reactive case was considered against `periodic_sending` again, and rejected again.** The
+obvious reading of "restart a periodic send with newly mapped values" is to call
+`connection.periodic_sending(...)`, which does drop the route's existing task for you. But it sends
+via `_do_send` on core's own loop, so none of those ticks would reach `runtime._log` — a reply
+stream actively producing traffic would show a *silent* Sent pane. GSim's own engine already has
+the property that made it attractive: behaviours are keyed by route+trigger and `_act` does
+`_stop_worker` then `_start_worker`, so re-triggering replaces the schedule rather than stacking
+one. No cancellation logic either way, and the console stays truthful.
+
+### 10e. The two trigger seams, and why they sit where they do
+
+- **`on_received`** hooks `runtime._make_receive_callback._on_message`. GSim already owns a callback
+  for every `(peer, opcode)` route, so no new core registration is needed and core's
+  one-callback-per-route rule is untouched. Dispatch happens **before** `_log` and regardless of
+  what a Received filter decides: filters govern what the console *shows*, behaviours govern how
+  this simulated unit *acts*, and coupling them would put the cause of a missing reply in a
+  completely different dialog. A message that failed to DECODE fires nothing — there is no payload
+  to test a condition against.
+- **`on_connect`** hooks `record.unit.handle_on_connect(...)`, registered per peer in
+  `runtime._install_handlers` (the renamed `_install_receive_handlers`). Core allows exactly one
+  on-connect callback per unit, so GSim owns it once and fans out — the same arrangement the receive
+  callbacks use. **It does not fire retroactively** (`core/connections/CLAUDE.md` §5c), so
+  `BehaviourEngine._fire_if_already_connected` fires a rule armed against an already-live peer, via
+  the injected `is_unit_connected` collaborator. Without that, configuring a handshake on a running
+  link does nothing at all until the peer happens to reconnect — which reads as the feature being
+  broken, on first use.
+
+### 10f. Conditions, delays and value forwarding
+
+- **`core_gateway/fieldpath.py`** owns dotted-path resolution, the operator table and the enum rule.
+  A filter rule and a behaviour condition are the same question against the same shape, so they are
+  one `Condition` type; `filters.Rule` composes it and adds an action and a hit count. The first
+  time those two drifted, a condition would have meant something different depending on which dialog
+  typed it. `assign_path` is the write half, used only by value forwarding.
+- **`core_gateway/delay.py`** is one daemon thread with a heap, not a `threading.Timer` per firing:
+  an `on_received` trigger on a 1kHz route would otherwise create a thousand threads a second for
+  work measured in microseconds. It closes the last stretch with `timing.sleep_until` under
+  `high_resolution_clock()`, so `wait 5ms` measures 5ms rather than the 15.6ms Windows tick — the
+  same class of bug §10b exists to fix, in a new place. The queue is bounded and reports what it
+  dropped.
+- **Mappings never mutate the configured payload.** `Behaviour.resolved_payload` deep-copies the
+  template and writes into the copy, so the payload the user typed survives every firing. A mapping
+  whose source is absent is *skipped*, not written as null — the template's value is a deliberate
+  choice and a missing source is not a reason to discard it. `last_mapped` records what actually
+  travelled, absences included, and is what the modal renders beside each row.
+- **`payload_version`** is how a running periodic worker learns its cached `PreparedSend` is stale.
+  `_pace` rebuilds only when it changes, so the ~160µs `prepare_message` is paid on a value change
+  and not per tick.
+- **Both ends of a mapping must be the same kind**, checked in `routes/behaviours.py` against both
+  schemas — an enum travels as a member NAME and a scalar as a number, so either direction produces
+  a payload IRS refuses. Caught at configure time rather than as an identical send failure repeated
+  forever on a worker thread. That route is also the only place that *can* check it: a reactive rule
+  spans two messages, and only there are both resolvable (incoming by the PEER's unit code, outgoing
+  by ours).
+
 Load-bearing rules:
 
-- **Keyed by route, `(connection_name, unit_name, op_code)`** — at most one schedule per message per
-  destination, mirroring what core enforces internally for `_periodic_tasks` and for the same
-  reason: two schedules on one route would silently double its rate. `PUT` is therefore an upsert.
+- **Keyed by route AND trigger**, `(connection_name, unit_name, op_code, trigger,
+  trigger_unit_name, trigger_op_code)`. Two rules sending one message on two different stimuli do
+  not conflict — "greet on connect" and "answer a poll" are both legitimately about the same
+  outbound message. What still collides, and must, is two `immediate` periodic schedules on one
+  route: that is the silent rate-doubling the original rule was written for. `PUT` is an upsert on
+  the whole key.
 - **`enabled AND connection running`** is one condition, evaluated in `BehaviourEngine._sync`. That
   single funnel is what makes stopping a connection pause its behaviours and starting it resume
   them, with no separate paused state to keep in step. `enabled` is intent; `active` is reality, and
   the UI's status dot shows `active` so a behaviour armed on a stopped connection never reads as live.
+  For a REACTIVE rule `active` means "armed and listening" rather than "a worker is live" — there is
+  no worker until something triggers it, and a dot that only lit during the instant of a response
+  would read as broken on a rule that is working perfectly.
 - **A failing tick never kills the schedule** — the usual cause (peer not yet connected) is
   transient. The error lands on the behaviour (`last_error`, `error_count`) and the engine publishes
   only on a *change* of error state, never per tick, so a fast failing schedule cannot flood the
