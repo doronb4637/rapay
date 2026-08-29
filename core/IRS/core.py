@@ -31,12 +31,13 @@ class ArrayField(BaseField):
         self.length = length
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> list[Any]:
+        parse = self.baseType.from_bytes
         if self.length is not None:
             array_len = getattr(instance, self.length) if isinstance(self.length, str) else self.length
-            return [self.baseType.from_bytes(reader, instance) for _ in range(array_len)]
+            return [parse(reader, instance) for _ in range(array_len)]
         array = []
-        while not reader.is_empty():
-            array.append(self.baseType.from_bytes(reader, instance))
+        while reader.offset < reader._len:
+            array.append(parse(reader, instance))
         return array
 
     def to_bytes(self, writer: BinaryWriter, value: list[Any]) -> None:
@@ -44,8 +45,9 @@ class ArrayField(BaseField):
             raise ValueError(
                 f"{getattr(self, '_name', '<array>')!r} holds {len(value)} items but is "
                 f"declared as exactly {self.length}")
+        write = self.baseType.to_bytes
         for item in value:
-            self.baseType.to_bytes(writer, item)
+            write(writer, item)
 
     def from_dict(self, value: list[Any]) -> list[Any]:
         return [self.baseType.from_dict(item) for item in value]
@@ -203,6 +205,6 @@ class Message(Structure):
         is_root = writer is None
         if is_root: writer = BinaryWriter()
         super().to_bytes(writer, value)
-        if is_root: return writer.get_bytes()
+        if is_root: return bytes(writer)
 
 

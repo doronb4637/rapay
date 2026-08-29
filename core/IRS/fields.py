@@ -15,12 +15,15 @@ class BaseField:
 
 class Field(BaseField):
     __slots__ = ('packer',)
+
     def __init__(self, fmt: str, endian: str = little_endian) -> None:
-        self.packer = get_packer(endian + fmt)
+         self.packer = get_packer(endian + fmt)
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> int:
         packer = self.packer
-        return packer.unpack_from(reader.data, reader.offset(packer.size))[0]
+        offset = reader.offset
+        reader.offset = offset + packer.size
+        return self.packer.unpack_from(reader.data, offset)[0]
 
     def to_bytes(self, writer: BinaryWriter, value: int) -> None:
         writer.buffer += self.packer.pack(value)
@@ -46,7 +49,9 @@ class EnumField(BaseField):
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> IntEnum | None:
         packer = self.packer
-        value = packer.unpack_from(reader.data, reader.offset(packer.size))[0]
+        offset = reader.offset
+        reader.offset = offset + packer.size
+        value = packer.unpack_from(reader.data, offset)[0]
         # value2member_map is identical to self.enum_class(value) but works much faster
         member = self.enum_class._value2member_map_.get(value)
         if member is not None:
@@ -57,10 +62,10 @@ class EnumField(BaseField):
             f"{self.enum_class.__qualname__}: {value} is not a defined member")
 
     def to_bytes(self, writer: BinaryWriter, value: Any) -> None:
-        if value is None:
-            raw_val = 0
-        elif isinstance(value, self.enum_class):
+        if isinstance(value, self.enum_class):
             raw_val = value.value
+        elif value is None:
+            raw_val = 0
         else:
             raw_val = value
         writer.buffer += self.packer.pack(raw_val)

@@ -8,22 +8,12 @@ def get_packer(fmt: str) -> struct.Struct:
 
 
 class BinaryReader:
-    __slots__ = ('data', '_offset',)
+    __slots__ = ('data', 'offset', '_len')
 
     def __init__(self, data: bytes | bytearray | memoryview) -> None:
         self.data = memoryview(data)
-        self._offset = 0
-
-    def offset(self, size: int) -> int:
-        current = self._offset
-        self._offset += size
-        return current
-
-    def remaining(self) -> int:
-        return len(self.data) - self._offset
-
-    def is_empty(self) -> bool:
-        return self._offset >= len(self.data)
+        self.offset = 0
+        self._len = len(data)
 
 
 class BinaryWriter:
@@ -35,5 +25,5 @@ class BinaryWriter:
     def write(self, data: bytes) -> None:
         self.buffer.extend(data)
 
-    def get_bytes(self) -> bytes:
+    def __bytes__(self) -> bytes:
         return bytes(self.buffer)
