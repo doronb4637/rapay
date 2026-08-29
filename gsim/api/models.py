@@ -19,6 +19,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+#: The filter vocabulary is imported from the engine that enforces it, not
+#: re-typed as a `Literal` here -- adding an operator there must not require
+#: remembering to widen this too. Same reasoning as `BehaviourRequest.kind`.
+from gsim.core_gateway import (
+    ACTIONS as FILTER_ACTIONS,
+    MODES as FILTER_MODES,
+    OPERATORS as FILTER_OPERATORS,
+)
+
 #: A connection's name IS its identifier -- every route addresses it as
 #: `/api/connections/{connection_name}/...`. So it is restricted to characters
 #: that survive a URL untouched: no spaces, no `/` (which would split the path
@@ -281,3 +290,69 @@ class BehaviourRequest(BaseModel):
     interval: float = Field(default=1.0, gt=0)
     payload: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+
+
+class FilterRule(BaseModel):
+    """One condition on a received message: keep it, or drop it.
+
+    `path` is dotted into the shape `Message.to_dict()` produces, so it may
+    descend through structs and into a bitfield's bits -- but never across an
+    array, because a single path cannot name one element of 35. That is enforced
+    against the real schema in `routes/filters.py`, which is the only layer that
+    knows which message this rule is for.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(description="'keep' or 'drop'.")
+    path: str = Field(min_length=1, description="Dotted field path, e.g. 'Header.Mode'.")
+    op: str = Field(default="==", description="One of == != < <= > >=")
+    #: An enum field decodes to its MEMBER NAME, so a rule against one carries a
+    #: string ("ON"), not a number. A scalar carries a number. Both are allowed
+    #: here; `routes/filters.py` checks the value against the field's own kind.
+    value: float | int | str | None = None
+
+    @field_validator("action")
+    @classmethod
+    def _known_action(cls, value: str) -> str:
+        if value not in FILTER_ACTIONS:
+            raise ValueError(f"must be one of {list(FILTER_ACTIONS)}")
+        return value
+
+    @field_validator("op")
+    @classmethod
+    def _known_operator(cls, value: str) -> str:
+        if value not in FILTER_OPERATORS:
+            raise ValueError(f"must be one of {sorted(FILTER_OPERATORS)}")
+        return value
+
+
+class FilterRequest(BaseModel):
+    """Configure (or reconfigure) the filter on one INBOUND message route.
+
+    An upsert keyed by `(connection, unit_name, op_code)`, exactly like
+    `BehaviourRequest` -- two filters on one route would contradict rather than
+    compose. `unit_name` here is the SENDER's configured peer name, because a
+    received message is decoded under the peer's unit code.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    unit_name: str = Field(min_length=1, description="Which peer sends this message.")
+    op_code: int = Field(ge=0, le=0xFFFF)
+    mode: str = Field(default="all", description="'all', 'change', or 'field-change'.")
+    change_field: str | None = Field(
+        default=None, description="Field to watch, required when mode is 'field-change'.")
+    rules: list[FilterRule] = Field(default_factory=list)
+    armed: bool = True
+
+    @field_validator("mode")
+    @classmethod
+    def _known_mode(cls, value: str) -> str:
+        if value not in FILTER_MODES:
+            raise ValueError(f"must be one of {list(FILTER_MODES)}")
+        return value
+
+    @model_validator(mode="after")
+    def _change_field_present(self) -> "FilterRequest":
+        if self.mode == "field-change" and not self.change_field:
+            raise ValueError("mode 'field-change' needs a change_field")
+        return self

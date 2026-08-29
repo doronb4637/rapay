@@ -41,9 +41,10 @@ from core.IRS.irs_parser import (
 __all__ = [
     "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
     "list_messages", "message_schema", "resolve_route", "known_unit_codes",
+    "filter_targets",
 ]
 
-from .schema import describe_message
+from .schema import describe_message, filter_targets  # noqa: F401
 
 
 def list_messages(unit_code: int, namespaces: Sequence[str] | None = None) -> list[dict[str, Any]]:

@@ -100,6 +100,7 @@ gsim/
     registry.py                 read-only, namespace-scoped view of the IRS registry
     payloads.py                 form payload -> a built IRS message, ready to encode
     behaviours.py               scheduled sending (periodic, ...) -- GSim-driven, see 10
+    filters.py                  which RECEIVED messages are worth logging at all, see 10d
     runtime.py                  GSim's connection registry, message logs, thread bridge
   api/
     app.py                      FastAPI factory; serves gsim/web/dist at "/" if built
@@ -108,6 +109,7 @@ gsim/
       connections.py             create / edit / delete / start / stop / import (Save-Load)
       messages.py                registry query, form schema, send, log history + clear
       behaviours.py              list / upsert / start / stop / delete schedules
+      filters.py                 list / upsert / arm / disarm / delete received filters
       events.py                  WebSocket: live log + connection-state feed
   web/                         React 18 + Vite 5 + Tailwind v4 + lucide-react
     public/favicon.svg           tab icon (matches the Logo mark)
@@ -115,6 +117,7 @@ gsim/
       App.jsx                    shell: [Connections/Messages] | Inspector | [Sent/Received]
       api.js                     fetch wrapper + WebSocket client (auto-reconnect)
       lib/schema.js               client-side mirror of payloads.py's defaulting rules
+      lib/filterTargets.js        client-side mirror of schema.py's filter_targets
       lib/sessionFile.js          Save/Load envelope: build, parse, browser-download fallback
       components/
         ui.jsx                    shared design-system primitives (Button, Field, Badge, ...)
@@ -127,6 +130,7 @@ gsim/
         ContextMenu.jsx            desktop-style right-click menu + useContextMenu()
         BehavioursPanel.jsx        every active schedule, across every connection
         BehaviourModal.jsx         configure/stop/remove one message's schedule
+        FilterModal.jsx            configure what inbound traffic is worth logging (10d)
         ConnectionModal.jsx        create/edit connection form (hex codes, IPv4 mask)
 ```
 
@@ -412,17 +416,92 @@ and are not reliably orderable against each other.
 ### 10. Behaviours: scheduled sending, and why core's `periodic_sending` is unused
 
 A behaviour is "keep sending THIS message to THIS peer, like THIS". `core_gateway/behaviours.py`
-owns them; `BehaviourEngine` runs one daemon thread per active behaviour and calls
-`GSimRuntime.send()` — **the same call the manual Send button makes**.
+owns them; `BehaviourEngine` runs one daemon thread per active behaviour and fires it through
+`GSimRuntime.sender()` — **the same construction the manual Send button goes through**.
 
 Core *has* `Connection.periodic_sending(opcode, data, interval, unit_name)`, and it works, but it is
 deliberately not used here. Its send loop calls `_do_send` directly on core's own event loop, so it
-never passes through `runtime.send()` and GSim would log nothing for a schedule actively producing
-traffic — while the *receiving* GSim connection would still log every tick, since inbound callbacks
-are unaffected. The console would contradict itself: a silent Sent pane beside a filling Received
-pane. It also encodes its payload **once** at schedule time, which makes anything varying per tick
-(a counter, a timestamp, jitter) impossible through it by construction — and more behaviour shapes
-are the stated direction.
+never passes through `runtime`'s send path and GSim would log nothing for a schedule actively
+producing traffic — while the *receiving* GSim connection would still log every tick, since inbound
+callbacks are unaffected. The console would contradict itself: a silent Sent pane beside a filling
+Received pane. It also encodes its payload **once** at schedule time, which makes anything varying
+per tick (a counter, a timestamp, jitter) impossible through it by construction — and more behaviour
+shapes are the stated direction.
+
+And, measured after a `0.001s` schedule was reported firing at 16 ms: **it would not be faster
+either.** That is the third reason, and the one that closes the question:
+
+| 1 ms requested, Python 3.11.7 / Win10 | actual |
+| --- | --- |
+| `threading.Event.wait(0.001)` — what the engine used to pace with | **15.30 ms** |
+| `asyncio.sleep(0.001)` — what `periodic_sending` paces with (Proactor loop) | **15.47 ms** |
+| `time.sleep(0.001)` — high-resolution waitable timer since CPython 3.11 | 1.79 ms |
+
+Both of the first two bottom out on `WaitForSingleObjectEx`, whose timeout is rounded up to the
+Windows system timer tick (15.6 ms). The bottleneck was never *where the loop lived*, it was the
+sleep primitive — which is why an empty `ArrayOfAreas` and a 35-struct one both measured 16 ms.
+
+### 10b. How a 1 ms behaviour is actually made to fire at 1 ms
+
+Four things, all in `gsim/`; `core/` is untouched.
+
+- **`core_gateway/timing.py`** is the only place that knows about any of this. `sleep_until(deadline,
+  stop)` sleeps most of the way with `time.sleep` and closes the last ~2 ms with a `time.sleep(0)`
+  yielding spin (measured p99 0.8 µs against an absolute deadline); it yields rather than busy-looping
+  on `perf_counter` because a bare Python loop holds the GIL for a whole switch interval and would
+  starve core's event loop thread — the very thread each send marshals onto.
+  `high_resolution_clock()` is a refcounted context holding `winmm.timeBeginPeriod(1)` **and**
+  `sys.setswitchinterval(0.001)`; both are process/system-wide, so it is scoped to an actually-running
+  sub-15 ms schedule rather than taken for the life of the process.
+- **`BehaviourEngine._pace` schedules against absolute deadlines**, not `sleep(interval)` after the
+  work. That distinction is worth 20% on its own: a 1 ms tick doing ~250 µs of encode/send/log has a
+  real period of 1.25 ms under fixed sleeps. An overrun **skips** the missed ticks and realigns —
+  never a catch-up burst, which would misrepresent the traffic pattern the schedule exists to
+  reproduce — and counts them in `missed_ticks`, alongside a smoothed `actual_hz`.
+- **`runtime.sender()` builds the message once per worker**, not once per tick: `prepare_message` is
+  ~160 µs for a 35-element `ArrayOfAreas`, a sixth of the whole 1 ms budget, re-derived from a payload
+  that (for `periodic`) cannot have changed. `PreparedSend` holds the resolved route and the built
+  message; `runtime.send()` is now written in terms of it, so a scheduled tick and the Send button
+  still travel exactly one code path.
+- **`LogEntry.timestamp` comes from `timing.wall_time()`, not `time.time()`.** `time.time()` on
+  Windows is `GetSystemTimeAsFileTime`, granular to the *same* 15.6 ms tick
+  (`time.get_clock_info('time').resolution` says so outright) — a perfectly paced 1 ms behaviour
+  logged with it still reads as 16 ms steps, and the fix looks like it did nothing. `wall_time()`
+  anchors one wall-clock reading to `perf_counter` and adds the monotonic delta.
+
+Measured end to end afterwards, Tiful→DTU over TCP loopback, `ArrayOfAreas` at `interval=0.001`:
+p50 gap **0.999 ms**, p99 1.06 ms, ~9997 sends per 10 s, `Len=0` and `Len=35` alike.
+
+### 10c. The console streams EVERY message — batched, never sampled
+
+`runtime._log` publishes unconditionally, in both directions. A 1 kHz behaviour really does put
+~1000 events a second per direction on the socket, and that is correct: the console is the
+instrument this project's timing is diagnosed with, and it has to be able to show that a 1 ms
+schedule is firing at 1 ms.
+
+**A rate limit was tried here first, and reverted — the reason is worth keeping.** Capping the
+stream at 60 Hz per route made consecutive console rows land ~16.7 ms apart, so the pane read
+`+17ms` on every row while the scheduler was genuinely at 1.000 ms. That is *indistinguishable from
+the original bug*. An instrument that reports its own sampling period instead of the signal is worse
+than a slow one, because it invalidates the measurement everyone will reach for next time.
+
+What makes full fidelity affordable is **coalescing in `api/routes/events.py`**, which costs no
+fidelity at all. The handler awaits one `send_json` at a time and drains everything the publisher
+queued while that write was in flight into the next frame (`{"type": "messages", "entries": [...]}`).
+The frame rate therefore falls out of how fast the client actually drains — one frame per message
+when it keeps up, one per hundred when it does not — with no configured rate, no timer, and no
+guess about browser speed. `_coalesce` merges only *consecutive* message events and leaves
+everything else in place, because `logs.cleared` and `connection.deleted` tell the client to empty a
+pane: entries published before one must not arrive after it, or the pane refills with what was just
+cleared.
+
+Verified with a second WebSocket client against a live 1 kHz schedule: 5390 entries delivered,
+**zero gaps in `seq`**, and `actual_hz` still 1000.0 with the browser console open.
+
+`BehavioursPanel` still shows `actual_hz` for any schedule above ~20 Hz — *whether or not it is on
+target*, green when meeting the request and amber when short. The console is truthful but it is not
+a rate meter; above roughly 20 rows a second, reading a rate off `+Nms` deltas on rows that replace
+themselves faster than they can be counted is not something to ask of anyone.
 
 Load-bearing rules:
 
@@ -437,6 +516,17 @@ Load-bearing rules:
   transient. The error lands on the behaviour (`last_error`, `error_count`) and the engine publishes
   only on a *change* of error state, never per tick, so a fast failing schedule cannot flood the
   WebSocket.
+- **`actual_hz` is re-seeded by the worker that owns it**, at the top of `_pace`, not only in
+  `set()`. `_stop_worker` signals the outgoing worker without joining it, so its final sample can
+  land *after* `set()` has reset the average — editing a 1 ms schedule to 0.5 s then read 550 Hz for
+  half a minute while the moving average crawled down. `_tick` likewise refuses to touch any counter
+  once its `stop` is set: the message really went out, but a replacement worker may already own
+  those numbers.
+- **`runtime.stop()` pauses behaviours BEFORE closing the transport**, matching `delete()`. Closing
+  first leaves a gap in which the worker fires into a connection being torn down and books a spurious
+  failure per tick; at the old 16 ms floor that cost a stray error or two, at 1 ms it booked ~1800 and
+  left `last_error` set after an ordinary stop. `_sync` reads `is_connection_running`, so `running`
+  must be cleared before the call.
 - **Payload is normalised once**, at configure time, by the same `build_payload` the manual path uses
   (§4) — a payload that could never encode fails in the `PUT`, where the modal shows why, instead of
   logging the identical error forever on a worker thread.
@@ -477,6 +567,91 @@ positionally, so every surface relationship survives. Accents are *darkened*, no
 on near-black is fine, on white it is not. The two dim steps (`slate-600/500`) are measured against
 white rather than mirrored -- a straight inversion put 600 at 2.56:1, unreadable for timestamps.
 Everything now clears 4.39:1, with sent (7.56) and received (7.68) still distinct hues.
+
+That claim was briefly false and is worth knowing why: the block redefined the 400 and 300 steps of
+each accent but **not the 500 step**, which then fell through to Tailwind's own `#f59e0b` /
+`#10b981` — 1.84:1 and 2.54:1 on the light panel. Not decorative: `BehavioursPanel`'s measured-rate
+readout and the console's dropped-message count are both `text-{amber,emerald}-500` at 10px. Both
+are now defined, and measured **as painted** — they are used at `/90` and `/80`, which composites
+them back toward the background — against `slate-800` as well as `slate-900`, since a rule row and a
+selected log row sit on the raised surface. If you add an accent class at a step this block does not
+list, check it: the fallthrough is silent and only visible in light mode.
+
+### 10d. Received filters: dropping messages without becoming the thing §10c warns about
+
+See `gsim/docs/FILTERS.md` for how to use it from the UI/API; this section is why it works.
+
+`core_gateway/filters.py` lets a user say, per inbound message, "log this only when ...": keep/drop
+rules on a field value, and a change trigger (whole message, or one named field). Received only —
+nothing filters the sent direction.
+
+This is in obvious tension with §10c, which records a 60Hz console sampler being reverted, and the
+resolution is the whole design:
+
+> Sampling was **implicit, rate-derived, and unannounced**. Filtering is **user-authored,
+> per-message, and counted.** Every rule carries `hits`, every filter carries `dropped` / `logged` /
+> `dropped_by_change`, and they reconcile: `dropped + logged` is exactly what arrived on that route
+> while the filter was armed. Verified at 1kHz — 8009 dropped + 1 logged against a `sent_count` of
+> 8012, the difference being messages in flight at the sampling instant.
+
+An instrument may not quietly lose signal. It may lose signal a human asked it to lose, while
+saying how much. That is the entire licence, and it is why the counters are load-bearing rather
+than a nicety — the UI shows them on the rule row, the message row, the dialog header and the
+Received pane header, and "Show all" (`POST /api/filters/disarm-all`) disarms everything in one
+click without deleting anything.
+
+**Why it is server-side.** `admits()` is consulted at the top of `_log`, before `next(self._seq)`,
+before `record.received.append`, before the EventBus. Client-side hiding was considered and
+rejected on arithmetic: `LOG_LIMIT` is 2000, which at 1kHz is **two seconds** of history, and the
+pane renders 30 rows — so "only when Len changes" would find the interesting entry already evicted
+by the noise it exists to remove. The feature would fail at exactly the rate that motivates it. The
+cost is accepted and real: **a dropped message is gone**, and disarming reveals new traffic, not the
+past.
+
+Ordering before `next(self._seq)` is deliberate too — a dropped message must not burn a sequence
+number, because the console reads a `seq` gap as loss and this is not loss. (Note when testing:
+`seq` is ONE counter shared across both directions and every connection, so consecutive *received*
+entries are never adjacent anyway; the property has to be isolated by stopping other traffic.)
+
+**A decode failure is never filtered.** `_log` checks `error is None and payload is not None` first:
+an error is exactly what the pane exists to show, and no rule could have been written against a
+payload that does not exist.
+
+Load-bearing rules:
+
+- **Keyed by route** `(connection_name, unit_name, op_code)`, like behaviours; `PUT` is an upsert.
+  `unit_name` is the SENDER's peer name, and the route is resolved with **their** unit code — a
+  received message is decoded under `parse_irs(their_code, ...)`. `GET /api/connections/{n}/incoming`
+  is the inbound counterpart of `/messages` for exactly this reason; it is not the same list
+  relabelled.
+- **Two stages, in this order.** Rules decide whether the message is *interesting* (any matching
+  `drop` rejects; if any `keep` exists, one must match), then the change trigger decides whether it
+  is *new*. Stated verbatim in the dialog, because two keeps and a drop is otherwise a guess.
+- **Clearing the Received log calls `filters.forget()`**, and so does starting a connection. Without
+  it, a link streaming one constant value leaves every change filter holding a matching baseline and
+  the freshly cleared pane sits empty forever — which looks exactly like the filter having broken
+  the console. Clear means start the record over; a record whose first entry is suppressed is not a
+  record.
+- **Paths address `to_dict()`'s real shape**, read out of the codec rather than assumed: a scalar is
+  a number, an **enum is its member NAME** (`"ON"`, so `Flag == 2` silently never matches — the UI
+  offers a dropdown and the API refuses a non-member), a struct and a **bitfield** are both nested
+  dicts (so `Area.fr` resolves), and an array is a list.
+- **Nothing inside an array is rule-addressable.** `Areas.fr` cannot name one of 35 elements.
+  `schema.filter_targets` never descends into an array, `routes/filters.py` rejects such a path with
+  a message naming the enclosing array, and the change trigger covers the case instead by comparing
+  the whole list. This is decided in exactly one place — `filters.py` only ever sees paths.
+- **Counters publish on a 2Hz heartbeat**, never per decision, mirroring `BehaviourEngine`'s. At
+  1kHz a per-drop publish would put the load back on the socket that filtering exists to relieve.
+- **Deleting a connection drops its filters**, and so does editing one (`replace` is
+  delete-then-create, §7) — same rule as behaviours, and for the same reason.
+- **Filters are not written to the session file.** Neither are behaviours; consistency wins.
+
+The console keeps its **per-row Hide** unchanged and deliberately separate: `N hidden` is the
+instant, local, per-opCode mute where the entries still exist, `N dropped` is the server-side rules
+where they do not. Merging them into one "not shown" number would hide the one distinction that
+matters when you are deciding whether what you are looking for can still be recovered. An empty
+Received pane with filters armed says so and links to the dialog — a pane that has gone quiet must
+never be indistinguishable from a dead link.
 
 ### 11a. `ContextMenu`'s dismissal is containment-checked, not capture-raced
 
@@ -536,6 +711,60 @@ fails partway: the handlers are registered, but `running` is still False. Guardi
 (`route ... already has an on-receive callback`) — a 500 on exactly the everyday workflow of bringing
 up a TCP client before its server and starting it once the server is up. `ConnectionRecord` carries
 `handlers_installed` for this, cleared in `stop()` because core's `close()` drops the callbacks.
+
+### 12b. `connecting`: a third status between off and on, made necessary by core's own retry
+
+`core/connections/base.py`'s `Connection._startup_all` was changed (by the user, not from GSim) to
+retry a refused TCP connect forever, once a second, instead of raising `WinError 1225` straight
+through. That is a real behavioural change to `Connection.start()` itself: it can now block for as
+long as the peer stays down, with **no upper bound** — proven empirically before trusting it, not
+assumed: a client created against a closed port left its `POST /api/connections` request unanswered
+past a 6s timeout. Calling it straight from an API request thread, as `runtime.start()` always had,
+would therefore hang that request (and the worker thread serving it) for the entire outage.
+
+`runtime.start()` now runs `unit.start()` on its own background thread and waits on the caller's
+thread for only `CONNECT_GRACE_SECONDS` (0.5s — comfortably under the 1s retry interval, so it can
+never straddle a second attempt and therefore never changes anything about the ordinary case). If
+the peer is already listening, the attempt settles inside that window and the HTTP response carries
+the real, final `running`/`start_error` exactly as before this change. If it does not settle,
+`record.connecting = True` rides back instead, and the eventual outcome — connected, or a
+non-retryable error — arrives later over the WebSocket as an ordinary `connection.state` broadcast
+(`_finish_start`).
+
+`connecting` is deliberately its own field, not folded into `running`: `running` still means
+"`unit.start()` actually returned", and everything that reads it (`_is_connection_running`,
+`BehaviourEngine._sync`) keeps meaning exactly what it always meant — a schedule stays paused for a
+connection that is merely *attempting* to connect, the same as it always was for one that is simply
+stopped. Only the UI treats the two as one "lit" state, with `connecting` picking the colour (amber,
+not green — see `StatusDot`'s `pending` prop in `ui.jsx`).
+
+**Superseding an in-flight attempt.** `record.start_token` is bumped by `start()` (each new attempt),
+`stop()`, and `delete()`. `_finish_start` captures the token when it begins and compares it when
+`unit.start()` finally returns; a mismatch means something else decided this connection's fate while
+the attempt was in flight, so it walks away instead of overwriting a newer state. The one case this
+exists for: **a user clicks Stop while a client is mid-retry.** Core exposes no way to actually cancel
+that retry loop — `Connection.close()` is a no-op while `_started` is still `False`, which is exactly
+the state a connection sits in for the entire retry (`_started` only flips at the very end of
+`_startup_all`) — so `stop()` can only update GSim's own bookkeeping and bump the token; the core-level
+retry loop keeps running underneath, unstoppable, until it either connects or hits a non-retryable
+error. If it eventually **connects anyway**, `_finish_start` sees its token is stale and calls
+`record.unit.close()` again — this time for real, since `_started` is `True` by then — rather than
+resurrecting a connection the user explicitly turned off. Verified end to end: stopped a client mid-
+retry, then started the server it was waiting for; the client's `unit.start()` completed and was
+immediately closed again, and GSim's own state stayed `running=False` throughout.
+
+`create(autostart=True)`'s `except OSError` around `self.start(...)` is now unreachable for the
+retry-related case — that failure surfaces through `_finish_start`, on the background thread, as
+`record.start_error` — and is kept only as a backstop for a failure before the attempt is even
+dispatched (`_install_receive_handlers` raising).
+
+**In the UI**, `Sidebar.jsx`, `LinkOverview.jsx` and each per-peer dot all compute the same two
+amber cases — `connecting` (still inside `unit.start()`) and "running with no active peer yet" (a
+server nobody has dialled into, or the narrow window before `active_units` catches up) — and light
+the dot (`on`) for either, tinting it amber (`pending`) rather than the green `dot-live` reserved for
+an actual peer. `App.jsx`'s Sidebar `onToggle` treats `connecting` as "on" too, so clicking mid-retry
+sends `stop`, not a second `start()` the backend would just no-op (`start()` returns early while
+already `connecting`, to avoid racing two overlapping retry loops against one connection).
 
 `index.html` is served `no-store` (`_WebFiles` in `api/app.py`). Vite fingerprints every asset, so
 `index.html` is the only stable filename and the only thing naming the current hashes — if the shell

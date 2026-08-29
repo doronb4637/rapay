@@ -3,11 +3,10 @@
 
 
 [Improvments]
-1. Add function that initialize Message with default values(fill).
+2. Add more advanced behaviors in Gsim.
+3. Add client Turn on even when the server doens't exist(it will keep trying to reconnect until the server turns on make its color YELLOW to show the connection is turned on but not connected)
 
 
 [TODOS]
-1. Understand if gsim lib does any ontop calculation on the messages.
-2. read the whole project and enforcing Clean code and understandable code.
-3. Add DDS support(figure out with gemini/claude how to Implement the DDS)
-4. Get GitKraken.
+1. read the whole project and enforcing Clean code and understandable code.
+2. Get GitKraken.

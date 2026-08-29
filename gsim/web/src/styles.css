@@ -117,11 +117,28 @@
     --color-sky-500: #0284c7;
     --color-sky-400: #0369a1;
     --color-sky-300: #075985;
+    /* The 500 step was missed when this block was written, and it is not
+       decorative: `BehavioursPanel`'s measured-rate readout and the console's
+       dropped-message count are both `text-{amber,emerald}-500` at 10px. Left
+       undefined they fell through to Tailwind's own #f59e0b / #10b981, which
+       measure 1.84:1 and 2.54:1 against the slate-900 panel -- invisible, and
+       enough to make the claim in gsim/CLAUDE.md 10a untrue.
+
+       Chosen darker than a straight three-step drop because both are used at
+       partial alpha (`/90`, `/80`), which composites them BACK toward the
+       background -- so they are measured as PAINTED, not as declared, and
+       against slate-800 as well as slate-900, since a drop-rule row and a
+       selected log row both sit on the raised surface:
+
+           amber-500/90     5.33 on slate-900   4.74 on slate-800
+           emerald-500/80   5.11 on slate-900   4.62 on slate-800  */
+    --color-emerald-500: #02543c;
     --color-emerald-400: #047857;
     --color-emerald-300: #065f46;
     --color-rose-400: #e11d48;
     --color-rose-300: #be123c;
     --color-rose-200: #9f1239;
+    --color-amber-500: #8f4407;      /* see the note on emerald-500 above */
     --color-amber-400: #b45309;
     --color-amber-300: #92400e;
 }
@@ -240,6 +257,20 @@
     :root[data-theme='light'] .dot-live {
         box-shadow: 0 0 0 3px rgba(4, 120, 87, 0.22);
         box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-emerald-400) 22%, transparent);
+    }
+
+    /* The "pending" counterpart to `.dot-live` above -- same halo-in-dark,
+       ring-in-light treatment, amber instead of emerald. Literal fallback
+       first for the same reason: a browser without `color-mix` keeps a halo
+       instead of losing it outright. */
+    .dot-pending {
+        box-shadow: 0 0 6px rgba(251, 191, 36, 0.7);
+        box-shadow: 0 0 6px color-mix(in srgb, var(--color-amber-400) 70%, transparent);
+    }
+
+    :root[data-theme='light'] .dot-pending {
+        box-shadow: 0 0 0 3px rgba(180, 83, 9, 0.22);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-amber-400) 22%, transparent);
     }
 
     /* Digits that sit in a column -- log timestamps, deltas, byte offsets --

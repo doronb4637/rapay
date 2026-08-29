@@ -28,6 +28,26 @@ export default function BehavioursPanel({
 
   const running = behaviours.filter((behaviour) => behaviour.active).length;
 
+  // Above this many sends a second, reading the rate off the console means
+  // eyeballing the +Nms deltas on rows that are replacing themselves faster
+  // than they can be counted. The console is truthful (it carries every entry,
+  // unsampled) but it is not a rate meter, so a fast schedule gets a number.
+  const UNCOUNTABLE_HZ = 20;
+
+  // What the schedule is ACTUALLY delivering -- shown whether or not it is on
+  // target. "Is it really sending at 1kHz?" is the exact question someone
+  // setting a 0.001s interval is asking, and answering it only when the answer
+  // is "no" leaves the good case indistinguishable from an unanswered one.
+  // Amber when genuinely short of the request, green when meeting it.
+  const rateOf = (behaviour) => {
+    if (!behaviour.active || !behaviour.actual_hz || !behaviour.interval) return null;
+    const requested = 1 / behaviour.interval;
+    const short = behaviour.actual_hz < requested * 0.95;
+    if (requested <= UNCOUNTABLE_HZ && !short) return null;  // 'every 2s' says it better
+    const hz = behaviour.actual_hz;
+    return { label: `${hz >= 100 ? Math.round(hz) : hz.toFixed(1)} Hz`, short };
+  };
+
   const menuItems = [
     {
       label: 'Stop all',
@@ -109,13 +129,28 @@ export default function BehavioursPanel({
                     {behaviour.message_name ?? behaviour.op_code_hex}
                   </span>
                   <span className="block truncate font-mono text-[10px] text-slate-500">
-                    {nameOf(behaviour.connection_name)} → {behaviour.unit_name} · every {behaviour.interval}s
+                    {nameOf(behaviour.connection_name)} → {behaviour.unit_name} ·{' '}
+                    {/* The measured rate REPLACES the interval once there is
+                        one, rather than sitting beside it: this line is narrow
+                        enough to truncate, and in a rail that can only fit one
+                        of the two, what it is doing beats what it was told. */}
+                    {rateOf(behaviour)
+                      ? (
+                        <span className={rateOf(behaviour).short ? 'text-amber-500/90' : 'text-emerald-500/80'}>
+                          {rateOf(behaviour).label}
+                        </span>
+                      )
+                      : `every ${behaviour.interval}s`}
                   </span>
                 </button>
 
                 <span
                   className="tnum shrink-0 font-mono text-[10px] text-slate-500"
-                  title={`${behaviour.sent_count} sent`}
+                  title={[
+                    `${behaviour.sent_count} sent`,
+                    behaviour.actual_hz ? `${behaviour.actual_hz.toFixed(1)} Hz measured` : null,
+                    behaviour.missed_ticks ? `${behaviour.missed_ticks} ticks missed` : null,
+                  ].filter(Boolean).join('\n')}
                 >
                   {behaviour.sent_count}
                 </span>

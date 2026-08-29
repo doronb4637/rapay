@@ -29,6 +29,7 @@ import Console from './components/Console';
 import ConnectionModal from './components/ConnectionModal';
 import BehaviourModal from './components/BehaviourModal';
 import BehavioursPanel from './components/BehavioursPanel';
+import FilterModal from './components/FilterModal';
 import Resizer from './components/Resizer';
 import { Button, IconButton, StatusDot, cx } from './components/ui';
 
@@ -83,7 +84,17 @@ export default function App() {
     }
   };
   const queueLogEntry = (direction, entry) => {
-    pendingLogsRef.current[direction].push(entry);
+    const pending = pendingLogsRef.current[direction];
+    pending.push(entry);
+    // Never hold more than the pane can show. `requestAnimationFrame` does not
+    // fire at all while the window is minimised or fully occluded -- so without
+    // this the buffer grows at the FULL send rate for as long as that lasts,
+    // which under a 1kHz behaviour is ~2000 entries (~5MB) a second, retained,
+    // for a view that will only ever render the last LOG_VIEW_LIMIT of them.
+    // Trimming here costs nothing: `flushPendingLogs` slices to the same cap.
+    if (pending.length > LOG_VIEW_LIMIT) {
+      pending.splice(0, pending.length - LOG_VIEW_LIMIT);
+    }
     if (flushHandleRef.current === null) {
       flushHandleRef.current = requestAnimationFrame(flushPendingLogs);
     }
@@ -114,6 +125,10 @@ export default function App() {
   // that fail on send.
   const [destination, setDestination] = useState(null);
   const [behaviours, setBehaviours] = useState([]);
+  // Received filters. Process-wide like behaviours, and for the same reason: a
+  // filter keeps dropping messages while you look at a different connection.
+  const [filters, setFilters] = useState([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   // null | {opCode, payload, messageName, connectionName, unitName}
   const [behaviourDraft, setBehaviourDraft] = useState(null);
   // In-progress compose payloads, keyed by route. ComposeForm is deliberately
@@ -194,6 +209,7 @@ export default function App() {
   useEffect(() => {
     refillLogs();
     api.behaviours().then(setBehaviours, () => {});
+    api.filters().then(setFilters, () => {});
   }, [refillLogs]);
 
   // Changing connection only re-aims the Inspector; the console keeps streaming.
@@ -225,6 +241,10 @@ export default function App() {
           // Behaviours ride the snapshot: they keep firing across a dropped
           // socket, so a reconnect must not leave the panel showing none.
           if (event.behaviours) setBehaviours(event.behaviours);
+          // Filters ride the snapshot too: they keep dropping across a dropped
+          // socket, so a reconnect without them would show a quiet Received
+          // pane with nothing on screen saying why.
+          if (event.filters) setFilters(event.filters);
           // The snapshot does NOT carry log history, and everything that
           // happened while the socket was down was missed -- re-sync it.
           discardPendingLogs();
@@ -234,6 +254,7 @@ export default function App() {
         // The server sends the whole list on any change, so this is a replace,
         // not a merge -- a dropped event cannot leave a stale schedule on screen.
         if (event.type === 'behaviours') return setBehaviours(event.behaviours);
+        if (event.type === 'filters') return setFilters(event.filters);
         if (event.type === 'logs.cleared') {
           const drop = () => [];
           discardPendingLogs(event.direction);
@@ -264,6 +285,18 @@ export default function App() {
           setSent(drop);
           setReceived(drop);
           return refresh();
+        }
+        // One frame, N entries. The server coalesces whatever piled up while it
+        // was writing the previous frame (see api/routes/events.py), so under a
+        // fast behaviour this arrives as batches rather than as a thousand
+        // separate socket messages a second -- but it carries EVERY entry, so
+        // the timestamps the console renders are the real send times. The
+        // singular form is still handled: it is what a lone event looks like
+        // when nothing had to be batched.
+        if (event.type === 'messages') {
+          event.entries.forEach((entry) =>
+            queueLogEntry(entry.direction === 'sent' ? 'sent' : 'received', entry));
+          return;
         }
         if (event.type === 'message.sent' || event.type === 'message.received') {
           queueLogEntry(event.entry.direction === 'sent' ? 'sent' : 'received', event.entry);
@@ -517,7 +550,14 @@ export default function App() {
             }
             onToggle={(connection) =>
               guard(async () => {
-                await (connection.running ? api.stop(connection.name) : api.start(connection.name));
+                // `connecting` (still inside `unit.start()`, retrying a
+                // refused connect -- core/connections/base.py) reads as "on"
+                // for this purpose same as `running` does: the click has to
+                // mean Stop, not a second Start that the backend would just
+                // no-op (`runtime.start()` returns early while already
+                // `connecting`).
+                const on = connection.running || connection.connecting;
+                await (on ? api.stop(connection.name) : api.start(connection.name));
                 await refresh();
               })
             }
@@ -634,6 +674,8 @@ export default function App() {
               );
             })
           }
+          filters={filters}
+          onOpenFilters={() => setFiltersOpen(true)}
         />
       </div>
 
@@ -685,6 +727,39 @@ export default function App() {
           }
           {...behaviourActions}
           onClose={() => setBehaviourDraft(null)}
+        />
+      )}
+
+      {/* Received filters. Opened from the Received pane, and scoped to the
+          selected connection by default -- the dialog can switch, but starting
+          somewhere other than where the user already is would be a puzzle.
+          Every action re-reads from the server response rather than mutating
+          local state, for the same reason clearing the console does: the
+          `filters` broadcast is for OTHER clients, and while this socket is
+          down none arrives. */}
+      {filtersOpen && (
+        <FilterModal
+          connections={connections}
+          filters={filters}
+          initialConnection={selectedName}
+          onSave={async (connectionName, body) => {
+            await api.setFilter(connectionName, body);
+            setFilters(await api.filters());
+          }}
+          onDelete={async (id) => {
+            await api.deleteFilter(id);
+            setFilters(await api.filters());
+          }}
+          onArm={async (id) => {
+            await api.armFilter(id);
+            setFilters(await api.filters());
+          }}
+          onDisarm={async (id) => {
+            await api.disarmFilter(id);
+            setFilters(await api.filters());
+          }}
+          onDisarmAll={async () => setFilters(await api.disarmAllFilters())}
+          onClose={() => setFiltersOpen(false)}
         />
       )}
 

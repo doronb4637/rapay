@@ -231,7 +231,7 @@ def test_short_fixed_array_is_rejected():
 def test_field_without_a_wire_format_is_rejected_at_class_definition():
     """A lost `= Byte` dropped the field from `_fields_` while leaving it in
     `__slots__`, so the class looked normal and quietly stopped carrying it."""
-    with pytest.raises(TypeError, match="no wire format"):
+    with pytest.raises(TypeError, match="Typo.oops: annotated <class 'int'> with no Type/Size"):
         class Typo(Message):
             good: int = Byte
             oops: int
@@ -243,7 +243,7 @@ def test_enum_attribute_rejects_a_non_member():
     message = Flagged.from_dict({}).fill()
 
     for bad in ("ONN", 99, 3.7, [1, 2]):
-        with pytest.raises(TypeError, match="E_Zero member, name or value"):
+        with pytest.raises(TypeError, match=f"Flagged.flag expects a E_Zero member, name, value, or None, got"):
             message.flag = bad
 
 
