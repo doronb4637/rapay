@@ -212,20 +212,20 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
-    def start(self) -> None:
+    def start(self, retry: bool = False) -> None:
         """
         Boot this connection's in the background loop,
         blocks until it is actually listening / connected.
         """
         if self._started:
             return
-        self._loop_thread.await_coroutine(self._startup_all())
+        self._loop_thread.await_coroutine(self._startup_all(retry))
         self._started = True
         atexit.register(self.close)
 
-    async def _startup_all(self) -> None:
+    async def _startup_all(self, retry: bool) -> None:
         index = 0
-        while True:
+        while retry:
             try:
                 await self._do_start()
                 return
@@ -235,7 +235,6 @@ class Connection(ABC):
                 index += 1
                 logger.info(f"Server refused connection trying to reconnect, time: {index}")
                 await asyncio.sleep(1)
-
 
     def close(self, timeout: float | int | None = 5.0) -> None:
         """

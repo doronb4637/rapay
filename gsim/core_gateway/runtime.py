@@ -578,7 +578,7 @@ class GSimRuntime:
         `_started` is true by then, so `close()` is no longer a no-op.
         """
         try:
-            record.unit.start()
+            record.unit.start(True)
         except Exception as exc:
             with self._lock:
                 stale = record.start_token != token
