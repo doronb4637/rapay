@@ -225,12 +225,12 @@ class Connection(ABC):
 
     async def _startup_all(self, retry: bool) -> None:
         index = 0
-        while retry:
+        while True:
             try:
                 await self._do_start()
                 return
             except ConnectionRefusedError as exc:
-                if getattr(exc, 'winerror', None) != 1225:
+                if not retry or getattr(exc, 'winerror', None) != 1225:
                     raise exc
                 index += 1
                 logger.info(f"Server refused connection trying to reconnect, time: {index}")
