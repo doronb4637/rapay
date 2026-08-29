@@ -259,6 +259,20 @@
         box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-emerald-400) 22%, transparent);
     }
 
+    /* The "pending" counterpart to `.dot-live` above -- same halo-in-dark,
+       ring-in-light treatment, amber instead of emerald. Literal fallback
+       first for the same reason: a browser without `color-mix` keeps a halo
+       instead of losing it outright. */
+    .dot-pending {
+        box-shadow: 0 0 6px rgba(251, 191, 36, 0.7);
+        box-shadow: 0 0 6px color-mix(in srgb, var(--color-amber-400) 70%, transparent);
+    }
+
+    :root[data-theme='light'] .dot-pending {
+        box-shadow: 0 0 0 3px rgba(180, 83, 9, 0.22);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-amber-400) 22%, transparent);
+    }
+
     /* Digits that sit in a column -- log timestamps, deltas, byte offsets --
        must not jitter as their values change. */
     .tnum {

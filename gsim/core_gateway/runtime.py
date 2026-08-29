@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import threading
 import time
 from collections import deque
@@ -43,9 +44,22 @@ from .filters import FilterSet
 from .payloads import prepare_message
 from .timing import wall_time
 
+logger = logging.getLogger("gsim.runtime")
+
 #: Per-connection ring buffers. Bounded so a chatty link cannot grow without
 #: limit; the UI streams live events and only re-reads these on (re)connect.
 LOG_LIMIT = 2000
+
+#: How long `start()` waits, on the caller's own thread, before giving up on a
+#: synchronous answer and letting the connect attempt finish in the
+#: background -- see `start()`'s docstring for why this exists at all.
+#: `core.connections.base._startup_all` now retries a refused TCP connect
+#: forever, one attempt per second, so `Connection.start()` can legitimately
+#: block for as long as the peer stays down. Anything under that 1s retry
+#: interval is safe: it can never straddle a second attempt, so it changes
+#: nothing about the ordinary case (a peer that is already listening settles
+#: in milliseconds) while capping how long a single click can visibly stall.
+CONNECT_GRACE_SECONDS = 0.5
 
 #: EVERY message is published. A 1kHz route is genuinely ~1000 events a second
 #: per direction, and the console has to be able to show that a 1ms schedule is
@@ -178,6 +192,21 @@ class ConnectionRecord:
     #: 500 on the one workflow this is most likely to happen in: bring up a TCP
     #: client before its server, then start it once the server is up.
     handlers_installed: bool = False
+    #: True from the moment `start()` is asked for until `unit.start()` actually
+    #: returns -- success or failure. Distinct from `running`, which only ever
+    #: means "actually started": `Connection._startup_all` (core/connections/
+    #: base.py) now retries a refused connect forever, one attempt per second,
+    #: so that gap can be arbitrarily long, and the UI has to say so rather
+    #: than sit on the *previous* state (gray) until it resolves. See
+    #: `GSimRuntime.start()`.
+    connecting: bool = False
+    #: Bumped every time `start()` begins a new attempt, and again by `stop()`.
+    #: A background attempt that finishes after being superseded -- the user
+    #: clicked Stop while it was mid-retry, or Start again, or deleted the
+    #: connection outright -- compares its own captured value against the
+    #: live one and, if they differ, walks away instead of overwriting
+    #: whatever happened since. See `GSimRuntime._finish_start`.
+    start_token: int = 0
 
     @property
     def own_unit_code(self) -> int:
@@ -213,6 +242,7 @@ class ConnectionRecord:
         return {
             "name": self.name,
             "running": self.running,
+            "connecting": self.connecting,
             "protocol": self.config.get("protocol"),
             "side": self.config.get("side"),
             "unit_code": self.own_unit_code,
@@ -445,19 +475,18 @@ class GSimRuntime:
         # connection actually starts, so there's no need to register early,
         # and `start()` is what has to (re-)install them anyway.
         if autostart:
+            # `start()` no longer raises for a connect that is merely SLOW --
+            # see its docstring -- so there is nothing left for this to catch
+            # under the ordinary "peer not listening yet" case. It stays as a
+            # backstop for a failure before the connect attempt is even
+            # dispatched (e.g. `_install_receive_handlers` raising), so a bad
+            # request still gets an inline reason instead of a bare 500.
             try:
                 self.start(connection_name)
             except OSError as exc:
-                # The CONFIG is fine, the peer just is not reachable yet -- a
-                # TCP client created before its server is listening is the
-                # ordinary case (WinError 1225 / ECONNREFUSED). Failing the
-                # whole request here would discard a config the user just
-                # filled in and leave the modal open on an error they can do
-                # nothing about; core's own `close()` is idempotent, so
-                # keeping the record stopped costs nothing. The reason rides
-                # back on the record so the UI can say why it is not running.
                 record.start_error = str(exc)
                 record.running = False
+                record.connecting = False
                 self._publish_state(record)
         else:
             self._publish_state(record)
@@ -488,24 +517,106 @@ class GSimRuntime:
         registration is still live raises. The two flags diverge whenever a
         start fails after the handlers are in place, which is the everyday
         "TCP client started before its server" case; see the field's own note.
+
+        `unit.start()` itself now has NO upper bound on how long it can block:
+        `Connection._startup_all` (core/connections/base.py) retries a refused
+        TCP connect forever, one attempt per second, until a peer answers.
+        Calling it straight from an API request thread would therefore hang
+        that request for as long as the peer stays down -- proven empirically,
+        not assumed: a client created against a closed port left the request
+        unanswered past a 6s timeout. Running it on a background thread and
+        waiting only `CONNECT_GRACE_SECONDS` for it is what keeps the ordinary
+        case (a peer that is already listening) exactly as synchronous as
+        before -- the caller gets the settled record back immediately -- while
+        a genuinely absent peer degrades to `record.connecting=True` and a
+        later `connection.state` broadcast once it either connects or a
+        non-retryable error ends the attempt. See `_finish_start`.
         """
         record = self.get(connection_name)
         if not record.handlers_installed:
             self._install_receive_handlers(record)
             record.handlers_installed = True
-        record.unit.start()
-        record.running = True
-        record.start_error = None       # a successful start clears the excuse
+        with self._lock:
+            if record.connecting:
+                # Already trying. `unit.start()` has its own `_started` guard
+                # against a second call once truly started, but NOT while the
+                # first call is still retrying (`_started` only flips at the
+                # end of `_startup_all`) -- so calling it again here would race
+                # a second retry loop against the first rather than no-op.
+                return record
+            record.connecting = True
+            record.start_error = None   # a fresh attempt clears the old excuse
+            record.start_token += 1
+            token = record.start_token
+        self._publish_state(record)     # dot -> pending, even if this settles slowly
+        settled = threading.Event()
+        threading.Thread(
+            target=self._finish_start, args=(record, token, settled),
+            name=f"gsim-connect-{connection_name}", daemon=True,
+        ).start()
+        # Block the CALLING thread up to CONNECT_GRACE_SECONDS for the attempt
+        # to settle, so the ordinary case -- a peer already listening -- still
+        # answers its HTTP request with the real outcome instead of a
+        # provisional 'connecting'. `record` is already up to date by the time
+        # this returns either way, since `_finish_start` mutates it directly
+        # rather than a copy; a timeout just means the caller sees it mid-flight.
+        settled.wait(CONNECT_GRACE_SECONDS)
+        return record
+
+    def _finish_start(self, record: ConnectionRecord, token: int, settled: threading.Event) -> None:
+        """Run the (possibly long) blocking `unit.start()` off the API thread,
+        then apply its outcome IF nothing superseded it while it ran.
+
+        `record.start_token` is the supersession check: `stop()`, a second
+        `start()`, or `delete()` each bump it, so a `token` captured before
+        they ran no longer matches. That is deliberately the only thing this
+        checks -- it does not try to cancel the retry loop itself, because
+        core exposes no way to (`Connection.close()` is a no-op while
+        `_started` is still False, i.e. for exactly as long as a connect is
+        being retried). If the user asked to stop mid-retry and the peer then
+        answers anyway, this notices on completion and closes it for real --
+        `_started` is true by then, so `close()` is no longer a no-op.
+        """
+        try:
+            record.unit.start()
+        except Exception as exc:
+            with self._lock:
+                stale = record.start_token != token
+                if not stale:
+                    record.connecting = False
+                    record.running = False
+                    record.start_error = str(exc)
+            settled.set()
+            if not stale:
+                self._publish_state(record)
+            return
+
+        with self._lock:
+            stale = record.start_token != token
+            if not stale:
+                record.connecting = False
+                record.running = True
+                record.start_error = None
+        settled.set()
+        if stale:
+            try:
+                record.unit.close()
+            except Exception:
+                logger.exception(
+                    "error closing %r after a connect that outlived its own stop", record.name)
+            return
         # Whatever the peer did while the transport was down is unknown, so a
         # "log on change" filter must not measure the first arrival against a
         # baseline from before the gap -- see `FilterSet.forget`.
-        self.filters.forget(connection_name)
+        self.filters.forget(record.name)
         # Resumes any behaviour configured on this connection -- see
         # `BehaviourEngine._sync`: "enabled AND connection running" is one
-        # condition, so start/stop need no separate resume bookkeeping.
-        self.behaviours.sync_connection(connection_name)
+        # condition, so start/stop need no separate resume bookkeeping. Held
+        # off until the connection is genuinely up, same as before this
+        # change: a schedule firing into a connect attempt that has not yet
+        # succeeded would just book the identical error every tick.
+        self.behaviours.sync_connection(record.name)
         self._publish_state(record)
-        return record
 
     def stop(self, connection_name: str) -> ConnectionRecord:
         record = self.get(connection_name)
@@ -516,8 +627,17 @@ class GSimRuntime:
         # 1ms schedule books ~1800 of them, which then sit on the behaviour as
         # `last_error` after a perfectly ordinary stop. `_sync` reads
         # `is_connection_running`, so `running` has to be false before the call.
-        record.running = False
+        with self._lock:
+            record.running = False
+            record.connecting = False
+            # Invalidates any attempt still retrying in `_finish_start` --
+            # see its docstring for what happens when one finishes anyway.
+            record.start_token += 1
         self.behaviours.sync_connection(connection_name)
+        # A no-op if a connect attempt is still retrying underneath (core's
+        # `_started` is only set once `_startup_all` returns) -- that is not
+        # a bug here, it is the one thing `stop()` cannot do anything about
+        # until that attempt itself finishes; see `_finish_start`.
         record.unit.close()
         # `close()` drops every standing callback (core's `_shutdown_all`), so
         # they are genuinely gone and the next start must put them back.
@@ -530,6 +650,13 @@ class GSimRuntime:
         its own (now inert) entry -- harmless, because `close()` is idempotent,
         so its eventual `shutdown_all()` is a no-op on this one."""
         record = self.get(connection_name)
+        # Invalidates a connect attempt still retrying in `_finish_start` --
+        # it still holds this exact `record` object (deleting only drops it
+        # from `_conn_records`), so when it eventually finishes it will find
+        # itself superseded and close what it just opened instead of
+        # resurrecting a connection this call just removed.
+        with self._lock:
+            record.start_token += 1
         # Before closing: a worker mid-tick would otherwise send into a
         # connection being torn down and log a spurious failure.
         self.behaviours.remove_connection(connection_name)

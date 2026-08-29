@@ -224,15 +224,25 @@ export function Field({ label, type, hint, htmlFor, children, className }) {
 /* ------------------------------------------------------------------ */
 /* Indicators                                                          */
 /* ------------------------------------------------------------------ */
-export function StatusDot({ on, className }) {
+/**
+ * `pending` is the third state between off and on: started, but with nothing
+ * actually on the other end yet -- a TCP client retrying a refused connection,
+ * a server with no peer dialled in. It only means anything when `on` is also
+ * true; a stopped connection is just off, however it was left. Amber rather
+ * than a third boolean because amber already means exactly this everywhere
+ * else in the app (the console's `paused` chip, a behaviour running short of
+ * its rate) -- "armed, but not yet doing the thing it's for".
+ */
+export function StatusDot({ on, pending, className }) {
   return (
     <span
       className={cx(
         'inline-block h-2 w-2 shrink-0 rounded-full transition-colors',
-        // `dot-live` (styles.css) is a halo in dark and a ring in light. The
-        // glow alone was invisible on white, which left an 8px hue difference
-        // doing the whole job for the most-scanned state in the app.
-        on ? 'bg-emerald-400 dot-live' : 'bg-slate-600',
+        // `dot-live`/`dot-pending` (styles.css) are a halo in dark and a ring
+        // in light. The glow alone was invisible on white, which left an 8px
+        // hue difference doing the whole job for the most-scanned state in
+        // the app.
+        !on ? 'bg-slate-600' : pending ? 'bg-amber-400 dot-pending' : 'bg-emerald-400 dot-live',
         className,
       )}
     />

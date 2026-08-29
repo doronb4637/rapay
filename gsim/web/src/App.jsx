@@ -550,7 +550,14 @@ export default function App() {
             }
             onToggle={(connection) =>
               guard(async () => {
-                await (connection.running ? api.stop(connection.name) : api.start(connection.name));
+                // `connecting` (still inside `unit.start()`, retrying a
+                // refused connect -- core/connections/base.py) reads as "on"
+                // for this purpose same as `running` does: the click has to
+                // mean Stop, not a second Start that the backend would just
+                // no-op (`runtime.start()` returns early while already
+                // `connecting`).
+                const on = connection.running || connection.connecting;
+                await (on ? api.stop(connection.name) : api.start(connection.name));
                 await refresh();
               })
             }

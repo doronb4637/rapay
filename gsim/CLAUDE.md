@@ -579,6 +579,8 @@ list, check it: the fallthrough is silent and only visible in light mode.
 
 ### 10d. Received filters: dropping messages without becoming the thing §10c warns about
 
+See `gsim/docs/FILTERS.md` for how to use it from the UI/API; this section is why it works.
+
 `core_gateway/filters.py` lets a user say, per inbound message, "log this only when ...": keep/drop
 rules on a field value, and a change trigger (whole message, or one named field). Received only —
 nothing filters the sent direction.
@@ -709,6 +711,60 @@ fails partway: the handlers are registered, but `running` is still False. Guardi
 (`route ... already has an on-receive callback`) — a 500 on exactly the everyday workflow of bringing
 up a TCP client before its server and starting it once the server is up. `ConnectionRecord` carries
 `handlers_installed` for this, cleared in `stop()` because core's `close()` drops the callbacks.
+
+### 12b. `connecting`: a third status between off and on, made necessary by core's own retry
+
+`core/connections/base.py`'s `Connection._startup_all` was changed (by the user, not from GSim) to
+retry a refused TCP connect forever, once a second, instead of raising `WinError 1225` straight
+through. That is a real behavioural change to `Connection.start()` itself: it can now block for as
+long as the peer stays down, with **no upper bound** — proven empirically before trusting it, not
+assumed: a client created against a closed port left its `POST /api/connections` request unanswered
+past a 6s timeout. Calling it straight from an API request thread, as `runtime.start()` always had,
+would therefore hang that request (and the worker thread serving it) for the entire outage.
+
+`runtime.start()` now runs `unit.start()` on its own background thread and waits on the caller's
+thread for only `CONNECT_GRACE_SECONDS` (0.5s — comfortably under the 1s retry interval, so it can
+never straddle a second attempt and therefore never changes anything about the ordinary case). If
+the peer is already listening, the attempt settles inside that window and the HTTP response carries
+the real, final `running`/`start_error` exactly as before this change. If it does not settle,
+`record.connecting = True` rides back instead, and the eventual outcome — connected, or a
+non-retryable error — arrives later over the WebSocket as an ordinary `connection.state` broadcast
+(`_finish_start`).
+
+`connecting` is deliberately its own field, not folded into `running`: `running` still means
+"`unit.start()` actually returned", and everything that reads it (`_is_connection_running`,
+`BehaviourEngine._sync`) keeps meaning exactly what it always meant — a schedule stays paused for a
+connection that is merely *attempting* to connect, the same as it always was for one that is simply
+stopped. Only the UI treats the two as one "lit" state, with `connecting` picking the colour (amber,
+not green — see `StatusDot`'s `pending` prop in `ui.jsx`).
+
+**Superseding an in-flight attempt.** `record.start_token` is bumped by `start()` (each new attempt),
+`stop()`, and `delete()`. `_finish_start` captures the token when it begins and compares it when
+`unit.start()` finally returns; a mismatch means something else decided this connection's fate while
+the attempt was in flight, so it walks away instead of overwriting a newer state. The one case this
+exists for: **a user clicks Stop while a client is mid-retry.** Core exposes no way to actually cancel
+that retry loop — `Connection.close()` is a no-op while `_started` is still `False`, which is exactly
+the state a connection sits in for the entire retry (`_started` only flips at the very end of
+`_startup_all`) — so `stop()` can only update GSim's own bookkeeping and bump the token; the core-level
+retry loop keeps running underneath, unstoppable, until it either connects or hits a non-retryable
+error. If it eventually **connects anyway**, `_finish_start` sees its token is stale and calls
+`record.unit.close()` again — this time for real, since `_started` is `True` by then — rather than
+resurrecting a connection the user explicitly turned off. Verified end to end: stopped a client mid-
+retry, then started the server it was waiting for; the client's `unit.start()` completed and was
+immediately closed again, and GSim's own state stayed `running=False` throughout.
+
+`create(autostart=True)`'s `except OSError` around `self.start(...)` is now unreachable for the
+retry-related case — that failure surfaces through `_finish_start`, on the background thread, as
+`record.start_error` — and is kept only as a backstop for a failure before the attempt is even
+dispatched (`_install_receive_handlers` raising).
+
+**In the UI**, `Sidebar.jsx`, `LinkOverview.jsx` and each per-peer dot all compute the same two
+amber cases — `connecting` (still inside `unit.start()`) and "running with no active peer yet" (a
+server nobody has dialled into, or the narrow window before `active_units` catches up) — and light
+the dot (`on`) for either, tinting it amber (`pending`) rather than the green `dot-live` reserved for
+an actual peer. `App.jsx`'s Sidebar `onToggle` treats `connecting` as "on" too, so clicking mid-retry
+sends `stop`, not a second `start()` the backend would just no-op (`start()` returns early while
+already `connecting`, to avoid racing two overlapping retry loops against one connection).
 
 `index.html` is served `no-store` (`_WebFiles` in `api/app.py`). Vite fingerprints every asset, so
 `index.html` is the only stable filename and the only thing naming the current hashes — if the shell

@@ -63,12 +63,19 @@ export default function LinkOverview({ connection, sent, received, onPickPeer })
 
   const { config = {}, peers = [], active_units: activeUnits = [] } = connection;
   const isMulticast = connection.protocol === 'multicast';
+  // `connecting` -- still INSIDE `unit.start()`, retrying a refused connect
+  // once a second (`Connection._startup_all`, core/connections/base.py) --
+  // reads as "on" here same as `running`: without it this dot (and the badge)
+  // sat on "stopped" for however long the retry took, then jumped straight to
+  // running with nothing on screen ever having said it was trying.
+  const on = connection.running || connection.connecting;
+  const waitingForPeer = connection.running && activeUnits.length === 0;
 
   return (
     <Panel className="min-w-0 flex-1">
       <PanelHeader title="Links" icon={Share2} rank="workspace">
-        <Badge tone={connection.running ? 'emerald' : 'slate'}>
-          {connection.running ? 'running' : 'stopped'}
+        <Badge tone={on ? 'emerald' : 'slate'}>
+          {connection.connecting ? 'connecting' : connection.running ? 'running' : 'stopped'}
         </Badge>
       </PanelHeader>
 
@@ -77,7 +84,10 @@ export default function LinkOverview({ connection, sent, received, onPickPeer })
           {/* Who we are on the wire. */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
             <div className="flex items-center gap-2">
-              <StatusDot on={connection.running} />
+              {/* Amber while dialling, or while running with no peer actually
+                  connected yet (a server nobody has dialled into). Gray only
+                  when genuinely off. */}
+              <StatusDot on={on} pending={connection.connecting || waitingForPeer} />
               <h3 className="truncate text-sm font-semibold text-slate-100">{connection.name}</h3>
             </div>
             <dl className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-slate-800 pt-2.5">
@@ -122,7 +132,7 @@ export default function LinkOverview({ connection, sent, received, onPickPeer })
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <StatusDot on={live} />
+                    <StatusDot on={on} pending={connection.connecting || (connection.running && !live)} />
                     <span className="truncate text-[13px] font-medium text-slate-100">
                       {peer.name}
                     </span>

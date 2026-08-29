@@ -63,6 +63,32 @@ export default function Sidebar({
           <ul className="flex flex-col gap-0.5">
             {connections.map((connection) => {
               const isSelected = connection.name === selectedName;
+              // Two distinct "not there yet" states, both amber, told apart
+              // only in the tooltip:
+              //
+              // `dialling` -- core is still INSIDE `unit.start()`. A TCP
+              // client whose server refuses the connection now retries once a
+              // second forever (`Connection._startup_all`,
+              // core/connections/base.py), and GSim no longer blocks the
+              // click waiting for that to resolve (`runtime.start()`'s
+              // CONNECT_GRACE_SECONDS) -- so `running` is still false while
+              // this drags on, and `connecting` is what says so.
+              //
+              // `waitingForPeer` -- already started (a server bound and
+              // listening, or a client that connected), just nothing has
+              // shown up yet. `peers.length` guards the one connection shape
+              // with no peer to wait for at all (bypassing the create modal,
+              // which always requires at least one).
+              //
+              // Before this, both looked identical to OFF: the dot stayed
+              // gray for however long a retry took, then jumped straight to
+              // green with nothing on screen ever having said it was trying.
+              const dialling = connection.connecting;
+              const waitingForPeer = connection.running
+                && connection.peers?.length > 0
+                && (connection.active_units?.length ?? 0) === 0;
+              const on = connection.running || dialling;
+              const pending = dialling || waitingForPeer;
               return (
                 <li
                   key={connection.name}
@@ -74,15 +100,19 @@ export default function Sidebar({
                   <button
                     type="button"
                     onClick={() => onToggle(connection)}
-                    title={connection.running ? 'Running — click to stop' : 'Stopped — click to start'}
-                    aria-label={
-                      connection.running
-                        ? `Stop ${connection.name}`
-                        : `Start ${connection.name}`
+                    title={
+                      dialling
+                        ? 'Connecting — click to stop'
+                        : waitingForPeer
+                          ? 'Running, waiting for a peer — click to stop'
+                          : connection.running
+                            ? 'Running — click to stop'
+                            : 'Stopped — click to start'
                     }
+                    aria-label={on ? `Stop ${connection.name}` : `Start ${connection.name}`}
                     className="grid h-6 w-6 shrink-0 place-items-center rounded transition-colors hover:bg-slate-700/70 focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
                   >
-                    <StatusDot on={connection.running} />
+                    <StatusDot on={on} pending={pending} />
                   </button>
 
                   <button
@@ -132,9 +162,19 @@ export default function Sidebar({
           </button>
           {unitsOpen && (
             <ul className="flex flex-col gap-0.5 px-3 pb-2">
-              {selected.peers.map((peer) => (
+              {selected.peers.map((peer) => {
+                const active = selected.active_units?.includes(peer.name);
+                return (
                 <li key={peer.name} className="flex items-center gap-1.5 text-[11px]">
-                  <StatusDot on={selected.active_units?.includes(peer.name)} className="h-1.5 w-1.5" />
+                  {/* `active` implies `selected.running` (stopping a
+                      connection clears active_units), so `on` only needs
+                      `running`/`connecting` -- same amber-while-dialling
+                      treatment as the row's own dot above. */}
+                  <StatusDot
+                    on={selected.running || selected.connecting}
+                    pending={selected.connecting || (selected.running && !active)}
+                    className="h-1.5 w-1.5"
+                  />
                   <span className="truncate text-slate-400">{peer.name}</span>
                   <span
                     className="ml-auto font-mono text-[10px] text-slate-500"
@@ -143,7 +183,8 @@ export default function Sidebar({
                     {hex(peer.unit_code, 2)}
                   </span>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </footer>
