@@ -4,8 +4,10 @@ from enum import IntEnum
 from beartype.door import is_bearable
 
 
+from . import _compiler
 from .buffers import BinaryReader, BinaryWriter
 from .bitfields import BitField, baseType
+from .containers import FixedList
 from .fields import BaseField, Field, EnumField
 from .constants import *
 
@@ -32,8 +34,12 @@ class ArrayField(BaseField):
 
     def from_bytes(self, reader: BinaryReader, instance: Any = None) -> list[Any]:
         parse = self.baseType.from_bytes
+        if isinstance(self.length, int):
+            # Declared as exactly N items, so the LENGTH is part of the layout:
+            # editing a value is fine, growing the array is a wire violation.
+            return FixedList(parse(reader, instance) for _ in range(self.length))
         if self.length is not None:
-            array_len = getattr(instance, self.length) if isinstance(self.length, str) else self.length
+            array_len = getattr(instance, self.length)
             return [parse(reader, instance) for _ in range(array_len)]
         array = []
         while reader.offset < reader._len:
@@ -50,7 +56,8 @@ class ArrayField(BaseField):
             write(writer, item)
 
     def from_dict(self, value: list[Any]) -> list[Any]:
-        return [self.baseType.from_dict(item) for item in value]
+        items = [self.baseType.from_dict(item) for item in value]
+        return FixedList(items) if isinstance(self.length, int) else items
 
     def to_dict(self, value: list[Any]) -> list[Any]:
         return [self.baseType.to_dict(item) for item in value]
@@ -59,8 +66,8 @@ class ArrayField(BaseField):
         if self.length is None or isinstance(self.length, str):
             return []
         if isinstance(self.baseType, Structure):
-            return [type(self.baseType)().fill() for _ in range(self.length)]
-        return [self.baseType.fill() for _ in range(self.length)]
+            return FixedList(type(self.baseType)().fill() for _ in range(self.length))
+        return FixedList(self.baseType.fill() for _ in range(self.length))
 
 class MessageMeta(type):
     def __new__(cls, name: str, bases: tuple, namespace: dict) -> 'MessageMeta': # TODO change to Self
@@ -97,7 +104,17 @@ class MessageMeta(type):
                     raise TypeError(f"{name}.{field_name}: annotated {field_type!r} with no Type/Size")
         namespace['_fields_'] = tuple(fields_list)
         namespace['__slots__'] = tuple(annotations.keys())
-        return type.__new__(cls, name, bases, namespace)
+        if _compiler.ENABLED:
+            # The first parse of this layout compiles a function specific to it
+            # and replaces these two; every later one goes straight there. See
+            # `_compiler`'s module docstring for what that buys and why it is
+            # lazy. A layout the generator cannot express drops back to the
+            # `_fields_` loops below, which stay the reference semantics.
+            namespace['from_bytes'] = classmethod(_compiler.lazy_from_bytes)
+            namespace['to_bytes'] = _compiler.lazy_to_bytes
+        built = type.__new__(cls, name, bases, namespace)
+        _compiler.register(built)
+        return built
 
 
 class Structure(BaseField, metaclass=MessageMeta):
@@ -136,10 +153,24 @@ class Structure(BaseField, metaclass=MessageMeta):
             object.__setattr__(new_instance, field._name, field.from_bytes(reader, new_instance))
         return new_instance
 
-    def to_bytes(self, writer: BinaryWriter, value: Any = None) -> None:
+    def to_bytes(self, writer: BinaryWriter | None = None, value: Any = None) -> bytes | None:
+        """Serialize into `writer`, or return the bytes when there is no writer.
+
+        The no-writer form used to live on `Message` alone, which made
+        `some_nested_struct.to_bytes()` a TypeError for no reason anyone chose --
+        and left the compiled path (which has no such restriction) visibly
+        different from this one. Both spellings now mean the same thing at every
+        depth: a writer means append and return None, no writer means give me
+        the bytes.
+        """
+        is_root = writer is None
+        if is_root:
+            writer = BinaryWriter()
         target = value if value is not None else self
         for field in target.__class__._fields_:
             field.to_bytes(writer, getattr(target, field._name))
+        if is_root:
+            return bytes(writer)
 
     @classmethod
     def from_dict(cls, data: dict) -> 'Structure': # TODO change to Self
@@ -199,12 +230,14 @@ class Structure(BaseField, metaclass=MessageMeta):
 
 
 class Message(Structure):
-    __slots__ = ()
+    """A layout that is a whole payload rather than a piece of one.
 
-    def to_bytes(self, writer: BinaryWriter | None = None, value: Any = None) -> bytes | None:
-        is_root = writer is None
-        if is_root: writer = BinaryWriter()
-        super().to_bytes(writer, value)
-        if is_root: return bytes(writer)
+    Behaviourally identical to `Structure` -- `to_bytes()` with no writer
+    returns bytes at every depth. The distinction `Message` carries is one of
+    ROLE: only a `Message` is what `REGISTRY.register_message` binds to a
+    (unitCode, opCode) route, and only a `Message` is what `irs_parser` hands
+    back.
+    """
+    __slots__ = ()
 
 

@@ -13,6 +13,8 @@ _alias.install()
 from .constants import *
 from .buffers import BinaryReader, BinaryWriter
 from .bitfields import baseType, BitField
+from .containers import FixedList
 from .fields import Field, EnumField
 from .core import ArrayField, Structure, Message
+from ._compiler import compile_all, dump_source
 from .annotations import IrsMessage, UnitCode, OpCode, Namespace, NamespaceScope

@@ -10,7 +10,7 @@ The engine is written in pure Python, maximizing the native C-level speed of the
 ## 🏗️ Core Philosophy & AI Directives
 When contributing to this codebase, you **MUST** adhere to the following rules:
 
-1. **Zero Runtime Reflection:** Do not use `getattr`, `hasattr`, or `type()` inside the inner parsing loops (`from_bytes`, `to_bytes`). All schema resolution happens strictly inside the metaclasses (`MessageMeta`, `BitFieldMeta`) at import time.
+1. **Zero Runtime Reflection:** Do not use `getattr`, `hasattr`, or `type()` inside the inner parsing loops (`from_bytes`, `to_bytes`). All schema resolution happens strictly inside the metaclasses (`MessageMeta`, `BitFieldMeta`) at import time. Since the compiler (`_compiler.py`) landed this is stronger than a convention: those loops are the FALLBACK path, and the code that actually runs is generated per message class. See "The Compiler" below before touching either.
 2. **Memory Efficiency:** All classes must use `__slots__ = ()`. Do not allocate Python dictionaries (`__dict__`) for parsed packets.
 3. **Targeted Strict Typing:** `Structure` overrides `__setattr__` to enforce strict type checking at runtime using `beartype.door.is_bearable` **only when a developer manually sets or modifies an attribute**. During binary parsing (`from_bytes`), this check is explicitly bypassed using `object.__setattr__` to guarantee maximum deserialization speed.
 4. **Fail-Fast Safety:** Validate bounds and bit overflows immediately during class creation (e.g., verifying `@baseType` fits the defined bits so the engine never fails silently at runtime).
@@ -20,12 +20,16 @@ When contributing to this codebase, you **MUST** adhere to the following rules:
 ## 🗂️ Architecture Breakdown
 
 ### 1. `buffers` (`BinaryReader`, `BinaryWriter`)
-Wraps `memoryview` and `bytearray` to maintain the memory cursor state (`_offset`) efficiently without slicing byte arrays.
+Holds the cursor (`offset`) over a payload without ever slicing it. `bytes` and
+`bytearray` are kept as-is rather than wrapped in a `memoryview`: measured on
+3.11 the wrap costs more than it saves at every operation the engine performs
+(`unpack_from` 197ns vs 205ns, `list(data[a:b])` 206ns vs 289ns, plus 118ns to
+build the view). Anything else is still wrapped, so slicing stays uniform.
 
 ### 2. `fields` (`BaseField`, `Field`, `EnumField`)
-The base serializers. 
+The base serializers.
 * Uses pre-compiled `struct.Struct` packers.
-* Contains `get_default()` to auto-initialize empty packets safely (e.g., floats -> `0.0`, ints -> `0`).
+* Contains `fill()` to auto-initialize empty packets safely (e.g., floats -> `0.0`, ints -> `0`).
 * `EnumField` automatically unpacks bytes into Python `IntEnum` objects.
 
 ### 3. `bitfields` (`BitField`, `BitFieldMeta`)
@@ -38,7 +42,43 @@ Handles sub-byte bitwise logic.
 The heavy lifters.
 * `MessageMeta` converts standard Python class annotations into a tuple of initialized `BaseField` objects (`_fields_`).
 * `ArrayField` handles fixed arrays (`length=5`), dynamic arrays (`length="count_field"`), and greedy arrays (`length=None`).
-* **Auto-Initialization:** `Structure.__init__(**kwargs)` intercepts initialization to apply `kwargs` or fill the class with `get_default()` values, ensuring `.to_bytes()` never crashes on a newly instantiated, empty object.
+* A **fixed** array comes back as a `FixedList` (`containers.py`) -- a real `list`
+  (so `isinstance`, `beartype`, and `to_dict` are all unaffected) whose LENGTH is
+  frozen. `arr[0] = 5` is an edit and is allowed; `arr.append(...)` is a layout
+  violation and raises `TypeError` at the mutation instead of silently at
+  `to_bytes`. Counted and greedy arrays are meant to change length, so they stay
+  plain lists.
+* **Auto-Initialization:** `Structure.__init__(**kwargs)` applies `kwargs`; `.fill()` completes the rest with safe defaults, so `.to_bytes()` never crashes on a newly instantiated, empty object.
+* `Structure.to_bytes()` and `Message.to_bytes()` mean the same thing at every depth: pass a writer to append to it, pass nothing to get the bytes back.
+
+### 5. `_compiler` -- The Compiler
+The metaclass resolves the SCHEMA at import time; the compiler resolves the
+PARSE. On the first `from_bytes`/`to_bytes` of a class it generates Python
+source specific to that layout, `exec`s it, and installs it over the
+`_fields_` loops. Adjacent fixed fields -- including nested `Structure`s and
+fixed arrays, which are FLATTENED into their parent -- collapse into a single
+`struct.Struct` call with every offset a compile-time literal.
+
+Measured on 3.11 (`--compare`): `from_bytes` 13.5us -> 1.8us (7.5x),
+`to_bytes` 9.1us -> 0.9us (10.5x). A message dominated by arrays of structures
+gains less (3.3x) because what remains is Python object allocation, not parsing.
+
+**Rules for working on it:**
+* The `_fields_` loops in `core.py`/`fields.py`/`bitfields.py` are the REFERENCE
+  SEMANTICS and must keep working. `IRS_COMPILE=0` selects them process-wide;
+  `core/tests/test_irs_compiler.py` runs both in subprocesses and demands the
+  same answer for every layout in the repo over adversarial buffers. Change a
+  parsing rule in one path and you must change it in the other.
+* `_fields_` is a public introspection surface (`gsim/core_gateway/schema.py`,
+  `payloads.py`). The compiler only reads it -- never reshape it for the
+  compiler's convenience.
+* Block coalescing must never merge across byte orders; a `Structure` defined in
+  a `ENDIAN = bigEndian` file stays big-endian inside a little-endian parent.
+* A layout the generator cannot express raises `Uncompilable` and silently keeps
+  the interpreted path. That is a safety valve, not a place to hide bugs --
+  `compile_all()` returns how many succeeded.
+* `IRS.dump_source(MessageClass)` prints the generated code. Read it first when
+  a layout misbehaves.
 
 ---
 
