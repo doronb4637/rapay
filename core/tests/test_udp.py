@@ -24,7 +24,7 @@ def test_unit_name_optional_with_a_single_connected_unit(manager, free_port):
     manager.start_all()
 
     unit, message = server.receive_message(
-        1, timeout=3,  # unitName omitted -- only one unit configured
+        1, timeout=3,  # unit_name omitted -- only one unit configured
         trigger_function=lambda: client.send_message(b"hi", 1),  # unit_name omitted too
     )
     assert unit == "Peer"
@@ -140,7 +140,7 @@ def test_malformed_datagram_is_dropped_not_fatal(manager, free_port):
 
     # The connection is still fully usable afterwards.
     unit, message = server.receive_message(
-        1, unitName="Peer", timeout=3,
+        1, unit_name="Peer", timeout=3,
         trigger_function=lambda: client.send_message(b"still-works", 1),
     )
     assert bytes(message.data) == b"still-works"

@@ -77,9 +77,9 @@ def test_echo_opcode_never_reaches_receive_message(manager, free_port):
 
     time.sleep(0.5)  # several real echoes fired in both directions by now
     with pytest.raises(TimeoutError):
-        server.receive_message(15, unitName="Peer", timeout=0.3)
+        server.receive_message(15, unit_name="Peer", timeout=0.3)
     with pytest.raises(TimeoutError):
-        client.receive_message(15, unitName="Peer", timeout=0.3)
+        client.receive_message(15, unit_name="Peer", timeout=0.3)
 
 
 def test_hierarchical_echo_per_unit_opcode_override(manager, free_ports):
@@ -153,3 +153,74 @@ def test_echo_watchdog_disconnects_only_the_dead_unit(manager, free_ports):
     time.sleep(1.0)
     assert "silent" not in server.active_units
     assert "alive" in server.active_units
+
+
+# --------------------------------------------------------------------------- #
+# Re-arming: a unit that drops and comes back gets a fresh echo pair, with no
+# special case anywhere -- `_mark_unit_connected` is the single trigger.
+# --------------------------------------------------------------------------- #
+def _wait_until_gone(connection, unit_name, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while unit_name in connection.active_units and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return unit_name not in connection.active_units
+
+
+def _echo_server(manager, port, echo_timeout):
+    return manager.create("server", {
+        "protocol": "tcp", "unitCode": 100, "side": "server",
+        "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}},
+        "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": echo_timeout,
+    })
+
+
+def _echo_client(manager, name, port, echo=True):
+    spec = {
+        "protocol": "tcp", "unitCode": 101, "side": "client",
+        "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}},
+    }
+    if echo:
+        spec.update({"echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": 0.6})
+    return manager.create(name, spec)
+
+
+def test_echo_watchdog_rearms_for_a_reconnected_peer(manager, free_port):
+    """The watchdog is armed per connect, so a peer that drops and comes back
+    silent must be caught the second time exactly as it was the first."""
+    server = _echo_server(manager, free_port, echo_timeout=0.6)
+    first = _echo_client(manager, "first", free_port, echo=True)
+    server.start()
+    first.start()
+    assert server.wait_for_connected_units("Peer", timeout=3) is True
+
+    first.close()
+    assert _wait_until_gone(server, "Peer") is True
+
+    second = _echo_client(manager, "second", free_port, echo=False)
+    second.start()
+    assert server.wait_for_connected_units("Peer", timeout=3) is True
+
+    time.sleep(1.2)  # well past EchoTimeout with a peer that never answers
+    assert "Peer" not in server.active_units
+
+
+def test_echo_sender_rearms_for_a_reconnected_peer(manager, free_port):
+    """The other half: the server's periodic sender must restart for the new
+    peer, or that peer's own watchdog would drop a perfectly live link."""
+    server = _echo_server(manager, free_port, echo_timeout=30)  # never drops anyone itself
+    first = _echo_client(manager, "first", free_port, echo=True)
+    server.start()
+    first.start()
+    assert server.wait_for_connected_units("Peer", timeout=3) is True
+
+    first.close()
+    assert _wait_until_gone(server, "Peer") is True
+
+    second = _echo_client(manager, "second", free_port, echo=True)
+    second.start()
+    assert second.wait_for_connected_units("Peer", timeout=3) is True
+
+    time.sleep(1.2)  # several of the client's 0.6s EchoTimeout windows
+    assert "Peer" in second.active_units

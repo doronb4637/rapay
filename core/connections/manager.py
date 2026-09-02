@@ -12,14 +12,17 @@ from typing import Any
 from core.tools.file_functions import read_unit_config
 from core.tools.general import import_modules
 
-from .base import Connection
+from .base import Connection, Unit
 from .composite import CompositeUnit
 from .config import ConnectionConfig, Protocol
 from .handlers import UnitHandler, install_handler
 
 logger = logging.getLogger("connmgr.manager")
 
-ManagedUnit = Connection | CompositeUnit
+#: What this manager hands back and later tears down. Both a plain `Connection`
+#: and a `CompositeUnit` satisfy `Unit` structurally -- see base.Unit for why
+#: that contract is written down rather than merely observed.
+ManagedUnit = Unit
 #: What `create()` accepts in place of a config: either the JSON dict itself,
 #: or the name of a unit configuration for `tools.file_functions.read_unit_config`
 #: to load from config/Units.

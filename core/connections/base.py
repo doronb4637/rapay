@@ -18,23 +18,49 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from asyncio import Event
-from typing import Any, Callable, Coroutine, Iterable
+from typing import Any, Callable, Coroutine, Iterable, Protocol
 
-from core.annotations import *
+from core.annotations import IrsMessage, Namespace, OpCode, UnitCode
 from core.IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
 from core.tools.general import extract_opcode
 
+from ._echo import UnitEchoSupervisor
+from ._routes import ConnectCallback, ReceiveCallback, RouteKey, RouteTable, UnitName
 from .config import ConnectionConfig, EchoSettings
 from .framing import pack_message
 
 logger = logging.getLogger("connmgr")
 
-UnitName = str
-RouteKey = tuple[UnitCode, OpCode]
+""" Annotations """
 TriggerFunction = Callable[[], Any]
-ReceiveCallback = Callable[[IrsMessage], Any]
-ConnectCallback = Callable[[UnitName], Any]
 ConnectedTarget = UnitCode | UnitName | Iterable[UnitName]
+
+
+class Unit(Protocol):
+    """
+    What a logical UNIT offers, whether it happens to be a single `Connection`
+    or a `CompositeUnit` assembled from several direction-limited ones.
+
+    `ConnectionManager.create` / `create_composite` hand's it back,
+    """
+
+    @property
+    def active_units(self) -> set[str]: ...
+    def start(self, retry: bool = False) -> None: ...
+    def close(self, timeout: float | int | None = 5.0) -> None: ...
+    def send_message(self, data: IrsMessage | dict, opcode: int | None = None, unit_name: str | None = None) -> None: ...
+    def receive_message(self, opcode: int | str | IrsMessage, unit_name: str | None = None,
+                        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage: ...
+    def handle_on_receive(self, opcode: int | str | IrsMessage, callback_func: ReceiveCallback, unit_name: str | None = None) -> None: ...
+    def stop_on_receive(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool: ...
+    def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None: ...
+    def stop_on_connect(self, unit_name: str | None = None) -> bool: ...
+    def periodic_sending(self, data: IrsMessage | dict[str, Any], opcode: int | None,
+                         interval: int | float, unit_name: str | None = None) -> None: ...
+    def stop_periodic(self, opcode: int | str | IrsMessage,
+                      unit_name: str | None = None) -> bool: ...
+    def wait_for_connected_units(self, target: ConnectedTarget,
+                                 timeout: float | int | None = None) -> bool: ...
 
 
 class _EventLoopThread:
@@ -54,17 +80,16 @@ class _EventLoopThread:
     """
     _instance: _EventLoopThread | None = None
     _lock = threading.Lock()
+    _TEARDOWN_WINERRORS = frozenset({64, 1236, 10038, 10054})
 
     def __new__(cls) -> _EventLoopThread:
         with cls._lock:
             if cls._instance is None:
-                inst = super().__new__(cls) #switch super to type.
-                inst._start()
+                inst = super().__new__(cls)
                 cls._instance = inst
+                inst._start()
                 atexit.register(inst.shutdown)
             return cls._instance
-
-    _TEARDOWN_WINERRORS = frozenset({64, 1236, 10038, 10054})
 
     def _start(self) -> None:
         self.loop = asyncio.new_event_loop()
@@ -111,6 +136,26 @@ class _EventLoopThread:
         except (asyncio.TimeoutError, concurrent.futures.TimeoutError) as exc:
             raise TimeoutError(str(exc)) from exc
 
+    def call_on_loop(self, func: Callable[..., Any], *args: Any,
+                     timeout: float | int | None = None) -> Any:
+        """Acts the same as 'await_coroutine' just for synchronous functions."""
+        future = concurrent.futures.Future()
+
+        def _run() -> None:
+            # changes future state to 'RUNNING'
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(func(*args))
+            except BaseException as exception:
+                future.set_exception(exception)
+
+        self.loop.call_soon_threadsafe(_run)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            raise TimeoutError(str(exc)) from exc
+
     def submit(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future[Any]:
         """Non-blocking submission for fire-and-forget call."""
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -146,10 +191,13 @@ class Connection(ABC):
     connects, stop when it drops, and start again if it comes back -- and is
     what `wait_for_connected_units()` blocks on.
 
-    Everything else -- unit resolution, the echo lifecycle, subscribe-or-drop
-    filtering, on-receive callbacks, periodic sending, the sync/async
-    marshaling, and absolute-teardown task bookkeeping -- lives here so
-    subclasses stay small and protocol-specific.
+    Everything protocol-independent lives at this level so subclasses stay
+    small: unit resolution, the sync/async marshaling, periodic sending, and
+    absolute-teardown task bookkeeping here in this class; route ownership and
+    subscribe-or-drop filtering in `_routes.RouteTable`; the heartbeat, liveness
+    clock and timeout watchdog in `_echo.UnitEchoSupervisor`. Both collaborators
+    are owned by this connection and run on its loop thread -- they are not a
+    layer a caller ever sees.
     """
     can_send: bool = True
     can_receive: bool = True
@@ -159,29 +207,31 @@ class Connection(ABC):
     def __init__(self, config: ConnectionConfig) -> None:
         self.config = config
         self._loop_thread = get_event_loop_thread()
-        self._tasks: set[Task[Any]] = set()
+        self._tasks: set[asyncio.Task[Any]] = set()
         self._started = False
         self._unit_codes: dict[UnitName, UnitCode] = config.unit_codes
         self._own_unit_code: UnitCode = config.unitCode
         self._active_units: set[UnitName] = set()
-        # Replaced (not just cleared) on every state change, so any number of
-        # waiters can park on the current one without racing each other.
+        # triggered when a new connection is established.
         self._state_event: asyncio.Event = asyncio.Event()
-        self._subscriptions: dict[RouteKey, Future[IrsMessage]] = {}
-        self._callbacks: dict[RouteKey, ReceiveCallback] = {}
-        # Keyed by unit_name, not RouteKey -- a unit either has a peer or it
-        # doesn't; there is no opcode dimension to a connect event.
-        self._connect_callbacks: dict[UnitName, ConnectCallback] = {}
-        self._periodic_tasks: dict[RouteKey, Task[None]] = {}
+        # Who owns each (unit_code, opcode) route, and the on-connect callbacks
+        self._routes: RouteTable = RouteTable()
+        self._periodic_tasks: dict[RouteKey, asyncio.Task[None]] = {}
         # Resolved PER UNIT at config load (see config.EchoSettings.resolve):
         self._echo: EchoSettings = config.echo
         self._unit_echo: dict[UnitName, EchoSettings] = config.unit_echoes
-        self._last_echo_at: dict[UnitName, float] = {}
-        self._echo_tasks: dict[UnitName, list[Task[None]]] = {}
+        # Heartbeat senders, liveness clocks and timeout watchdogs, one set per
+        # unit. See _echo.UnitEchoSupervisor.
+        self._echo_supervisor: UnitEchoSupervisor = UnitEchoSupervisor(self)
         # Likewise per unit (see config.resolve_structures): which IRS
         # structures modules scope this link's layouts.
         self._structures: tuple[Namespace, ...] = config.structures
         self._unit_structures: dict[UnitName, tuple[Namespace, ...]] = config.unit_structures
+        # Registered once per connection, not once per start(): `close()` is
+        # idempotent and safe on a connection that never started, so a single
+        # hook covers every start/close cycle this object goes through. Doing it
+        # in start() piled up a duplicate handler on every restart.
+        atexit.register(self.close)
 
     # ------------------------------------------------------------------ #
     # Unit resolution
@@ -221,7 +271,6 @@ class Connection(ABC):
             return
         self._loop_thread.await_coroutine(self._startup_all(retry))
         self._started = True
-        atexit.register(self.close)
 
     async def _startup_all(self, retry: bool) -> None:
         index = 0
@@ -263,10 +312,10 @@ class Connection(ABC):
     async def _shutdown_all(self) -> None:
         await self._do_stop()
         self._periodic_tasks.clear()
-        self._echo_tasks.clear()
-        self._last_echo_at.clear()
-        self._callbacks.clear()
-        self._connect_callbacks.clear()
+        self._echo_supervisor.forget_all()
+        # Registrations go BEFORE the task sweep, so nothing dispatched on the
+        # way down can still find a callback to invoke.
+        self._routes.drop_all_callbacks()
         self._active_units.clear()
         self._notify_state_change()  # release anyone parked in wait_for_connected_units
 
@@ -277,14 +326,13 @@ class Connection(ABC):
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
 
-        for future in self._subscriptions.values():
-            if not future.done():
-                future.cancel()
-        self._subscriptions.clear()
+        # Parked receives go LAST, so a caller is woken to a connection that is
+        # fully down rather than one mid-collapse.
+        self._routes.cancel_all_subscriptions()
 
     def _track(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         """Subclass helper: schedule a background coroutine and register it
-        so `stop()` can guarantee it's canceled and awaited.
+        so `close()` can guarantee it's canceled and awaited.
         ! No orphaned tasks - ever !"""
         task = self._loop_thread.loop.create_task(coro)
         self._tasks.add(task)
@@ -315,8 +363,8 @@ class Connection(ABC):
             return
         self._active_units.add(unit_name)
         logger.info(f"Unit {unit_name} connected")
-        self._start_unit_echo(unit_name)
-        callback = self._connect_callbacks.get(unit_name)
+        self._echo_supervisor.arm(unit_name)
+        callback = self._routes.connect_callback(unit_name)
         if callback is not None:
             self._track(self._run_connect_callback(callback, unit_name))
         self._notify_state_change()
@@ -325,15 +373,15 @@ class Connection(ABC):
         """Called by a subclass once `unit_name` disconnected,
          Stops that unit's echo."""
         if unit_name not in self._active_units:
-            self._stop_unit_echo(unit_name)
+            self._echo_supervisor.disarm(unit_name)
             return
         self._active_units.discard(unit_name)
         logger.info(f"Unit {unit_name} disconnected")
-        self._stop_unit_echo(unit_name)
+        self._echo_supervisor.disarm(unit_name)
         self._notify_state_change()
 
     # ------------------------------------------------------------------ #
-    # Echo lifecycle: periodic sending + liveness watchdog
+    # Per-unit settings lookups (both resolved once, at config load)
     # ------------------------------------------------------------------ #
     def _echo_for(self, unit_name: UnitName) -> EchoSettings:
         """The echo settings governing ONE unit -- its own if the config gave
@@ -355,115 +403,6 @@ class Connection(ABC):
         """
         return self._unit_structures.get(unit_name) or self._structures
 
-    def _start_unit_echo(self, unit_name: str) -> None:
-        """
-        Arm one unit's echo, now that it actually has a peer:
-
-          * an echo SENDER -- transmits the echo opcode every EchoInterval
-            seconds unconditionally, whether or not anything was received.
-            This is what makes the peer's own watchdog stay quiet.
-          * an echo WATCHDOG -- drops that unit if no echo has arrived from
-            it within EchoTimeout seconds.
-
-        Both run on THIS unit's resolved settings, so opcodes, interval and
-        timeout may legitimately differ from unit to unit on one connection --
-        and a unit whose settings don't resolve stays silent while its
-        neighbours heartbeat normally.
-
-        Direction-limited connections only get the half they can actually
-        perform: a send-only member has no way to receive an echo, so
-        watchdogging it would guarantee a spurious disconnect.
-        """
-        echo = self._echo_for(unit_name)
-        if not echo.enabled:
-            return
-        if any(not task.done() for task in self._echo_tasks.get(unit_name, [])):
-            return  # already armed
-        # Seed liveness from the moment the peer appeared, otherwise the
-        # watchdog would measure silence against the epoch and fire instantly.
-        self._last_echo_at[unit_name] = time.monotonic()
-        unit_tasks: list[asyncio.Task[None]] = []
-        if self.can_send:
-            unit_tasks.append(self._track(self._echo_sender_loop(unit_name, echo)))
-        if self.can_receive:
-            unit_tasks.append(self._track(self._echo_watchdog_loop(unit_name, echo)))
-        self._echo_tasks[unit_name] = unit_tasks
-
-    def _stop_unit_echo(self, unit_name: str) -> None:
-        """Disarm one unit's echo. The watchdog reaches this through
-        `_disconnect_unit`, so the calling task is skipped -- it is already
-        returning under its own power."""
-        current = asyncio.current_task()
-        for task in self._echo_tasks.pop(unit_name, []):
-            if task is not current and not task.done():
-                task.cancel()
-        self._last_echo_at.pop(unit_name, None)
-
-    async def _echo_sender_loop(self, unit_name: str, echo: EchoSettings) -> None:
-        """Transmit the echo opcode to `unit_name` every EchoInterval for as
-        long as that unit stays connected. Unconditional by design: this is
-        the only thing keeping the remote watchdog quiet, so it must not
-        depend on having received anything.
-
-        `echo` is passed in rather than looked up per tick: it is this unit's
-        already-resolved settings and cannot change under a live connection
-        (`ConnectionConfig` is frozen), so re-resolving each interval would
-        only be work."""
-        assert echo.send_opcode is not None
-        while True:
-            await asyncio.sleep(echo.interval)
-            if unit_name not in self._active_units:
-                return  # peer dropped between ticks; _mark_unit_connected re-arms
-            try:
-                await self._do_send(unit_name, b"", echo.send_opcode)
-            except asyncio.CancelledError:
-                raise
-            except ConnectionError as exc:
-                # The link is gone, so retire the unit here rather than race
-                # the read loop to it; _mark_unit_disconnected is idempotent.
-                logger.info("echo to unit %s undeliverable (%s); marking it down", unit_name, exc)
-                self._mark_unit_disconnected(unit_name)
-                return
-            except Exception as exc:  # noqa: BLE001 - a failed echo must not kill the loop
-                # Not a link failure (codec/protocol): retry, and let the
-                # watchdog decide when to give up.
-                logger.warning("echo send to unit %s failed: %s", unit_name, exc)
-
-    async def _echo_watchdog_loop(self, unit_name: str, echo: EchoSettings) -> None:
-        """
-        Disconnect `unit_name` once ITS OWN EchoTimeout seconds have passed
-        with no echo from it -- units on one connection may be watched on
-        different deadlines.
-
-        Rather than polling on a fixed tick, each iteration sleeps until this
-        unit's *deadline* -- `last echo + EchoTimeout`. Waking any earlier
-        only to find the deadline hasn't passed is wasted work, and waking on
-        a fixed EchoTimeout tick instead would push worst-case detection out
-        to nearly 2x EchoTimeout (an echo landing just before a tick resets
-        the clock, but the next check is still a full timeout away). Sleeping
-        to the deadline wakes at most once per timeout period AND detects the
-        death at the deadline itself.
-
-        Each pass re-reads `_last_echo_at`, so an echo arriving mid-sleep
-        simply pushes the deadline out and the next pass sleeps again.
-        """
-        while True:
-            last_seen = self._last_echo_at.get(unit_name)
-            # None == unit diconnected
-            if last_seen is None:
-                return
-            remaining = (last_seen + echo.timeout) - time.monotonic()
-            if remaining > 0:
-                await asyncio.sleep(remaining)
-                continue
-            elapsed = time.monotonic() - last_seen
-            logger.warning(
-                "no echo from unit %s for %.2fs (EchoTimeout=%.2fs) -- disconnecting it",
-                unit_name, elapsed, echo.timeout,
-            )
-            await self._disconnect_unit(unit_name)
-            return
-
     async def _disconnect_unit(self, unit_name: str) -> None:
         """
         Tear down one unit's transport without disturbing the others, and
@@ -476,14 +415,9 @@ class Connection(ABC):
             if not task.done():
                 task.cancel()
 
-        for route_key in [key for key in self._subscriptions if key[0] == unit_code]:
-            future = self._subscriptions.pop(route_key)
-            if not future.done():
-                future.set_exception(
-                    ConnectionError(f"unit {unit_name!r} disconnected: echo timeout")
-                )
-        for route_key in [key for key in self._callbacks if key[0] == unit_code]:
-            del self._callbacks[route_key]
+        self._routes.drop_unit(
+            unit_code, ConnectionError(f"unit {unit_name!r} disconnected: echo timeout")
+        )
 
         # stops echo and releases unit-state waiters.
         self._mark_unit_disconnected(unit_name)
@@ -496,58 +430,69 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Incoming message dispatch
     # ------------------------------------------------------------------ #
-    def _dispatch_incoming(self, unitName: str, opCode: int, payload: bytes) -> None:
+    def _dispatch_incoming(self, unit_name: str, opcode: int, payload: bytes) -> None:
         """
         Called by a subclass's read loop / datagram callback (always on the
-        shared event-loop thread) whenever a complete inbound message has
-        been parsed. This is the single choke point implementing:
+        shared event-loop thread) whenever a complete inbound message has been
+        parsed. This is the single choke point, and it is three questions in a
+        row:
 
-          1. Echo consumption -- if `opcode` matches THIS UNIT's "receive
-             echo" opcode, the message is consumed here: it refreshes this
-             unit's liveness timestamp, satisfying the watchdog, and goes no
-             further. It is never visible to the application, no matter what
-             is or isn't subscribed. No reply is sent: the periodic sender
-             already transmits on its own schedule, so answering an inbound
-             echo would be pure duplication -- and with a single shared
-             echo_opcode it would have both peers answering each other's
-             answers without end.
-          2. Subscribe-or-drop filtering -- otherwise, the message goes to
-             whoever owns this exact (unit_code, opcode) route: a parked
-             receive_message() future if one is in flight, else a standing
-             handle_on_receive() callback. If neither exists, the message is
-             discarded immediately; it is never buffered for a hypothetical
-             future call.
-          3. IRS decoding -- once a route owner is known, the payload is
-             handed to IRS.irs_parser before delivery. A parser that raises on
-             malformed input costs exactly that message: it is logged and
-             dropped, and the read loop carries on.
+          1. Is this an echo? `UnitEchoSupervisor.consume` answers per unit and,
+             if so, has already refreshed that unit's liveness. The message goes
+             no further and is never visible to the application, no matter what
+             is or is not subscribed.
+          2. Does anyone own this route? `RouteTable.owner_of` returns the
+             parked `receive_message()` future, else the standing
+             `handle_on_receive()` callback, else None -- in which case the
+             message is discarded immediately, never buffered for a
+             hypothetical future call.
+          3. Does it decode? Only now, with a route owner known, is the payload
+             handed to `IRS.irs_parser`, so unowned messages cost nothing. A
+             message that does not decode costs exactly itself: it is logged and
+             dropped, the route keeps its owner, and the read loop carries on.
+             A parked `receive_message()` therefore stays parked and goes on
+             waiting for a message it can actually return, up to its own
+             `timeout` -- one peer sending a malformed frame must not be able to
+             fail a caller who asked for a good one.
         """
-        echo = self._echo_for(unitName)
-        if echo.enabled and opCode == echo.recv_opcode:
-            self._last_echo_at[unitName] = time.monotonic()
+        if self._echo_supervisor.consume(unit_name, opcode):
             return
-        unit_code = self._unit_code_for(unitName)
-        route_key: RouteKey = (unit_code, opCode)
-        future = self._subscriptions.get(route_key)
-        callback = self._callbacks.get(route_key)
-        # Checks for message subscription
-        if (future is None or future.done()) and callback is None:
+        unit_code = self._unit_code_for(unit_name)
+        route_key: RouteKey = (unit_code, opcode)
+        owner = self._routes.owner_of(route_key)
+        if owner is None:
             return
-        message, exception = None, None
         try:
-            message = self._decode(unit_code, opCode, payload, unitName)
-        except Exception as e:
+            message = self._decode(unit_code, opcode, payload, unit_name)
+        except Exception as exc:
+            # logger.exception, not warning: an unparseable message is a real
+            # problem worth a traceback, it just isn't this caller's problem.
             logger.exception(
-                f"IRS could not parse this message (unit={unitName}, opcode={opCode}), for reason: {e};\nCanceling message subscription")
-            exception = BufferError(f"Failed while parsing message for reason: {e!r}")
-        if future is not None and not future.done():
-            del self._subscriptions[route_key]
-            future.set_exception(exception) if message is None else future.set_result(message)
+                "dropping a message IRS could not parse (unit=%s, opcode=%s): %s",
+                unit_name, opcode, exc)
             return
-        assert callback is not None
         if message is None:
+            # `parse_irs` handing back a (name, None) pair. Nothing to deliver,
+            # and delivering None would look like a message that said nothing.
+            logger.warning(
+                "dropping a message that decoded to nothing (unit=%s, opcode=%s)", unit_name, opcode)
             return
-        self._track(self._run_callback(callback, message, unitName, opCode))
+        self._deliver(owner, route_key, message, unit_name, opcode)
+
+    def _deliver(self, owner: asyncio.Future[IrsMessage] | ReceiveCallback,
+                 route_key: RouteKey, message: IrsMessage,
+                 unit_name: str, opcode: int) -> None:
+        """Hand one decoded message to the route's owner.
+
+        A parked `receive_message()` is released here and its route freed; a
+        standing callback is dispatched to an executor thread and the route
+        stays registered for the next message.
+        """
+        if isinstance(owner, asyncio.Future):
+            self._routes.settle(route_key, owner)
+            owner.set_result(message)
+            return
+        self._track(self._run_callback(owner, message, unit_name, opcode))
 
     # ------------------------------------------------------------------ #
     # IRS codec boundary
@@ -566,7 +511,7 @@ class Connection(ABC):
         """
         validate_irs(*route_key, self._structures_for(unit_name))
 
-    def _encode(self, opcode: int, message: IrsMessage, unit_name: UnitName) -> Any:
+    def _encode(self, opcode: int, message: IrsMessage, unit_name: UnitName) -> bytes | IrsMessage:
         """
         Application message -> wire payload, stamped with OUR unit code: the
         receiver needs to know who sent this, not who it was sent to.
@@ -652,40 +597,8 @@ class Connection(ABC):
             logger.exception("on-connect callback for unit %s raised", unit_name)
 
     # ------------------------------------------------------------------ #
-    # Subscription internals (all run on the loop thread)
+    # Waiting on a claimed route (runs on the loop thread)
     # ------------------------------------------------------------------ #
-    async def _subscribe(self, route_key: RouteKey) -> asyncio.Future[IrsMessage]:
-        """
-        Register the future that makes this route "subscribed", and return it
-        without awaiting.
-
-        Split out from the await so `receive_message` can run a trigger
-        function in between: by the time the trigger fires, the future is
-        already in `_subscriptions`, so a reply that arrives immediately --
-        even before the caller gets as far as awaiting -- is captured by the
-        future rather than dropped as unsubscribed.
-        """
-        if route_key in self._callbacks:
-            raise RuntimeError(
-                f"route (unit_code={route_key[0]}, opcode={route_key[1]}) already has an "
-                f"on-receive callback; call stop_on_receive() before receive_message()"
-            )
-        existing = self._subscriptions.get(route_key)
-        if existing is not None and not existing.done():
-            # One subscriber per route, by design. Silently replacing the
-            # earlier future would strand that caller forever, so say so.
-            raise RuntimeError(
-                f"already subscribed to (unit_code={route_key[0]}, opcode={route_key[1]}): "
-                f"only one receive_message() may be in flight per route"
-            )
-
-        # This future outlives its creating coroutine and is awaited by
-        # another (_await_subscription), so bind it to the connection's own
-        # loop rather than whichever one happens to be running.
-        future: asyncio.Future[IrsMessage] = self._loop_thread.loop.create_future()
-        self._subscriptions[route_key] = future
-        return future
-
     async def _await_subscription(
         self, route_key: RouteKey, future: asyncio.Future[IrsMessage], timeout: float | int | None
     ) -> IrsMessage:
@@ -694,19 +607,9 @@ class Connection(ABC):
                 return await future
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
-            # Always unsubscribe -- delivered, timed out or cancelled -- so
-            # an abandoned route never swallows a later message. Remove only
-            # OUR future: a later subscriber may already own the slot.
-            if self._subscriptions.get(route_key) is future:
-                del self._subscriptions[route_key]
-
-    async def _unsubscribe(self, route_key: RouteKey, future: asyncio.Future[IrsMessage]) -> None:
-        """Release a subscription that will never be awaited (the trigger
-        function raised), so the route doesn't stay claimed."""
-        if self._subscriptions.get(route_key) is future:
-            del self._subscriptions[route_key]
-        if not future.done():
-            future.cancel()
+            # Always free the route -- delivered, timed out or cancelled -- so
+            # an abandoned one never swallows a later message.
+            self._routes.settle(route_key, future)
 
     # ------------------------------------------------------------------ #
     # Public sync API
@@ -806,11 +709,8 @@ class Connection(ABC):
             return False
         return True
 
-    def receive_message(
-        self, opcode: int | str | IrsMessage, unitName: str | None = None,
-        timeout: float | int | None = None,
-        trigger_function: TriggerFunction | None = None
-    ) -> tuple[str, IrsMessage]:
+    def receive_message(self, opcode: int | str | IrsMessage, unit_name: str | None = None,
+        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage:
         """
         Blocking, synchronous receive. Returns (unit_name, message) for the
         first message matching BOTH `opcode` and the resolved unit, with the
@@ -837,27 +737,25 @@ class Connection(ABC):
         released and the exception propagates unchanged.
         """
         opcode = extract_opcode(opcode)
-        unit, route_key = self._resolve_route(unitName, opcode)
+        unit, route_key = self._resolve_route(unit_name, opcode)
         self._validate_route(unit, route_key)
-        future: asyncio.Future[IrsMessage] = self._loop_thread.await_coroutine(self._subscribe(route_key))
+        future: asyncio.Future[IrsMessage] = self._loop_thread.call_on_loop(
+            self._routes.claim, route_key, self._loop_thread.loop
+        )
         if trigger_function is not None:
             try:
                 trigger_function()
             except BaseException:
-                self._loop_thread.await_coroutine(self._unsubscribe(route_key, future))
+                self._loop_thread.call_on_loop(self._routes.release, route_key, future)
                 raise
         wait_timeout = timeout + 1 if timeout is not None else None
         message: IrsMessage = self._loop_thread.await_coroutine(
             self._await_subscription(route_key, future, timeout), timeout=wait_timeout
         )
-        return unit, message
+        return message
 
-    def handle_on_receive(
-        self,
-        opcode: int | str | IrsMessage,
-        callback_func: ReceiveCallback,
-        unit_name: str | None = None,
-    ) -> None:
+    def handle_on_receive(self, opcode: int | str | IrsMessage,
+        callback_func: ReceiveCallback, unit_name: str | None = None) -> None:
         """
         Register a standing handler for a route instead of polling it.
 
@@ -865,7 +763,7 @@ class Connection(ABC):
         this registers `callback_func` permanently: every subsequent inbound
         message matching `opcode` and the resolved unit invokes
         `callback_func(message)` -- decoded by `IRS.irs_parser.parse_irs`, same as
-        `receive_message` returns -- until `stop_on_receive()` or `stop()`.
+        `receive_message` returns -- until `stop_on_receive()` or `close()`.
         Messages arriving while a callback is still running are dispatched
         too, so a slow callback may run concurrently with itself -- keep it
         cheap, or serialize inside it.
@@ -885,7 +783,7 @@ class Connection(ABC):
         opcode = extract_opcode(opcode)
         unit, route_key = self._resolve_route(unit_name, opcode)
         self._validate_route(unit, route_key)
-        self._loop_thread.await_coroutine(self._register_callback(route_key, callback_func))
+        self._loop_thread.call_on_loop(self._routes.register_callback, route_key, callback_func)
 
     def stop_on_receive(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
         """
@@ -896,7 +794,7 @@ class Connection(ABC):
         """
         opcode = extract_opcode(opcode)
         _unit, route_key = self._resolve_route(unit_name, opcode)
-        removed: bool = self._loop_thread.await_coroutine(self._unregister_callback(route_key))
+        removed: bool = self._loop_thread.call_on_loop(self._routes.unregister_callback, route_key)
         return removed
 
     def handle_on_connect(
@@ -929,7 +827,7 @@ class Connection(ABC):
         if not callable(callback_func):
             raise TypeError(f"callback_func must be callable, got {callback_func!r}")
         unit = self._resolve_unit(unit_name)
-        self._loop_thread.await_coroutine(self._register_connect_callback(unit, callback_func))
+        self._loop_thread.call_on_loop(self._routes.register_connect, unit, callback_func)
 
     def stop_on_connect(self, unit_name: str | None = None) -> bool:
         """
@@ -939,7 +837,7 @@ class Connection(ABC):
         finish.
         """
         unit = self._resolve_unit(unit_name)
-        removed: bool = self._loop_thread.await_coroutine(self._unregister_connect_callback(unit))
+        removed: bool = self._loop_thread.call_on_loop(self._routes.unregister_connect, unit)
         return removed
 
     def periodic_sending(
@@ -977,9 +875,7 @@ class Connection(ABC):
             raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
         unit, route_key = self._resolve_route(unit_name, opcode)
         payload = self._encode(opcode, data, unit)
-        self._loop_thread.await_coroutine(
-            self._start_periodic(unit, route_key, payload, opcode, interval_seconds)
-        )
+        self._loop_thread.await_coroutine(self._start_periodic(unit, route_key, payload, opcode, interval_seconds))
 
     def stop_periodic(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
         """
@@ -995,43 +891,8 @@ class Connection(ABC):
         stopped: bool = self._loop_thread.await_coroutine(self._stop_periodic(route_key))
         return stopped
 
-    # -- callback internals (all run on the loop thread) ------------------ #
-    async def _register_callback(self, route_key: RouteKey, callback: ReceiveCallback) -> None:
-        existing = self._subscriptions.get(route_key)
-        if existing is not None and not existing.done():
-            raise RuntimeError(
-                f"route (unit_code={route_key[0]}, opcode={route_key[1]}) has a "
-                f"receive_message() in flight; a route cannot be polled and handled at once"
-            )
-        if route_key in self._callbacks:
-            raise RuntimeError(
-                f"route (unit_code={route_key[0]}, opcode={route_key[1]}) already has an "
-                f"on-receive callback; call stop_on_receive() first"
-            )
-        self._callbacks[route_key] = callback
-
-    async def _unregister_callback(self, route_key: RouteKey) -> bool:
-        return self._callbacks.pop(route_key, None) is not None
-
-    async def _register_connect_callback(self, unit_name: UnitName, callback: ConnectCallback) -> None:
-        if unit_name in self._connect_callbacks:
-            raise RuntimeError(
-                f"unit {unit_name!r} already has an on-connect callback; "
-                f"call stop_on_connect() first"
-            )
-        self._connect_callbacks[unit_name] = callback
-
-    async def _unregister_connect_callback(self, unit_name: UnitName) -> bool:
-        return self._connect_callbacks.pop(unit_name, None) is not None
-
     # -- periodic sending internals (all run on the loop thread) ---------- #
-    async def _start_periodic(self,
-        unit_name: str,
-        route_key: RouteKey,
-        data: bytes,
-        opcode: int,
-        interval: float,
-    ) -> None:
+    async def _start_periodic(self, unit_name: str, route_key: RouteKey, data: bytes, opcode: int, interval: float) -> None:
         await self._stop_periodic(route_key)
         task = self._track(self._periodic_send_loop(unit_name, data, opcode, interval))
         self._periodic_tasks[route_key] = task

@@ -62,7 +62,7 @@ from typing import Any, Mapping
 
 from core.tools.general import (resolve_module_name, topic_opcode, validated_opcode,
                                validated_unitcode)
-from core.annotations import *
+from core.annotations import Namespace, OpCode, UnitCode
 
 DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0
@@ -95,8 +95,10 @@ ALL_ECHO_OPCODE_KEYS: tuple[str, ...] = (*ECHO_OPCODE_KEYS, *RECV_ECHO_OPCODE_KE
 
 ECHO_INTERVAL_KEYS = ("echo_interval", "EchoInterval", "echoInterval")
 ECHO_TIMEOUT_KEYS = ("echo_timeout", "EchoTimeout", "echoTimeout")
-ECHO_PAYLOAD_KEYS = ("echo_payload", "EchoPayload", "echoPayload")
-ECHO_TUNING_KEYS: tuple[str, ...] = (*ECHO_INTERVAL_KEYS, *ECHO_TIMEOUT_KEYS, *ECHO_PAYLOAD_KEYS)
+#: There is deliberately no `echo_payload` here. The heartbeat body is always
+#: empty: `UnitEchoSupervisor` sends b"" and nothing ever read a configured
+#: value, so the key was accepted, documented, and silently ignored.
+ECHO_TUNING_KEYS: tuple[str, ...] = (*ECHO_INTERVAL_KEYS, *ECHO_TIMEOUT_KEYS)
 
 ECHO_KEYS: frozenset[str] = frozenset(ALL_ECHO_OPCODE_KEYS + ECHO_TUNING_KEYS)
 
@@ -159,7 +161,7 @@ def _lookup(source: dict[str, Any], *names: str) -> Any | None:
     return None
 
 
-def _as_opcode(value: Any, field_name: str) -> UnitCode:
+def _as_opcode(value: Any, field_name: str) -> OpCode:
     """Checks opCode, extracted form config.
     uses 'tools.general.validated_opCode' for allowing both HEX and DEC integers
     also validate UInt16 size."""
@@ -172,7 +174,7 @@ def _as_opcode(value: Any, field_name: str) -> UnitCode:
     return opcode
 
 
-def _as_unit_code(value: Any, field_name: str) -> int:
+def _as_unit_code(value: Any, field_name: str) -> UnitCode:
     """Checks unitCode, extracted form config.
     uses 'tools.general.validated_opCode' for allowing both HEX and DEC integers
     also validate UInt8 size."""
@@ -268,6 +270,12 @@ class EchoSettings:
 
         Two levels of granularity, deliberately:
 
+          * The three OPCODE keys resolve as a GROUP. A unit naming any of them
+            is describing its whole heartbeat, so the connection-level opcodes
+            drop out entirely rather than half-applying -- a unit with
+            `{"echo_opcode": 10}` under a global `{"recv_echo_opcode": 99}` must
+            not end up receiving on 99 and sending on 10, a link neither peer
+            configured.
           * `EchoInterval` / `EchoTimeout` resolve
             **individually**, because each is independently meaningful: a unit
             overriding just its timeout still wants the shared interval, and
@@ -462,6 +470,151 @@ class UnitEndpoint:
     structures: tuple[Namespace, ...] = ()
 
 
+# --------------------------------------------------------------------------- #
+# The steps of `from_json`, below. Each owns exactly one of this config's
+# failure modes and raises it with the message naming the offending key, so the
+# classmethod itself reads as the order those checks happen in.
+# --------------------------------------------------------------------------- #
+def _parse_own_unit_code(data: Mapping[str, Any]) -> UnitCode:
+    """OUR code -- who this process is on the wire. Required: there is no
+    anonymous-unit fallback."""
+    raw = _lookup(data, *UNIT_CODE_KEYS)
+    if raw is None:
+        raise ValueError("config['unitCode'] is required: it is this connection's OWN unit code")
+    return _as_unit_code(raw, "unitCode")
+
+
+def _require_connections(data: Mapping[str, Any]) -> dict[str, Any]:
+    """`connections` is the single source of truth for unit routing -- required,
+    with no implicit "default" unit and no separate port list to keep in sync."""
+    connections_raw = data.get(CONNECTIONS_KEY)
+    if not connections_raw:
+        raise ValueError(
+            f"config[{CONNECTIONS_KEY!r}] is required and must map every connection name to "
+            f"{{{PORT_KEY!r}: int, 'unitCode': int}}")
+    return connections_raw
+
+
+def _split_extra(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Everything outside the fixed key set, left for whoever owns it: the echo
+    keys for `EchoSettings`, protocol-specific keys (ttl, mode, qos_file, ...)
+    for the individual protocol classes."""
+    fixed_keys = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY,
+                  *UNIT_CODE_KEYS, TOPICS_KEY}
+    return {key: value for key, value in data.items() if key not in fixed_keys}
+
+
+def _reject_topics_on_non_dds(protocol: Protocol, topics: tuple[TopicSpec, ...]) -> None:
+    """Topics are a DDS concept; on a socket protocol the key can only be a
+    mistake, and ignoring it silently would hide the real misconfiguration."""
+    if protocol is not Protocol.DDS and topics:
+        raise ValueError(
+            f"config[{TOPICS_KEY!r}] is only meaningful on a 'dds' connection; this one is "
+            f"{protocol.value!r}.")
+
+
+def _reject_echo_on_dds(protocol: Protocol, extra: Mapping[str, Any],
+                        connections_raw: Mapping[str, Any]) -> None:
+    """
+    The echo lifecycle sends a raw `bytes` payload (b'' by default), which a
+    DataWriter cannot accept -- it serializes typed samples through the type's
+    TypeSupport. An echo configured here would therefore never heartbeat, and
+    its watchdog would then drop every unit on EchoTimeout. DDS's own LIVELINESS
+    QoS is the mechanism that belongs in that slot, so this is an error rather
+    than a docstring warning.
+    """
+    if protocol is not Protocol.DDS:
+        return
+    echo_here = sorted(ECHO_KEYS.intersection(extra))
+    echo_in_units = sorted({
+        key for spec in connections_raw.values() if isinstance(spec, dict)
+        for key in ECHO_KEYS.intersection(spec)})
+    if echo_here or echo_in_units:
+        raise ValueError(
+            f"echo keys are not supported on a 'dds' connection "
+            f"(found {echo_here + echo_in_units}).\n"
+            f"[*] The echo lifecycle transmits raw bytes, which a DDS DataWriter rejects: "
+            f"it publishes typed samples only.\n"
+            f"[*] Use DDS LIVELINESS QoS in the QoS profile instead -- it is the same "
+            f"mechanism, enforced by the middleware.")
+
+
+def _parse_port(unit_name: str, spec: Mapping[str, Any]) -> int:
+    """The transport port this unit is reached on -- for DDS, the domain id."""
+    try:
+        port = int(spec[PORT_KEY])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"config['connections'][{unit_name!r}][{PORT_KEY!r}] must be an integer, got {spec[PORT_KEY]!r}") from exc
+    if not 0 <= port <= 0xFFFF:
+        raise ValueError(
+            f"config['connections'][{unit_name!r}][{PORT_KEY!r}] = {port} is not a valid port\n[*] Has to be between 0 - 65,535.")
+    return port
+
+
+def _parse_unit_endpoint(unit_name: str, spec: Any, global_extra: Mapping[str, Any],
+                         code_owner: dict[UnitCode, str]) -> UnitEndpoint:
+    """
+    One entry of `connections`: where the unit lives, how it identifies itself
+    on the wire, and the echo/structures it inherits or overrides.
+
+    `code_owner` maps each unit code already taken to the unit that took it.
+    This reads AND extends it, which is how two units sharing one code -- an
+    unroutable config -- is caught within a single pass.
+    """
+    if (not isinstance(spec, dict) or PORT_KEY not in spec
+            or all(unitCode_key not in spec for unitCode_key in UNIT_CODE_KEYS)):
+        raise ValueError(
+            f"config['connections'][{unit_name!r}] must be an object with at least a {PORT_KEY!r} key, got {spec!r}")
+    port = _parse_port(unit_name, spec)
+    unitCode = _as_unit_code(_lookup(spec, *UNIT_CODE_KEYS), f"connections[{unit_name!r}]['unitCode']")
+    if unitCode in code_owner:
+        raise ValueError(f"connections {code_owner[unitCode]!r} and {unit_name!r} both use unitCode "
+                         f"{unitCode}; unit codes must be unique within a connection")
+    code_owner[unitCode] = unit_name
+    # Per-unit echo and structures win; connection-level `extra` is the fallback.
+    try:
+        echo = EchoSettings.resolve(spec, global_extra)
+        structures_raw, structures = resolve_structures(spec, global_extra)
+    except ValueError as exc:
+        raise ValueError(f"config['connections'][{unit_name!r}]: {exc}") from exc
+    return UnitEndpoint(port=port, unitCode=unitCode, echo=echo,
+                        structures_raw=structures_raw, structures=structures)
+
+
+def _parse_unit_endpoints(connections_raw: Mapping[str, Any],
+                          global_extra: Mapping[str, Any]) -> dict[str, UnitEndpoint]:
+    """Every configured unit, in declaration order, with unit codes checked for
+    uniqueness across the whole connection."""
+    code_owner: dict[UnitCode, str] = {}
+    return {
+        unit_name: _parse_unit_endpoint(unit_name, spec, global_extra, code_owner)
+        for unit_name, spec in connections_raw.items()
+    }
+
+
+def _check_connection_structures_scope(connection_structures: tuple[str, ...] | None,
+                                       connections: Mapping[str, UnitEndpoint],
+                                       protocol: Protocol) -> None:
+    """
+    A structures file defines ONE link, so a connection-level list is only
+    meaningful when there is one link. With several units it would scope every
+    one of them to the same namespace -- which is precisely how two files that
+    share an opcode used to erase each other. Multicast is the sole exception:
+    one sender fans out to many receivers over one IRS.
+    """
+    if not connection_structures or len(connections) <= 1 or protocol is Protocol.MULTICAST:
+        return
+    raise ValueError(
+        f"config['Structures'] is a connection-level default and is only legal when the "
+        f"connection has exactly one unit; this {protocol.value} connection has "
+        f"{len(connections)} ({sorted(connections)}).\n"
+        f"[*] A structures file defines ONE server<->client link, so every unit here must "
+        f"declare its own 'Structures' inside its connections[<name>] entry.\n"
+        f"[*] Multicast is the sole exception: one sender fans out to many receivers over "
+        f"a single shared IRS.")
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectionConfig:
     """
@@ -489,93 +642,25 @@ class ConnectionConfig:
         """
         Build a validated config from a raw JSON dict.
 
-        Every failure mode is raised here, at load time.
+        Every failure mode is raised here, at load time. The body below is the
+        order those checks happen in; each step's own function owns the rule and
+        the message that explains it.
         """
-        own_unitCode_raw = _lookup(data, *UNIT_CODE_KEYS)
-        if own_unitCode_raw is None:
-            raise ValueError("config['unitCode'] is required: it is this connection's OWN unit code")
-        own_unit_code = _as_unit_code(own_unitCode_raw, "unitCode")
-        connections_raw = data.get(CONNECTIONS_KEY)
-        if not connections_raw:
-            raise ValueError(
-                f"config[{CONNECTIONS_KEY!r}] is required and must map every connection name to "
-                f"{{{PORT_KEY!r}: int, 'unitCode': int}}")
-        required_keys = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY,
-                         *UNIT_CODE_KEYS, TOPICS_KEY}
-        extra = {key: value for key, value in data.items() if key not in required_keys}
-        # Parsed up here rather than at construction: the Structures rule below
+        own_unit_code = _parse_own_unit_code(data)
+        connections_raw = _require_connections(data)
+        extra = _split_extra(data)
+        # Protocol and side are read before the units: the Structures rule below
         # has to know the protocol to exempt multicast, and to name it if it
         # rejects the config.
         protocol = Protocol(str(data[PROTOCOL_KEY]).lower())
         side = Side(str(data[SIDE_KEY]).lower())
         topics = parse_topics(data.get(TOPICS_KEY), side)
-        if protocol is not Protocol.DDS and topics:
-            raise ValueError(
-                f"config[{TOPICS_KEY!r}] is only meaningful on a 'dds' connection; this one is "
-                f"{protocol.value!r}.")
-        # The echo lifecycle sends a raw `bytes` payload (b'' by default), which
-        # a DataWriter cannot accept -- it serializes typed samples through the
-        # type's TypeSupport. An echo configured here would therefore never
-        # heartbeat, and its watchdog would then drop every unit on
-        # EchoTimeout. DDS's own LIVELINESS QoS is the mechanism that belongs
-        # in that slot, so this is an error rather than a docstring warning.
-        if protocol is Protocol.DDS:
-            echo_here = sorted(ECHO_KEYS.intersection(extra))
-            echo_in_units = sorted({
-                key for spec in connections_raw.values() if isinstance(spec, dict)
-                for key in ECHO_KEYS.intersection(spec)})
-            if echo_here or echo_in_units:
-                raise ValueError(
-                    f"echo keys are not supported on a 'dds' connection "
-                    f"(found {echo_here + echo_in_units}).\n"
-                    f"[*] The echo lifecycle transmits raw bytes, which a DDS DataWriter rejects: "
-                    f"it publishes typed samples only.\n"
-                    f"[*] Use DDS LIVELINESS QoS in the QoS profile instead -- it is the same "
-                    f"mechanism, enforced by the middleware.")
-        connection_structures = _structures_from(extra, "Structures")
-        connections: dict[str, UnitEndpoint] = {}
-        code_owner: dict[UnitCode, str] = {}
-        for name, spec in connections_raw.items():
-            if not isinstance(spec, dict) or PORT_KEY not in spec or all(unitCode_key not in spec for unitCode_key in UNIT_CODE_KEYS):
-                raise ValueError(
-                    f"config['connections'][{name!r}] must be an object with at least a {PORT_KEY!r} key, got {spec!r}")
-            try:
-                port = int(spec[PORT_KEY])
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"config['connections'][{name!r}][{PORT_KEY!r}] must be an integer, got {spec[PORT_KEY]!r}") from exc
-            if not 0 <= port <= 0xFFFF:
-                raise ValueError(
-                    f"config['connections'][{name!r}][{PORT_KEY!r}] = {port} is not a valid port\n[*] Has to be between 0 - 65,535.")
-            raw_unitCode = _lookup(spec, *UNIT_CODE_KEYS)
-            unitCode = _as_unit_code(raw_unitCode, f"connections[{name!r}]['unitCode']")
-            if unitCode in code_owner:
-                raise ValueError(f"connections {code_owner[unitCode]!r} and {name!r} both use unitCode "
-                                 f"{unitCode}; unit codes must be unique within a connection")
-            code_owner[unitCode] = name
-            # Per-unit echo wins, connection-level `extra` is the fallback.
-            try:
-                echo = EchoSettings.resolve(spec, extra)
-                structures_raw, structures = resolve_structures(spec, extra)
-            except ValueError as exc:
-                raise ValueError(f"config['connections'][{name!r}]: {exc}") from exc
-            connections[name] = UnitEndpoint(port=port, unitCode=unitCode, echo=echo,
-                                             structures_raw=structures_raw, structures=structures)
+        _reject_topics_on_non_dds(protocol, topics)
+        _reject_echo_on_dds(protocol, extra, connections_raw)
 
-        # A structures file defines ONE link, so a connection-level list is only
-        # meaningful when there is one link. With several units it would scope
-        # every one of them to the same namespace -- which is precisely how two
-        # files that share an opcode used to erase each other. Multicast is the
-        # sole exception: one sender fans out to many receivers over one IRS.
-        if connection_structures and len(connections) > 1 and protocol is not Protocol.MULTICAST:
-            raise ValueError(
-                f"config['Structures'] is a connection-level default and is only legal when the "
-                f"connection has exactly one unit; this {protocol.value} connection has "
-                f"{len(connections)} ({sorted(connections)}).\n"
-                f"[*] A structures file defines ONE server<->client link, so every unit here must "
-                f"declare its own 'Structures' inside its connections[<name>] entry.\n"
-                f"[*] Multicast is the sole exception: one sender fans out to many receivers over "
-                f"a single shared IRS.")
+        connection_structures = _structures_from(extra, "Structures")
+        connections = _parse_unit_endpoints(connections_raw, extra)
+        _check_connection_structures_scope(connection_structures, connections, protocol)
 
         config = cls(
             protocol=protocol,
@@ -587,8 +672,9 @@ class ConnectionConfig:
             topics=topics,
             extra=extra,
         )
-        # Parse the echo and structures blocks at load-time, so a malformed key
-        # is a load failure rather than a link that silently misbehaves later.
+        # Touch the CONNECTION-level echo and structures blocks too, so a
+        # malformed key there is a load failure rather than a link that
+        # silently misbehaves later.
         config.echo
         config.structures
         return config

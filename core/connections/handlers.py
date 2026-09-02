@@ -24,8 +24,7 @@ from __future__ import annotations
 
 from typing import Callable, TypeVar
 
-from core.annotations import *
-from .base import Connection, ConnectCallback, ReceiveCallback
+from .base import Connection, ConnectCallback, ReceiveCallback, UnitName
 from .composite import CompositeUnit
 
 _F = TypeVar("_F", bound=Callable)
@@ -123,18 +122,23 @@ class UnitHandler:
         self.unitConnection = unit
 
 
-def _config_unit_codes(unit: Connection | CompositeUnit) -> dict[str, int]:
-    """ Returns config.unit_codes
-    used since CompositeUnit doesn't have unit_codes attribute
-    and needs to be accessed
+def _config_unit_codes(unit: Connection | CompositeUnit) -> dict[UnitName, int]:
+    """
+    The unit-name -> unit-code mapping a handler's `unitCode` is resolved
+    against.
+
+    A `CompositeUnit` has no config of its own, so the answer comes from the
+    member that owns its inbound direction -- the same member every route and
+    connect callback is registered on, which is why it has to be that one and
+    not just any member.
     """
     if isinstance(unit, CompositeUnit):
-        if unit._receiver is None:
+        if unit.receiver is None:
             raise ValueError(
                 f"CompositeUnit {unit.name!r} has no receive-capable member; "
                 f"a handler_class needs somewhere to receive on"
             )
-        return unit._receiver.config.unit_codes
+        return unit.receiver.config.unit_codes
     return unit.config.unit_codes
 
 

@@ -45,7 +45,12 @@ framework works without it.
 config.py      ConnectionConfig: JSON -> typed config, unit<->port mapping
 framing.py     (UnitCode,OpCode,DataLength) little-endian struct pack/unpack
 base.py        _EventLoopThread (sync/async bridge) + Connection ABC
-               + subscribe-or-drop delivery + per-unit state + echo handling
+               + subscribe-or-drop delivery + per-unit state, and the
+               `Unit` Protocol both Connection and CompositeUnit satisfy
+_routes.py     RouteTable -- who owns a (unit_code, opcode) route, and the
+               rule that exactly one thing does (subscription XOR callback)
+_echo.py       UnitEchoSupervisor -- per-unit heartbeat sender, liveness
+               clock and timeout watchdog; armed on connect, disarmed on drop
 tcp.py         TcpConnection
 udp.py         UdpConnection
 multicast.py   MulticastConnection (direction derived from config.side)
@@ -96,7 +101,7 @@ where the logic is genuinely non-obvious.
 
 Everything runs on **one** background thread that owns **one** asyncio event loop for the whole
 process (`base._EventLoopThread`, a lazily-created singleton). All socket I/O happens as
-coroutines on that loop; the public API (`Connection.start/stop/send_message/receive_message`) is
+coroutines on that loop; the public API (`Connection.start/close/send_message/receive_message`) is
 plain, blocking, synchronous Python that marshals each call onto the loop thread with
 `asyncio.run_coroutine_threadsafe(...).result(timeout=...)`. Callers never import `asyncio`.
 
@@ -126,10 +131,12 @@ so on those connections:
   can't encode is a programming error and fails loudly.
 - On **receive** it does not. `IRS.irs_parser` is strict — an unregistered `(unitCode, opCode)`
   or a payload that doesn't fit its layout raises — so `_dispatch_incoming` catches it, logs it
-  via `logger.exception` (full traceback: an unparseable message is a real problem), and then
-  **delivers the raw payload** and carries on. One bad message never costs the read loop or the
-  connection. This is also what keeps byte-oriented units working: they register no layouts at
-  all, so every message they receive takes this path by design.
+  via `logger.exception` (full traceback: an unparseable message is a real problem), and
+  **drops that message**. One bad message never costs the read loop, the connection, or the
+  route's owner: a parked `receive_message()` stays parked and goes on waiting for a message it
+  can actually return, up to its own `timeout`. A peer sending a malformed frame must not be able
+  to fail a caller who asked for a good one, and a standing `handle_on_receive` callback simply
+  is not invoked for it.
 - `parse_irs` returning `None` likewise means "no conversion" and the raw bytes are delivered. A
   2-tuple result is unwrapped to its second element (`parse_irs` returns
   `(message_name, message_object)`).
@@ -277,21 +284,21 @@ exists, the message is discarded immediately.**
   exception propagates.
 
 - **`handle_on_receive`** registers a standing `callback_func(payload)` for a route until
-  `stop_on_receive()`/`stop()`. Callbacks run on an **executor thread, never the event loop**
+  `stop_on_receive()`/`close()`. Callbacks run on an **executor thread, never the event loop**
   (a callback that called back into the sync API from the loop thread would deadlock).
   Exceptions inside callbacks are logged, not propagated.
 
 - A route is either polled or handled, **never both** — mixing raises `RuntimeError`.
 
-### 5b. Class-based handlers (`BaseUnitHandler`)
+### 5b. Class-based handlers (`UnitHandler`)
 
 `handlers.py` adds a declarative alternative to calling `handle_on_receive()` by hand for every
-opcode a unit answers: subclass `BaseUnitHandler`, set `unitCode` to the *peer's* configured code
+opcode a unit answers: subclass `UnitHandler`, set `unitCode` to the *peer's* configured code
 (the "theirs" code from section 3 above, not this process's own), and tag each handling method
 with `@route(opCode=...)`:
 
 ```python
-class TestHandler(BaseUnitHandler):
+class TestHandler(UnitHandler):
     unitCode = 0x01
 
     @route(opCode=0xFFFF)
@@ -301,7 +308,7 @@ class TestHandler(BaseUnitHandler):
 manager.create("unit_name", config_data, handler_class=TestHandler)
 ```
 
-`@route` is a pure marker (tags the function with the opcode); `BaseUnitHandler.__init_subclass__`
+`@route` is a pure marker (tags the function with the opcode); `UnitHandler.__init_subclass__`
 does the real work, once, at class-DEFINITION time: it walks the class's MRO for every tagged
 method and builds `cls._routes: dict[opcode, method_name]` — so a subclass overriding a route
 method (and re-tagging it) replaces the route, and dropping the tag silently un-routes it. Two
@@ -382,7 +389,7 @@ the normal ordering (`install_handler` runs before `start()`, so nothing is ever
 called out explicitly for the one case it matters: registering by hand on a connection already
 running.
 
-**Declarative form**: `handlers.py`'s `@on_connect` tags one `BaseUnitHandler` method — no opcode,
+**Declarative form**: `handlers.py`'s `@on_connect` tags one `UnitHandler` method — no opcode,
 since a handler already answers for exactly one peer, so there's only one connect event to tag.
 `__init_subclass__` collects it the same way it collects `@route` methods, and rejects two
 `@on_connect`-tagged methods on one class with a `TypeError` at class-definition time. Installing it
@@ -401,7 +408,6 @@ Parsed by `config.EchoSettings`:
 | `recv_echo_opcode` / `send_echo_opcode` | distinct inbound/outbound opcodes | -- |
 | `EchoInterval` (`echo_interval`) | seconds between outbound echoes | `1.0` |
 | `EchoTimeout` (`echo_timeout`) | seconds of silence before the unit is dropped | `5.0` |
-| `echo_payload` | body of the periodic echo | `b""` |
 
 Stays inactive for a unit unless both of that unit's opcodes resolve. `EchoTimeout` must exceed
 `EchoInterval` (config-time `ValueError` otherwise, naming the unit when it came from a unit block).
@@ -433,7 +439,7 @@ difference is load-bearing:
   whole heartbeat, so the global opcodes drop out entirely rather than half-applying — a unit with
   `{"echo_opcode": 10}` under a global `{"recv_echo_opcode": 99}` must not end up receiving on 99
   and sending on 10, a link neither peer configured.
-- `EchoInterval` / `EchoTimeout` / `echo_payload` resolve **individually**: a unit overriding only
+- `EchoInterval` / `EchoTimeout` resolve **individually**: a unit overriding only
   its timeout still wants the shared interval, and `timeout > interval` is checked on the merge.
 
 Missing at both levels means echo stays off **for that unit alone** — the same "absent means
@@ -476,7 +482,7 @@ no-op. Other exceptions keep the old behaviour (log, retry next tick, let the wa
 ### 6a. Periodic sending
 
 ```python
-connection.periodic_sending(opcode: int, data: bytes, interval: int | float,
+connection.periodic_sending(data: IrsMessage | dict, opcode: int | None, interval: int | float,
                             unit_name: str | None = None) -> None
 connection.stop_periodic(opcode: int, unit_name: str | None = None) -> bool
 ```
@@ -510,7 +516,7 @@ beacon = mgr.create_composite("BeaconUnit", {
 
 ### 8. Lifecycle: absolute teardown
 
-`Connection.stop()` closes every socket/transport (`_do_stop()`), cancels and awaits every
+`Connection.close()` closes every socket/transport (`_do_stop()`), cancels and awaits every
 tracked background task, then cancels any `receive_message()` calls still parked on a
 subscription. Every async task the framework starts (read loops, echo replies/senders/watchdogs,
 `periodic_sending` schedules) goes through `self._track()`, so one sweep over `self._tasks`

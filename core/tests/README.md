@@ -1,7 +1,8 @@
 # `connections` test suite
 
 A `pytest` suite for the `connections` package (`config.py`, `base.py`,
-`handlers.py`, `manager.py`, `composite.py`, `framing.py`, `tcp.py`, `udp.py`),
+`_routes.py`, `_echo.py`, `handlers.py`, `manager.py`, `composite.py`,
+`framing.py`, `tcp.py`, `udp.py`),
 independent of `connections/test_framework.py` (that script stays as-is; this
 suite is the pytest-native counterpart, with its own fixtures and its own
 dedicated IRS message range so the two never collide).
@@ -58,10 +59,14 @@ anything in this suite or in `connections` itself. Stick to the `.venv`.
 | `_messages.py` | This suite's own registered IRS layouts (unit codes 200-219 -- never overlaps `IRS.Structures.Test.test_messages`'s 1-162) |
 | `test_framing.py` | Pure header pack/unpack, no I/O |
 | `test_config.py` | `ConnectionConfig.from_json` validation/coercion, `EchoSettings` resolution -- pure, no event loop |
+| `test_routes.py` | `RouteTable`: route ownership, subscription-XOR-callback exclusivity, per-unit and whole-connection teardown -- pure, synchronous |
+| `test_echo_supervisor.py` | `UnitEchoSupervisor` against a stub `EchoHost` on a private loop: arming, sending, consumption, the watchdog's deadline -- millisecond timings, no sockets |
 | `test_handlers.py` | `route`/`UnitHandler` class-definition-time logic, `install_handler` wiring |
 | `test_manager.py` | `ConnectionManager` factory, lifecycle, `Structures` import normalization |
-| `test_dispatch.py` | Subscribe-or-drop, `handle_on_receive`, `trigger_function`, mutual exclusion, echo consumption, malformed-payload handling |
-| `test_echo.py` | Real periodic-sender/watchdog timing, per-unit hierarchy, isolated per-unit disconnect (marked `slow`) |
+| `test_dispatch.py` | Subscribe-or-drop, `handle_on_receive`, `trigger_function`, mutual exclusion, echo consumption, malformed-payload handling, per-unit `_disconnect_unit` cleanup |
+| `test_periodic.py` | `periodic_sending`/`stop_periodic`: repetition, replace-don't-double, interval validation, cancellation on `close()` |
+| `test_on_connect.py` | `handle_on_connect`/`stop_on_connect` and the `@on_connect` handler tag: exclusivity, no retroactive firing |
+| `test_echo.py` | Real periodic-sender/watchdog timing, per-unit hierarchy, isolated per-unit disconnect, re-arming after reconnect (marked `slow`) |
 | `test_tcp.py` | Multi-port server, stream reassembly, peer supersession, disconnect |
 | `test_udp.py` | Implicit single-unit, `mode` restriction, peer learning, malformed datagrams |
 | `test_composite.py` | Direction-limited member combination, construction validation, partial-teardown tolerance |
@@ -76,6 +81,12 @@ anything in this suite or in `connections` itself. Stick to the `.venv`.
 - **`free_port`/`free_ports`** bind ephemeral sockets to grab real, currently-free
   OS ports rather than hardcoding numbers -- avoids the whack-a-mole of picking
   non-colliding literals across dozens of tests.
+- **`test_routes.py` / `test_echo_supervisor.py` need no fixtures at all.**
+  `RouteTable` and `UnitEchoSupervisor` were extracted out of `Connection`
+  precisely so the rules they own -- one owner per route; a heartbeat armed by
+  connect and disarmed by disconnect -- could be asked directly instead of
+  inferred from whether a live socket pair survived. Anything provable there
+  belongs there; the socket-level files stay for what genuinely needs a wire.
 - Two connections that both name the same logical peer (e.g. a UDP server and
   its client, both calling it `"Peer"`) must declare the **same** `unitCode`
   for that entry -- IRS selects a message layout by that value, not by

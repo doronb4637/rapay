@@ -1,0 +1,4 @@
+1. Where do we use base.py - class Unit(Protocol)
+2. _EventLoopThread onky has one class instance right? so why do we do we define loop as self.loop in the _start and not in the class attributes like _instance?
+3. self._state_event is only triggred when shutting down / when a new connection is established right? so lets call it new_connection_event?
+4.

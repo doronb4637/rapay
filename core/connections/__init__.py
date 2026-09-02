@@ -25,7 +25,7 @@ from .framing import (
     unpack_message,
     unpack_header,
 )
-from .base import Connection, ConnectedTarget, IrsMessage, get_event_loop_thread
+from .base import Connection, ConnectedTarget, IrsMessage, Unit, get_event_loop_thread
 from .composite import CompositeUnit
 from .handlers import UnitHandler, on_connect, route
 from .manager import ConnectionManager
@@ -52,7 +52,7 @@ __all__ = [
     "ConnectionConfig", "Protocol", "Side",
     "HEADER_SIZE", "MessageHeader", "IRSDataError",
     "pack_message", "unpack_message", "unpack_header",
-    "Connection", "get_event_loop_thread",
+    "Connection", "Unit", "get_event_loop_thread",
     "ConnectedTarget", "IrsMessage", "irs_to_bytes", "parse_irs",
     "CompositeUnit", "UnitHandler", "route", "on_connect", "ConnectionManager",
     "TcpConnection", "UdpConnection", "MulticastConnection", "DdsConnection",

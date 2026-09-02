@@ -60,7 +60,7 @@ def test_composite_send_uses_the_send_capable_member(manager, free_ports):
     manager.start_all()
 
     unit, message = peer.receive_message(
-        1, unitName="Beacon", timeout=3,
+        1, unit_name="Beacon", timeout=3,
         trigger_function=lambda: composite.send_message(b"from-composite", 1, unit_name="Peer"),
     )
     assert bytes(message.data) == b"from-composite"

@@ -31,11 +31,11 @@ logger = logging.getLogger("connmgr.multicast")
 
 
 class _MulticastProtocol(asyncio.DatagramProtocol):
-    def __init__(self, owner: MulticastConnection, unit: str):
+    def __init__(self, owner: MulticastConnection, unit: str) -> None:
         self._owner = owner
         self._unit = unit
 
-    def datagram_received(self, data: bytes, addr) -> None:
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         try:
             header, payload = unpack_message(data)
         except IRSDataError:

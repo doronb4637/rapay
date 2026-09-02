@@ -442,7 +442,6 @@ Parsed and validated once by `config.EchoSettings`:
 | `recv_echo_opcode` / `send_echo_opcode` | distinct inbound/outbound opcodes | -- |
 | `EchoInterval` | seconds between outbound echoes | `1.0` |
 | `EchoTimeout` | seconds of silence before the unit is dropped | `5.0` |
-| `echo_payload` | body of the periodic echo | `b""` |
 
 `EchoInterval`/`EchoTimeout` are also accepted as `echo_interval`/
 `echo_timeout`. The feature stays inactive for a unit unless both of that
@@ -485,7 +484,7 @@ different granularities, and the difference is the whole point:
   `{"recv_echo_opcode": 99}` and end up *receiving* on 99 while *sending* on
   10 -- a link neither peer ever configured, and one that would look like a
   working config right up until the watchdog fired.
-- `EchoInterval` / `EchoTimeout` / `echo_payload` resolve **individually**,
+- `EchoInterval` / `EchoTimeout` resolve **individually**,
   because each is independently meaningful: a unit overriding only its timeout
   still wants the shared interval. The `timeout > interval` check then runs on
   whatever the merge produced, so an override can't quietly create the

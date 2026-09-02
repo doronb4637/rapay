@@ -47,7 +47,6 @@ def _receive_in_background(connection, opcode, unit_name, timeout, results, key)
     (or the exception, as a sentinel) into results[key]."""
     def _run():
         try:
-            # Positional: CompositeUnit still spells this parameter unit_name.
             results[key] = connection.receive_message(opcode, unit_name, timeout=timeout)
         except asyncio.TimeoutError:
             results[key] = asyncio.TimeoutError
@@ -207,7 +206,7 @@ def test_composite_unit():
     print(f"BeaconUnit received via its receive-only UDP member: {_received(results2['ack'])[1]!r}")
 
     try:
-        beacon._receiver.send_message(b"should-fail", 0, unit_name="BeaconUnit")
+        beacon.receiver.send_message(b"should-fail", 0, unit_name="BeaconUnit")
         raise AssertionError("receive-only member should have refused to send")
     except RuntimeError as exc:
         print(f"receive-only member correctly refused to send: {exc}")
@@ -345,13 +344,13 @@ def test_echo_is_consumed():
 
     # A UDP server has no peer address -- and so no liveness clock, and no
     # echo of its own -- until something actually arrives from that unit.
-    assert "EchoUnit" not in server._last_echo_at, "liveness tracked before any peer existed"
+    assert "EchoUnit" not in server._echo_supervisor._last_echo_at, "liveness tracked before any peer existed"
     before = time.monotonic()
     client.send_message(b"heartbeat", ECHO_IN_OPCODE)
     time.sleep(0.3)
 
     # 1. It refreshed liveness, which is the entire job of an inbound echo.
-    after = server._last_echo_at["EchoUnit"]
+    after = server._echo_supervisor._last_echo_at["EchoUnit"]
     assert after >= before, "inbound echo did not refresh the liveness timestamp"
     print(f"inbound echo refreshed liveness (+{after - before:.3f}s after the send)")
 
@@ -506,8 +505,8 @@ def test_single_opcode_heartbeat():
     time.sleep(1.6)  # ~5 heartbeat intervals
 
     # Both peers must still consider each other alive (watchdog never fired).
-    assert "PeerB" in peer_a._last_echo_at, "peer A lost its liveness entry"
-    assert "PeerA" in peer_b._last_echo_at, "peer B lost its liveness entry"
+    assert "PeerB" in peer_a._echo_supervisor._last_echo_at, "peer A lost its liveness entry"
+    assert "PeerA" in peer_b._echo_supervisor._last_echo_at, "peer B lost its liveness entry"
     assert peer_a._transports.get("PeerB") is not None, "peer A was disconnected"
     assert peer_b._transports.get("PeerA") is not None, "peer B was disconnected"
 
@@ -603,7 +602,7 @@ def test_single_subscription_per_route():
     results = {}
     t1 = _receive_in_background(server, BUSY_OPCODE, "BusyUnit", 2, results, "first")
     try:
-        server.receive_message(BUSY_OPCODE, unitName="BusyUnit", timeout=1)
+        server.receive_message(BUSY_OPCODE, unit_name="BusyUnit", timeout=1)
         raise AssertionError("a second subscriber for the same route should be rejected")
     except RuntimeError as exc:
         print(f"confirmed: duplicate subscription refused ({exc})")
@@ -667,13 +666,13 @@ def test_class_handler_route_exclusive_with_subscription():
     }, handler_class=NoopHandler)
 
     try:
-        server.receive_message(ROUTE_OPCODE, unitName="RouteUnit", timeout=1)
+        server.receive_message(ROUTE_OPCODE, unit_name="RouteUnit", timeout=1)
         raise AssertionError("a route already claimed by a class handler should be refused")
     except RuntimeError as exc:
         print(f"confirmed: class-routed opcode refuses a second subscriber ({exc})")
 
     try:
-        server.receive_message(OTHER_OPCODE, unitName="RouteUnit", timeout=0.5)
+        server.receive_message(OTHER_OPCODE, unit_name="RouteUnit", timeout=0.5)
         raise AssertionError("nothing was sent on OTHER_OPCODE; this should time out, not error")
     except asyncio.TimeoutError:
         print("confirmed: an unrelated opcode on the same connection is unaffected")
@@ -874,8 +873,8 @@ def test_echo_follows_peer_connection():
         client.start()
         assert server.wait_for_connected_units("unit1", timeout=3) is True
         assert server.active_units == {"unit1"}, server.active_units
-        assert server._echo_tasks.get("unit1"), "unit1's echo should be armed on connect"
-        assert not server._echo_tasks.get("unit2"), "unit2 has no peer; it must stay disarmed"
+        assert server._echo_supervisor._tasks.get("unit1"), "unit1's echo should be armed on connect"
+        assert not server._echo_supervisor._tasks.get("unit2"), "unit2 has no peer; it must stay disarmed"
 
         # Past EchoTimeout: the running heartbeat is what keeps unit1 up.
         time.sleep(1.4)
@@ -888,7 +887,7 @@ def test_echo_follows_peer_connection():
         client.close()
         time.sleep(0.4)
         assert server.active_units == set(), "a closed peer must mark its unit down"
-        assert not server._echo_tasks.get("unit1"), "echo must stop when the peer drops"
+        assert not server._echo_supervisor._tasks.get("unit1"), "echo must stop when the peer drops"
         settled = dict(attempts)
         time.sleep(0.6)  # 3 intervals during which nothing may be sent
         assert attempts == settled, f"echoes continued after disconnect: {attempts} vs {settled}"
@@ -1077,21 +1076,21 @@ def test_irs_parser_roundtrip():
               f"TrackAck from unit {SERVER_CODE} -- the sender's code selects the layout")
 
         # One byte where TrackReport's first field alone needs two: the parse
-        # fails and the waiting subscriber is handed the failure.
+        # fails, so the message is logged and DROPPED. The caller parked on that
+        # route is not the one at fault and is not told about it -- it stays
+        # subscribed, waiting for a message it can actually return.
         results2 = {}
-        t = _receive_in_background(server, OPCODE, None, 2, results2, "bad")
+        t = _receive_in_background(server, OPCODE, None, 4, results2, "bad")
         client.send_message(b"\x01", OPCODE)
-        t.join(timeout=3)
-        assert isinstance(results2["bad"], BufferError), results2
-        print(f"confirmed: an unparseable payload raised {type(results2['bad']).__name__}")
+        time.sleep(0.4)
+        assert t.is_alive(), f"a bad message ended the receive instead of being dropped: {results2}"
 
         after = _track_report(9, "SURFACE", 45)
-        results3 = {}
-        t = _receive_in_background(server, OPCODE, None, 3, results3, "after")
         client.send_message(after, OPCODE)
-        t.join(timeout=4)
-        assert results3["after"][1].to_dict() == after.to_dict(), results3
-        print("confirmed: the connection survived the malformed message")
+        t.join(timeout=5)
+        assert results2["bad"][1].to_dict() == after.to_dict(), results2
+        print("confirmed: the unparseable payload was dropped and the still-parked receive "
+              "returned the next valid message")
 
         # Standing callbacks and periodic sends use the same codec.
         tick = _track_report(12, "UNKNOWN", 180)
@@ -1237,7 +1236,7 @@ def test_hierarchical_echo_config():
         client1.send_message(b"heartbeat", UNIT1_ECHO, unit_name="unit1")
         time.sleep(0.3)
         try:
-            server.receive_message(UNIT1_ECHO, unitName="unit1", timeout=0.5)
+            server.receive_message(UNIT1_ECHO, unit_name="unit1", timeout=0.5)
             raise AssertionError("unit1's own echo opcode should have been consumed")
         except asyncio.TimeoutError:
             print("unit1's overridden opcode is consumed as an echo, never delivered")
@@ -1245,7 +1244,7 @@ def test_hierarchical_echo_config():
         client2.send_message(b"heartbeat", GLOBAL_ECHO, unit_name="unit2")
         time.sleep(0.3)
         try:
-            server.receive_message(GLOBAL_ECHO, unitName="unit2", timeout=0.5)
+            server.receive_message(GLOBAL_ECHO, unit_name="unit2", timeout=0.5)
             raise AssertionError("unit2's inherited echo opcode should have been consumed")
         except asyncio.TimeoutError:
             print("unit2's inherited opcode is consumed as an echo on the same connection")

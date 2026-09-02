@@ -15,10 +15,10 @@ sockets, its own read loop, and its own lifecycle.
 from __future__ import annotations
 
 import time
+from typing import Any
 
-import atexit
-
-from .base import ConnectCallback, ConnectedTarget, Connection, IrsMessage, ReceiveCallback, TriggerFunction
+from .base import (ConnectCallback, ConnectedTarget, Connection, IrsMessage,
+                   ReceiveCallback, TriggerFunction)
 
 
 class CompositeUnit:
@@ -47,13 +47,27 @@ class CompositeUnit:
         self._sender: Connection | None = senders[0] if senders else None
         self._receiver: Connection | None = receivers[0] if receivers else None
 
+    @property
+    def receiver(self) -> Connection | None:
+        """The member owning this composite's INBOUND direction, or None if it
+        has no receive-capable member.
+
+        Public because it is canonical outside this class too:
+        `handlers.install_handler` resolves a `UnitHandler`'s `unitCode` against
+        this member's config, and it is the member every on-receive and
+        on-connect registration lands on -- so the two cannot be allowed to
+        disagree about which member that is.
+        """
+        return self._receiver
+
     # ------------------------------------------------------------------ #
     # Lifecycle -- fans out to every member, still an ABSOLUTE teardown.
     # ------------------------------------------------------------------ #
-    def start(self) -> None:
+    def start(self, retry: bool = False) -> None:
+        """Start every member. Each registers its own atexit teardown when it
+        is constructed, so there is nothing to add here."""
         for member in self._members:
-            member.start()
-            atexit.register(member.close)
+            member.start(retry)
 
     def close(self, timeout: float | int | None = 5.0) -> None:
         """Stops every member even if one of them raises, then re-raises so
@@ -74,7 +88,8 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     # Public API -- identical shape to Connection.send_message/receive_message
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage, opcode: int, unit_name: str | None = None) -> None:
+    def send_message(self, data: IrsMessage | dict, opcode: int | None = None,
+                     unit_name: str | None = None) -> None:
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
         self._sender.send_message(data, opcode, unit_name)
@@ -100,7 +115,7 @@ class CompositeUnit:
 
     def receive_message(
         self,
-        opcode: int,
+        opcode: int | str | IrsMessage,
         unit_name: str | None = None,
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
@@ -111,7 +126,7 @@ class CompositeUnit:
 
     def handle_on_receive(
         self,
-        opcode: int,
+        opcode: int | str | IrsMessage,
         callback_func: ReceiveCallback,
         unit_name: str | None = None,
     ) -> None:
@@ -121,7 +136,7 @@ class CompositeUnit:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         self._receiver.handle_on_receive(opcode, callback_func, unit_name)
 
-    def stop_on_receive(self, opcode: int, unit_name: str | None = None) -> bool:
+    def stop_on_receive(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
         if self._receiver is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         return self._receiver.stop_on_receive(opcode, unit_name)
@@ -144,7 +159,7 @@ class CompositeUnit:
 
     def periodic_sending(
         self,
-        data: IrsMessage,
+        data: IrsMessage | dict[str, Any],
         opcode: int | None,
         interval: int | float,
         unit_name: str | None = None,
@@ -156,7 +171,7 @@ class CompositeUnit:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
         self._sender.periodic_sending(data, opcode, interval, unit_name)
 
-    def stop_periodic(self, opcode: int, unit_name: str | None = None) -> bool:
+    def stop_periodic(self, opcode: int | str | IrsMessage, unit_name: str | None = None) -> bool:
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
         return self._sender.stop_periodic(opcode, unit_name)

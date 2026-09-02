@@ -18,14 +18,14 @@ import asyncio
 import logging
 
 from .base import FramedConnection
-from .config import Side
+from .config import ConnectionConfig, Side
 from .framing import HEADER_SIZE, unpack_header
 
 logger = logging.getLogger("connmgr.tcp")
 
 
 class TcpConnection(FramedConnection):
-    def __init__(self, config):
+    def __init__(self, config: ConnectionConfig) -> None:
         super().__init__(config)
         self._servers: list[asyncio.base_events.Server] = []
         self._writers: dict[str, asyncio.StreamWriter] = {}  # unit_name -> active peer writer

@@ -11,22 +11,27 @@ import logging
 from core.IRS.irs_parser import IRSDataError
 
 from .base import FramedConnection
-from .config import Side
+from .config import ConnectionConfig, Side
 from .framing import unpack_message
 
 
 logger = logging.getLogger("connmgr.udp")
 
 
+#: What asyncio hands to `datagram_received` and what a UDP peer is addressed
+#: by: an (ip, port) pair.
+PeerAddress = tuple[str, int]
+
+
 class _DatagramProtocol(asyncio.DatagramProtocol):
-    def __init__(self, owner: UdpConnection, unit: str):
+    def __init__(self, owner: UdpConnection, unit: str) -> None:
         self._owner = owner
         self._unit = unit
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
         pass
 
-    def datagram_received(self, data: bytes, addr) -> None:
+    def datagram_received(self, data: bytes, addr: PeerAddress) -> None:
         try:
             header, payload = unpack_message(data)
         except IRSDataError:
@@ -47,7 +52,7 @@ class UdpConnection(FramedConnection):
     as one direction-limited half of a composite Unit (see composite.py).
     """
 
-    def __init__(self, config):
+    def __init__(self, config: ConnectionConfig) -> None:
         super().__init__(config)
         mode = config.extra.get("mode", "duplex")
         if mode not in ("send_only", "receive_only", "duplex"):
@@ -55,9 +60,9 @@ class UdpConnection(FramedConnection):
         self.can_send = mode in ("send_only", "duplex")
         self.can_receive = mode in ("receive_only", "duplex")
         self._transports: dict[str, asyncio.DatagramTransport] = {}
-        self._peers: dict[str, tuple[str, int]] = {}  # unit -> address to send to
+        self._peers: dict[str, PeerAddress] = {}  # unit -> address to send to
 
-    def _remember_peer(self, unit: str, addr) -> None:
+    def _remember_peer(self, unit: str, addr: PeerAddress) -> None:
         self._peers[unit] = addr
         # A UDP unit is "connected" once it has an address to send to -- for
         # a server, the first inbound datagram. Before that an echo has

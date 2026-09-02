@@ -207,11 +207,11 @@ def test_install_handler_route_occupies_slot_like_ordinary_callback(manager, fre
     server.start()
 
     with pytest.raises(RuntimeError):
-        server.receive_message(1, unitName="Peer", timeout=0.5)
+        server.receive_message(1, unit_name="Peer", timeout=0.5)
 
     # A different opcode on the same connection is untouched.
     with pytest.raises(TimeoutError):
-        server.receive_message(2, unitName="Peer", timeout=0.3)
+        server.receive_message(2, unit_name="Peer", timeout=0.3)
 
 
 def test_install_handler_on_composite(manager, free_ports):
