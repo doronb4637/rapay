@@ -188,8 +188,8 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
   /** Native dialog in the desktop shell, in-app picker in a browser tab. The
    *  button is offered EITHER WAY -- previously it only appeared under
    *  pywebview, so `--server` mode had no way to browse at all. */
-  const browseForStructureFile = async (index, peerIndex = null) => {
-    if (!canBrowse) return setPicking({ index, peerIndex });
+  const browseForStructureFile = async (index, peerIndex = null, startPath = null) => {
+    if (!canBrowse) return setPicking({ index, peerIndex, startPath });
     try {
       const path = await window.pywebview.api.browse_structures_file();
       if (path) applyStructurePath(path, { index, peerIndex });
@@ -453,7 +453,8 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                       label="IRS structures for this link"
                       entries={peer.structures ?? ['']}
                       onChange={(update) => setPeerStructures(index, update)}
-                      onBrowse={(entryIndex) => browseForStructureFile(entryIndex, index)}
+                      onBrowse={(entryIndex, startPath) =>
+                        browseForStructureFile(entryIndex, index, startPath)}
                     />
                   )}
 
@@ -474,8 +475,8 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                 badge={<Badge tone="amber">required</Badge>}
                 hint={
                   FANS_OUT.has(form.protocol) && form.peers.length > 1
-                    ? 'shared by every receiver — module paths under IRS.Structures, e.g. Test.test_messages'
-                    : 'module paths under IRS.Structures, e.g. Test.test_messages'
+                    ? 'shared by every receiver — pick a .py structures file from anywhere on this machine'
+                    : 'pick a .py structures file from anywhere on this machine'
                 }
                 action={
                   <AddButton onClick={() => set('structures', [...form.structures, ''])}>
@@ -486,7 +487,8 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                 <StructureList
                   entries={form.structures}
                   onChange={(update) => set('structures', update(form.structures))}
-                  onBrowse={(index) => browseForStructureFile(index)}
+                  onBrowse={(index, startPath) =>
+                    browseForStructureFile(index, null, startPath)}
                 />
               </Section>
             )}
@@ -541,6 +543,7 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
           mode="open"
           title="Select an IRS structures file"
           suffix=".py"
+          startPath={picking.startPath}
           onPick={(path) => applyStructurePath(path, picking)}
           onClose={() => setPicking(null)}
         />
@@ -568,6 +571,14 @@ function Section({ title, hint, badge, action, children }) {
  * peer when each link has its own, or once for the connection when a single
  * list legitimately covers it.
  */
+/** The directory part of a path entry, so re-browsing an already-filled row
+ *  opens where that file lives rather than back at the last-used default.
+ *  Returns null for a dotted module name, which has no directory. */
+function directoryOf(entry) {
+  const cut = Math.max(String(entry ?? '').lastIndexOf('\\'), String(entry ?? '').lastIndexOf('/'));
+  return cut > 0 ? entry.slice(0, cut) : null;
+}
+
 function StructureList({ label, entries, onChange, onBrowse }) {
   const rows = entries.length ? entries : [''];
   return (
@@ -587,7 +598,7 @@ function StructureList({ label, entries, onChange, onBrowse }) {
                 its only meaningful part out of view; focusing reveals the real
                 value, which is what gets submitted. */}
             <PathInput
-              value={entry} required placeholder="Test.test_messages"
+              value={entry} required placeholder="C:\path\to\messages.py"
               onChange={(e) =>
                 onChange((list) => list.map((s, i) => (i === index ? e.target.value : s)))
               }
@@ -597,7 +608,7 @@ function StructureList({ label, entries, onChange, onBrowse }) {
               picker instead, rather than the button vanishing. */}
           <IconButton
             icon={FolderOpen} title="Browse for a structures file"
-            onClick={() => onBrowse(index)}
+            onClick={() => onBrowse(index, directoryOf(entry))}
           />
           <IconButton
             icon={Trash2} title="Remove module" variant="danger"

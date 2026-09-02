@@ -27,12 +27,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-#: Where each kind of picker starts -- `<repo-root>/core/IRS/Structures` and
-#: `<repo-root>/configs/GsimConfig` in a checkout, `%LOCALAPPDATA%\GSim\...`
-#: in the installed app (`gsim/paths.py`). The native dialogs in
-#: `gsim/__main__.py` import the same two constants, so desktop and browser
+#: Where each kind of picker starts. Configs live in a directory GSim owns
+#: (`<repo-root>/configs/GsimConfig`, or `%LOCALAPPDATA%\GSim\...` installed);
+#: structures live wherever the USER keeps them, so their picker opens at the
+#: last place one was browsed from and remembers each new one. The native
+#: dialogs in `gsim/__main__.py` call the same functions, so desktop and browser
 #: modes land in the same place.
-from gsim.paths import CONFIGS_DIR, STRUCTURES_DIR
+from gsim.paths import CONFIGS_DIR, remember_structures_dir, structures_start_dir
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -60,14 +61,16 @@ def roots() -> dict[str, Any]:
 
     `configs` is created on demand: Save is the first thing that needs it, and
     a picker that opens at a path which does not exist would silently fall back
-    to somewhere arbitrary.
+    to somewhere arbitrary. `structures` is never created -- it is wherever the
+    user's own files already are, and GSim inventing a directory for them is the
+    arrangement this replaced.
     """
     try:
         CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass          # read-only checkout; the picker still opens elsewhere
     return {
-        "structures": str(STRUCTURES_DIR),
+        "structures": str(structures_start_dir()),
         "configs": str(CONFIGS_DIR),
         "home": str(Path.home()),
         "separator": os.sep,
@@ -101,6 +104,13 @@ def list_directory(path: str, suffix: str | None = None) -> dict[str, Any]:
                 files.append(entry)
     except PermissionError as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    # Remember where structures are being browsed from, so the next pick opens
+    # there rather than back at a default the user navigated away from on the
+    # first one. Keyed on the suffix because it is the only thing distinguishing
+    # this from the configs picker, which has a directory of its own.
+    if suffix and suffix.lower() == ".py":
+        remember_structures_dir(directory)
 
     by_name = lambda entry: entry["name"].lower()      # noqa: E731
     parent = directory.parent

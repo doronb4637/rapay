@@ -94,7 +94,15 @@ If IRS ever needs something from `connections`, `tools`, or `core/annotations.py
 backwards -- the fix is to move the shared piece into `IRS` (as was done for the type aliases in
 `core/IRS/annotations.py`), not to add the import.
 
-`core/IRS/Structures/*.py` is the one deliberate exception: those are user-defined message layout
-files, not part of the IRS engine itself. They are loaded as plugins (by
-`tools.general.import_modules`, on `connections`' behalf) and are expected to `from core.IRS import
-*` the same way any other consumer of IRS would -- they are consumers of IRS, not internals of it.
+Structures files are the one deliberate exception: those are user-defined message layout files, not
+part of the IRS engine itself. They are loaded as plugins (by `tools.general.import_modules`, on
+`connections`' behalf) and are expected to `from core.IRS import *` the same way any other consumer
+of IRS would -- they are consumers of IRS, not internals of it.
+
+**They do not have to live under `core/IRS/Structures/`, and mostly should not.** A `Structures`
+entry is either a path to a `.py` file *anywhere on the machine* -- loaded from that path, which is
+how GSim's file dialog feeds it -- or a dotted name, which only resolves for a module that genuinely
+ships inside `core/IRS/Structures/`. `core/IRS/Structures/` is now just a convenient place to keep a
+few in the checkout; nothing depends on a file being there, and the frozen app ships none at all.
+Import used to branch on that location, which is exactly what made a picked file fail to import on
+one machine and not another -- see `gsim/CLAUDE.md`'s fourth authorised `core` change.

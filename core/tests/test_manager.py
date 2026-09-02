@@ -165,17 +165,47 @@ def test_import_modules_returns_the_namespace_resolve_module_name_predicts():
     assert set(import_modules(spellings)) == {"core.IRS.Structures.Test.test_messages"}
 
 
-def test_a_path_inside_the_structures_package_resolves_to_its_dotted_name():
-    """GSim's file picker opens at IRS/Structures, so the common case is an
-    absolute path to a file that also has a dotted name. Both spellings must be
-    ONE namespace, or a single file would register itself twice."""
+def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
+    """The file named is the file that runs -- location decides nothing.
+
+    Resolution used to branch on WHERE a file sat: a path under
+    `core/IRS/Structures` had that path discarded and was looked up as
+    `core.IRS.Structures.<folder>.<stem>` instead. That lookup rides on
+    `sys.path`, on `core` being importable from the same physical tree, on PEP
+    420 namespace resolution, and in the PyInstaller build on the frozen
+    importer owning `core.IRS` while those folders ship as data -- so a file
+    picked in a dialog could raise `No module named
+    'core.IRS.Structures.<folder>'` while sitting right there on disk, on one
+    machine and not on another. A path is a path now, inside the package or
+    anywhere else, which is also what lets structures files live wherever the
+    user keeps them rather than inside the app.
+    """
     from pathlib import Path
 
-    from core.tools.general import resolve_module_name
+    from core.IRS.REGISTRY import get_specification
+    from core.tools.general import import_modules, resolve_module_name
     import core.IRS.Structures.Test.test_messages as module
+    from core.IRS.Structures.Test.test_messages import CLIENT_UNIT_CODE, TRACK_OPCODE
 
-    by_path = Path(module.__file__).resolve()
-    assert resolve_module_name(str(by_path)) == "core.IRS.Structures.Test.test_messages"
+    by_path = str(Path(module.__file__).resolve())
+    name = resolve_module_name(by_path)
+    assert name.startswith("core.IRS.Structures._external."), name
+    # ...and it really is imported from the file, registering under that name.
+    assert import_modules([by_path]) == [name]
+    assert TRACK_OPCODE in get_specification(name)[CLIENT_UNIT_CODE]
+
+
+def test_a_structures_path_that_does_not_exist_names_the_missing_file(tmp_path):
+    """The likeliest bad entry is a config written on another machine: a
+    structures path is absolute and absolute paths are not portable. Absent must
+    read as absent, not as a file that failed to import."""
+    import pytest
+
+    from core.tools.general import import_modules
+
+    missing = tmp_path / "gone" / "messages.py"
+    with pytest.raises(ImportError, match="structures file does not exist"):
+        import_modules([str(missing)])
 
 
 def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):

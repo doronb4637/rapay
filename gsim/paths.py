@@ -21,6 +21,7 @@ and safe to import from `gsim/api/*` as well as from `__main__`.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -47,9 +48,8 @@ WEB_DIST = BUNDLE_ROOT / "gsim" / "web" / "ui_dist"
 #: real .ico container and not a PNG.
 ICON = BUNDLE_ROOT / "gsim" / "assets" / "gsim.ico"
 
-#: The read-only copies that ship with the app. Only used to seed the writable
-#: directories below on first run; nothing reads from them afterwards.
-BUNDLED_STRUCTURES = BUNDLE_ROOT / "core" / "IRS" / "Structures"
+#: The read-only copy that ships with the app. Only used to seed the writable
+#: directory below on first run; nothing reads from it afterwards.
 BUNDLED_CONFIGS = BUNDLE_ROOT / "configs" / "GsimConfig"
 
 
@@ -60,18 +60,78 @@ def _user_data_root() -> Path:
     return Path(base) / "GSim" if base else Path.home() / ".gsim"
 
 
-#: Where the file pickers (native dialogs in `__main__.py`, the in-app browser
-#: in `api/routes/files.py`) open, and where Save writes by default. Installed,
-#: these are per-user and writable; in a checkout they stay exactly where they
-#: have always been, so nothing about developing GSim changes.
+#: Where session configs are saved. Installed, per-user and writable; in a
+#: checkout exactly where they have always been, so nothing about developing
+#: GSim changes. Session files are GSim's OWN data -- unlike structures, below.
 if FROZEN:
     DATA_ROOT = _user_data_root()
-    STRUCTURES_DIR = DATA_ROOT / "Structures"
     CONFIGS_DIR = DATA_ROOT / "GsimConfig"
 else:
     DATA_ROOT = BUNDLE_ROOT
-    STRUCTURES_DIR = BUNDLED_STRUCTURES
     CONFIGS_DIR = BUNDLED_CONFIGS
+
+
+#: There is deliberately no STRUCTURES_DIR. **Structures files are the user's
+#: data, not GSim's**: they describe the units being simulated, they are
+#: generated and edited constantly, and tying them to the app meant a new GSim
+#: version for every change to a message layout. So none ship in the bundle,
+#: none are seeded into `%LOCALAPPDATA%`, and a `.py` anywhere on the machine is
+#: a valid pick -- `core.tools.general` loads a structures file from the path it
+#: is given, wherever that points.
+#:
+#: (An install from before this change may still have a seeded
+#: `%LOCALAPPDATA%\GSim\Structures`. It is left alone rather than deleted --
+#: those are the user's files now -- it simply stops being special.)
+#:
+#: All the pickers need is somewhere to OPEN, which is a UI convenience rather
+#: than a location the app depends on: the last directory a structures file was
+#: browsed from, then a sensible default.
+_UI_STATE_FILE = _user_data_root() / "ui-state.json"
+
+#: Where the structures picker opens when nothing has been browsed yet. A
+#: checkout keeps pointing at the repo's own `Structures` folder -- that is the
+#: convenience it was always for -- while the installed app, which now ships no
+#: structures at all, opens at the user's home directory.
+DEFAULT_STRUCTURES_DIR = (
+    Path.home() if FROZEN else BUNDLE_ROOT / "core" / "IRS" / "Structures"
+)
+
+
+def _read_ui_state() -> dict:
+    try:
+        return json.loads(_UI_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}          # absent, unreadable, or corrupt: fall back to defaults
+
+
+def structures_start_dir() -> Path:
+    """Where a structures file dialog should open.
+
+    Purely a convenience, so nothing here is allowed to fail the caller: a
+    remembered directory that has since been deleted or moved falls through to
+    the default the same way a missing state file does.
+    """
+    remembered = _read_ui_state().get("structures_dir")
+    if remembered:
+        candidate = Path(remembered)
+        if candidate.is_dir():
+            return candidate
+    return DEFAULT_STRUCTURES_DIR
+
+
+def remember_structures_dir(directory: Path | str) -> None:
+    """Record where the user last browsed for a structures file.
+
+    Best-effort by design -- a read-only profile must cost a failed pick
+    nothing, so every error here is swallowed.
+    """
+    try:
+        state = _read_ui_state()
+        state["structures_dir"] = str(directory)
+        _UI_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _UI_STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _seed(source: Path, target: Path) -> None:
@@ -93,9 +153,12 @@ def _seed(source: Path, target: Path) -> None:
 
 def seed_user_data() -> None:
     """Populate the per-user data directory on first run. A no-op in a
-    checkout, where the "user" directories *are* the repo's own. Called from
-    `create_app()`, so both the desktop shell and `--server` get it."""
+    checkout, where the "user" directory *is* the repo's own. Called from
+    `create_app()`, so both the desktop shell and `--server` get it.
+
+    Only session configs are seeded. Structures deliberately are not shipped at
+    all any more -- see the note above `_UI_STATE_FILE`.
+    """
     if not FROZEN:
         return
-    _seed(BUNDLED_STRUCTURES, STRUCTURES_DIR)
     _seed(BUNDLED_CONFIGS, CONFIGS_DIR)

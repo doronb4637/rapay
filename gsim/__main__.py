@@ -32,7 +32,8 @@ from gsim.api.app import create_app
 #: constants the server-side picker uses (`gsim/api/routes/files.py`), so the
 #: desktop and browser modes open in the same place; `gsim/paths.py` is what
 #: makes all three correct in a checkout AND in the installed app.
-from gsim.paths import CONFIGS_DIR, DATA_ROOT, ICON, STRUCTURES_DIR
+from gsim.paths import (
+    CONFIGS_DIR, DATA_ROOT, ICON, remember_structures_dir, structures_start_dir)
 
 #: Where a windowed build's stdout/stderr go -- see `_attach_streams`.
 LOG_FILE = DATA_ROOT / "logs" / "gsim.log"
@@ -59,18 +60,23 @@ class Api:
 
     def browse_structures_file(self) -> str | None:
         """Native "open file" dialog for picking an IRS structures module.
-        Opens at STRUCTURES_DIR when present; the picked path is passed
-        through as-is and loaded directly by `tools.general.import_modules`,
-        which accepts a real filesystem path as well as a dotted module name.
+
+        Opens wherever a structures file was last picked from, and remembers
+        each new directory. A structures file can live anywhere on the machine
+        -- the picked path is passed through as-is and loaded from that path by
+        `tools.general.import_modules`.
         """
         import webview
 
         result = webview.windows[0].create_file_dialog(
             webview.FileDialog.OPEN,
-            directory=_start_dir(STRUCTURES_DIR),
+            directory=_start_dir(structures_start_dir()),
             file_types=("Python files (*.py)", "All files (*.*)"),
         )
-        return result[0] if result else None
+        if not result:
+            return None
+        remember_structures_dir(Path(result[0]).parent)
+        return result[0]
 
     def save_config_file(self, contents: str) -> str | bool:
         """Native "save file" dialog for the Save button -- writes `contents`

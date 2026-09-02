@@ -68,19 +68,23 @@ def version_resource() -> str:
 
 def tree(source: Path, target: str, *, skip: tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """Every file under `source`, as (absolute source, destination dir) pairs,
-    minus `__pycache__` and any path segment in `skip`.
+    minus `__pycache__` and anything under `skip`.
 
     A per-file list rather than one `(dir, dir)` entry because PyInstaller
     copies a directory wholesale: `core` carries a 900 KB test suite and stale
     `.pyc` files from three interpreter versions, none of which belong in an
     installer.
+
+    A `skip` entry is matched against the path relative to `source`, so it takes
+    a bare top-level name ("tests") or a nested subtree ("IRS/Structures").
     """
+    skips = tuple(Path(entry).parts for entry in skip)
     items = []
     for path in source.rglob("*"):
         if not path.is_file():
             continue
         parts = path.relative_to(source).parts
-        if "__pycache__" in parts or parts[0] in skip:
+        if "__pycache__" in parts or any(parts[:len(s)] == s for s in skips):
             continue
         items.append((str(path), str(Path(target) / path.relative_to(source).parent)))
     return items
@@ -96,7 +100,14 @@ datas = [
     # CORE_ROOT exists on disk, and IRS structures modules are loaded from real
     # .py files by path (`tools.general.import_modules`), which the PYZ cannot
     # serve. Tests and the benchmark are not part of the product.
-    *tree(REPO / "core", "core", skip=("tests", "temp.py", "pyvenv.cfg")),
+    #
+    # IRS/Structures is skipped deliberately: structures files are the USER's
+    # data, describing the units they simulate, and they change far more often
+    # than GSim does. Shipping them made a message-layout edit into an app
+    # release. They now live wherever the user keeps them and are picked by
+    # path -- see the note in `gsim/paths.py`.
+    *tree(REPO / "core", "core",
+          skip=("tests", "temp.py", "pyvenv.cfg", "IRS/Structures")),
     # Seed content for %LOCALAPPDATA%\GSim\GsimConfig on first run.
     *tree(REPO / "configs" / "GsimConfig", "configs/GsimConfig"),
 ]

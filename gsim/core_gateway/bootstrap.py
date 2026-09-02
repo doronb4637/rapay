@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 #: <repo-root>/core -- gsim/ is a sibling of core/, so two parents up from here.
-#: Filesystem-only after the migration (STRUCTURES_DIR, CONFIGS_DIR, ...);
-#: nothing inserts this path itself into `sys.path` any more.
+#: Filesystem-only after the migration (CONFIGS_DIR, ...); nothing inserts this
+#: path itself into `sys.path` any more.
 CORE_ROOT = Path(__file__).resolve().parent.parent.parent / "core"
 #: The repo root -- CORE_ROOT's parent -- is what actually needs to be
 #: importable, since `core` is now a package rooted there rather than a

@@ -40,6 +40,18 @@ a decision to make unilaterally.
 > validated at all; and a field with no wire format silently vanishing from `_fields_`. None of it
 > was reachable from `gsim/`.
 
+> Used a fourth time, also with explicit user authorisation: `tools.general` no longer chooses HOW
+> to import a structures file based on WHERE it sits. A `.py` path under `core/IRS/Structures` used
+> to have that path **discarded** and be looked up as `core.IRS.Structures.<folder>.<stem>` instead;
+> that lookup depends on `sys.path`, on `core` being importable from the same physical tree
+> `STRUCTURES_ROOT` was computed from, on PEP 420 namespace resolution, and — in the frozen app — on
+> PyInstaller's importer owning `core.IRS` while those folders ship only as data. When any of it did
+> not hold, a file picked in GSim's own dialog failed with `ModuleNotFoundError: No module named
+> 'core.IRS.Structures.<folder>'` while sitting right there on disk — reproducing on one machine and
+> not another, which is what made it look like an install problem. `STRUCTURES_ROOT` is gone, a path
+> is always loaded from that path, and dotted names still resolve for legacy configs. Not fixable
+> from `gsim/`: the branch was in `core`'s own resolver, and GSim only ever hands it a string.
+
 Everything GSim needs from `core` is obtained by importing it and
 wrapping it, never by changing it. This is enforced structurally (see Architecture ยง1) and should be
 checked mechanically before any commit:
@@ -176,7 +188,7 @@ imported first by every other module in the package and puts the REPO ROOT on `s
 an ordinary package rooted there, `core/__init__.py`, and its own internal imports are absolute
 through it -- `from core.IRS.irs_parser import ...`, `from core.annotations import *` -- so the repo
 root, not `core/` itself, has to be the thing on the path; `CORE_ROOT` stays a plain filesystem path
-for `STRUCTURES_DIR`/`CONFIGS_DIR`, unrelated to what's importable).
+for `CONFIGS_DIR`, unrelated to what's importable).
 Everything above `core_gateway` -- `gsim/api/*`, `gsim/web/*` -- talks only to this package's public
 functions (`get_runtime()`, `list_messages()`, `message_schema()`, `build_payload()`), never to
 `connections`/`IRS`/`tools` directly. This is what makes the isolation grep in the top-of-file rule
@@ -624,8 +636,11 @@ browsers deliberately withhold the real path, which is the only thing core can u
 entry goes to `tools.general.resolve_module_name`) or the server can write to. So
 `gsim/api/routes/files.py` browses on the server -- which is on the user's own machine anyway -- and
 `FilePickerModal.jsx` renders it. Native dialog when `window.pywebview` exists, in-app picker
-otherwise; both open at the same roots (`IRS/Structures`, `configs/GsimConfig`). The Browse button is
-now always offered -- it used to hide itself without pywebview, which read as the feature vanishing.
+otherwise; both start in the same place, because both call `paths.structures_start_dir()` /
+`CONFIGS_DIR`. Neither is sandboxed to a root: a structures file legitimately lives anywhere (see
+14), so the structures picker opens at the last directory one was browsed from, and re-browsing a
+row that already has a path opens *that file's* folder. The Browse button is always offered -- it
+used to hide itself without pywebview, which read as the feature vanishing.
 
 The browser-download fallback for Save is gone deliberately: a download lands wherever the browser
 puts downloads under a name the user cannot choose, which was the complaint. Both shells now write a
@@ -874,12 +889,21 @@ actually installed:
   only diagnostic an installed user can send back. Build with `GSIM_BUILD_CONSOLE=1` to get the same
   bundle with a console attached when something still dies at startup.
 - **The install directory is read-only.** Program Files is not writable by a non-elevated user, so
-  when frozen `STRUCTURES_DIR`/`CONFIGS_DIR` move to `%LOCALAPPDATA%\GSim` and are seeded once from
-  the bundled copies (`paths.seed_user_data`, called from `create_app()`). Seeding is all-or-nothing
-  per directory and never overwrites: once the user owns it, a later version silently restoring a
-  structures file they deleted would be worse than shipping an update they copy in by hand.
+  when frozen `CONFIGS_DIR` moves to `%LOCALAPPDATA%\GSim` and is seeded once from the bundled copy
+  (`paths.seed_user_data`, called from `create_app()`). Seeding is all-or-nothing per directory and
+  never overwrites: once the user owns it, a later version silently restoring a session file they
+  deleted would be worse than shipping an update they copy in by hand.
   In a checkout none of this applies -- `paths.py` returns exactly the repo paths GSim has always
   used, so `python -m gsim` is unchanged.
+- **Structures files are NOT shipped, seeded, or owned by GSim.** `GSim.spec` skips
+  `core/IRS/Structures` and there is no `STRUCTURES_DIR`. They describe the units being simulated,
+  they are generated and edited constantly, and tying them to the app meant cutting a GSim release
+  for every message-layout change. A `.py` anywhere on the machine is a valid pick, loaded from the
+  path it is given. All the pickers need is somewhere to *open*: `paths.structures_start_dir()` --
+  the last directory browsed (remembered in `%LOCALAPPDATA%\GSim\ui-state.json`), else the repo's
+  own `Structures` in a checkout and the user's home in the installed app. An install from before
+  this has a seeded `%LOCALAPPDATA%\GSim\Structures`; it is left alone rather than deleted, and
+  simply stops being special.
 
 `gsim/__init__.py`'s `__version__` is the only place the version is written: the spec generates the
 .exe's VERSIONINFO resource from it and the build script passes it to WiX as `ProductVersion`. Keep

@@ -71,11 +71,13 @@ def _create_or_raise(name: str, config: dict[str, Any], autostart: bool) -> dict
         # ConnectionConfig.from_json / install-time validation.
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ModuleNotFoundError as exc:
-        # A `Structures` entry that does not resolve under IRS.Structures.
+        # A `Structures` entry that names a module Python cannot find. The
+        # whole message, not just `exc.name`: core says which config entry
+        # failed and what to write instead, and a bare dotted package name
+        # ("core.IRS.Structures.tiful") sent the last report of this on a long
+        # detour -- it names neither the entry the user typed nor the fix.
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail=f"structures module not found: {exc.name}",
-        ) from exc
+            status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ImportError as exc:
         # A structures file that exists but blew up while executing. It is
         # arbitrary user code -- and since it can be picked from a file dialog,
