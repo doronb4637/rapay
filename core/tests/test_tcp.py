@@ -32,17 +32,17 @@ def test_multi_unit_round_trip(manager, free_ports):
     manager.start_all()
     assert server.wait_for_connected_units(["Radar", "Tracker"], timeout=3) is True
 
-    unit, message = server.receive_message(
+    message = server.receive_message(
         1, unit_name="Radar", timeout=3,
         trigger_function=lambda: radar.send_message(b"hello-radar", 1),
     )
-    assert (unit, bytes(message.data)) == ("Radar", b"hello-radar")
+    assert bytes(message.data) == b"hello-radar"
 
-    unit, message = server.receive_message(
+    message = server.receive_message(
         1, unit_name="Tracker", timeout=3,
         trigger_function=lambda: tracker.send_message(b"hello-tracker", 1),
     )
-    assert (unit, bytes(message.data)) == ("Tracker", b"hello-tracker")
+    assert bytes(message.data) == b"hello-tracker"
 
 
 def test_message_larger_than_one_packet_reassembles_correctly(manager, free_port):
@@ -62,7 +62,7 @@ def test_message_larger_than_one_packet_reassembles_correctly(manager, free_port
     assert server.wait_for_connected_units("Peer", timeout=3) is True
 
     big_payload = bytes(range(256)) * 200  # 51200 bytes, well over typical MTU
-    unit, message = server.receive_message(
+    message = server.receive_message(
         1, unit_name="Peer", timeout=5,
         trigger_function=lambda: client.send_message(big_payload, 1),
     )
@@ -96,7 +96,7 @@ def test_new_client_supersedes_the_previous_peer_and_rearms_echo(manager, free_p
     time.sleep(0.3)
 
     # The server's next send for "Peer" must go out on client_b's socket.
-    unit, message = client_b.receive_message(
+    message = client_b.receive_message(
         1, unit_name="Peer", timeout=3,
         trigger_function=lambda: server.send_message(b"to-newest-peer", 1, unit_name="Peer"),
     )

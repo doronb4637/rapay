@@ -119,7 +119,7 @@ class CompositeUnit:
         unit_name: str | None = None,
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
-    ) -> tuple[str, IrsMessage]:
+    ) -> IrsMessage:
         if self._receiver is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         return self._receiver.receive_message(opcode, unit_name, timeout, trigger_function)

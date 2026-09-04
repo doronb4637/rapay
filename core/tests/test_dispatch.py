@@ -54,11 +54,10 @@ def test_message_sent_before_anyone_subscribes_is_dropped(manager, free_port):
 
 def test_receive_message_delivers_matching_opcode_and_unit(manager, free_port):
     server, client = _pair(manager, free_port)
-    unit, message = server.receive_message(
+    message = server.receive_message(
         1, unit_name="Peer", timeout=3,
         trigger_function=lambda: client.send_message(b"hello", 1),
     )
-    assert unit == "Peer"
     assert bytes(message.data) == b"hello"
 
 
@@ -96,7 +95,7 @@ def test_trigger_function_closes_the_request_response_race(manager, free_port):
     client.send_message(b"warm-up", 1)
     time.sleep(0.2)
 
-    unit, message = client.receive_message(
+    message = client.receive_message(
         2, unit_name="Peer", timeout=3,
         trigger_function=lambda: server.send_message(b"immediate", 2, unit_name="Peer"),
     )
@@ -113,7 +112,7 @@ def test_trigger_function_raising_releases_the_subscription(manager, free_port):
         server.receive_message(1, unit_name="Peer", timeout=1, trigger_function=boom)
 
     # The route must be free again -- not left "subscribed" forever.
-    unit, message = server.receive_message(
+    message = server.receive_message(
         1, unit_name="Peer", timeout=3,
         trigger_function=lambda: client.send_message(b"after-failure", 1),
     )
@@ -145,7 +144,7 @@ def test_handle_on_receive_answers_every_matching_message(manager, free_port):
     server.handle_on_receive(1, echo_back, unit_name="Peer")
 
     for i in range(3):
-        unit, reply = client.receive_message(
+        reply = client.receive_message(
             2, unit_name="Peer", timeout=3,
             trigger_function=lambda i=i: client.send_message(f"n{i}".encode(), 1),
         )
@@ -211,7 +210,7 @@ def test_callback_exception_is_swallowed_and_does_not_kill_the_read_loop(manager
         server.send_message(b"still-alive", 2, unit_name="Peer")
 
     server.handle_on_receive(1, good_callback, unit_name="Peer")
-    unit, reply = client.receive_message(
+    reply = client.receive_message(
         2, unit_name="Peer", timeout=3,
         trigger_function=lambda: client.send_message(b"second", 1),
     )
@@ -262,8 +261,7 @@ def test_malformed_payload_is_dropped_and_the_receive_stays_parked(manager, free
     sender.send_message({"seq": 7, "kind": 1, "value": 9}, PING_OPCODE)
     t.join(timeout=3)
     assert "exc" not in t_result, t_result
-    unit, message = t_result["value"]
-    assert unit == "Peer"
+    message = t_result["value"]
     assert (message.seq, message.value) == (7, 9)
 
 
@@ -289,7 +287,7 @@ def test_non_echo_opcode_still_delivered_on_a_connection_with_echo_enabled(manag
         manager, free_port,
         echo_opcode=15, EchoInterval=0.2, EchoTimeout=30,
     )
-    unit, message = server.receive_message(
+    message = server.receive_message(
         1, unit_name="Peer", timeout=3,
         trigger_function=lambda: client.send_message(b"app-data", 1),
     )
