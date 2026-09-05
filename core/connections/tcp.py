@@ -34,79 +34,77 @@ class TcpConnection(FramedConnection):
     async def _do_start(self) -> None:
         self._write_lock = asyncio.Lock()
         if self.config.side == Side.SERVER:
-            for unit, endpoint in self.config.connections.items():
+            for unit_name, endpoint in self.config.connections.items():
                 port = endpoint.port
                 server = await asyncio.start_server(
-                    lambda r, w, unit=unit: asyncio.ensure_future(self._on_client(unit, r, w)),
+                    lambda r, w, unit=unit_name: asyncio.ensure_future(self._on_client(unit, r, w)),
                     host=self.config.local_ip,
                     port=port,
                 )
                 self._servers.append(server)
-                logger.info("TCP server listening on %s:%s (unit=%s)", self.config.local_ip, port, unit)
+                logger.info("TCP server listening on %s:%s (unit=%s)", self.config.local_ip, port, unit_name)
         else:
-            for unit, endpoint in self.config.connections.items():
+            for unit_name, endpoint in self.config.connections.items():
                 port = endpoint.port
-                # Bind the source interface explicitly when local_ip is set
-                # (port 0 = OS picks the ephemeral source port).
+                # port 0 = Lets the OS pick a random free port.
+                # port = self.config.local_port if self.config.local_port else 0 TODO allow to set local_port via config
                 local_addr = (self.config.local_ip, 0) if self.config.local_ip else None
                 reader, writer = await asyncio.open_connection(
                     self.config.ip, port, local_addr=local_addr
                 )
-                self._writers[unit] = writer
-                self._track(self._read_loop(unit, reader, writer))
-                logger.info("TCP client connected to %s:%s (unit=%s)", self.config.ip, port, unit)
-                # The dial succeeded, so this unit has a peer right now.
-                self._mark_unit_connected(unit)
+                self._writers[unit_name] = writer
+                self._track(self._read_loop(unit_name, reader, writer))
+                logger.info("TCP client connected to %s:%s (unit=%s)", self.config.ip, port, unit_name)
+                self._mark_unit_connected(unit_name)
 
-    async def _on_client(self, unit: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # The newest inbound client on a unit's port becomes that unit's send
-        # target. A fan-out server would key a dict by peer address instead.
+    async def _on_client(self, unit_name: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
-        logger.info("TCP unit %s: client connected from %s", unit, peer)
-        previous = self._writers.get(unit)
-        self._writers[unit] = writer
+        logger.info("TCP unit %s: client connected from %s", unit_name, peer)
+        previous = self._writers.get(unit_name)
+        self._writers[unit_name] = writer
         if previous is not None and previous is not writer:
-            # Superseded peer: drop the unit first so its echo is rebuilt
-            # around the new socket, not left aimed at the old one.
-            self._mark_unit_disconnected(unit)
-        self._track(self._read_loop(unit, reader, writer))
-        # A server-side unit becomes reachable here -- and so does its echo,
-        # including on a reconnect after an earlier peer dropped.
-        self._mark_unit_connected(unit)
+            self._mark_unit_disconnected(unit_name)
+        self._track(self._read_loop(unit_name, reader, writer))
+        self._mark_unit_connected(unit_name)
 
     async def _read_loop(
-        self, unit: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self, unit_name: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Parses the (UnitCode,OpCode,DataLength) header out of the TCP
-        byte-stream, then reads exactly that many payload bytes -- correctly
-        handling the fact that TCP gives no message boundaries of its own.
+        """Continuously read, frame, and dispatch incoming TCP messages for a unit.
 
-        Owns the unit's "still connected" claim for the lifetime of `writer`:
-        when this loop ends, that peer is gone."""
+        Extracts the opcode and payload length from the message header, then
+        consumes the exact payload bytes to maintain stream synchronization.
+        """
         try:
             while True:
                 header_bytes = await reader.readexactly(HEADER_SIZE)
                 header = unpack_header(header_bytes)
                 payload = await reader.readexactly(header.data_length)
-                self._dispatch_incoming(unit, header.opcode, payload)
+                self._dispatch_incoming(unit_name, header.opcode, payload)
         except asyncio.IncompleteReadError:
-            logger.info("TCP peer for unit %s closed the connection", unit)
+            logger.info("TCP peer for unit %s closed the connection", unit_name)
         except asyncio.CancelledError:
-            raise  # let stop()'s gather() see the cancellation cleanly
+            raise
         except OSError as exc:
-            # A peer that vanishes instead of closing politely (RST, killed
-            # process, interface down) is routine, so report it like the
-            # graceful close above -- not as a traceback.
-            logger.info("TCP peer for unit %s went away: %s", unit, exc)
+            logger.info("TCP peer for unit %s went away: %s", unit_name, exc)
         except Exception:
-            logger.exception("TCP read loop for unit %s failed", unit)
+            logger.exception("TCP read loop for unit %s failed", unit_name)
         finally:
-            self._on_peer_lost(unit, writer)
+            self._on_peer_lost(unit_name, writer)
 
     def _on_peer_lost(self, unit: str, writer: asyncio.StreamWriter) -> None:
-        """Retire `writer` as `unit`'s peer -- unless a newer one already
-        replaced it, in which case this loop is just the old socket finishing
-        and the unit is still very much connected."""
+        """Remove a disconnected peer and mark the unit as disconnected.
+
+        If the unit has already reconnected with a newer writer instance, the
+        active registration and connection status remain untouched.
+        """
+        # TODO
+        """ Always close the dying socket regardless of whether it was replaced """
+        # try:
+        #     writer.close()
+        # except Exception:
+        #     pass
+        # TODO UNTIL HERE
         if self._writers.get(unit) is not writer:
             return
         del self._writers[unit]
@@ -118,7 +116,8 @@ class TcpConnection(FramedConnection):
             raise ConnectionError(f"No active TCP peer for unit {unit_name!r}")
         frame = self._frame(unit_name, data, opcode)
         assert self._write_lock is not None
-        async with self._write_lock:  # interleaved sends from concurrent callers stay atomic
+        # Only lets one owner write to the stream at a time.
+        async with self._write_lock:
             writer.write(frame)
             await writer.drain()
 
@@ -137,13 +136,9 @@ class TcpConnection(FramedConnection):
             pass
 
     async def _do_stop(self) -> None:
-        # 1. Stop accepting immediately; server.close() alone does that.
         for server in self._servers:
             server.close()
 
-        # 2. Close peer sockets BEFORE awaiting wait_closed() below: on
-        #    Python <=3.12 it waits for every accepted connection too, so
-        #    awaiting it with a peer writer still open deadlocks forever.
         for unit, writer in list(self._writers.items()):
             writer.close()
             try:
@@ -152,7 +147,6 @@ class TcpConnection(FramedConnection):
                 pass
         self._writers.clear()
 
-        # 3. Now it's safe to wait for the listening sockets to fully close.
         for server in self._servers:
             await server.wait_closed()
         self._servers.clear()

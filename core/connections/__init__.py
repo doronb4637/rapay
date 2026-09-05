@@ -34,19 +34,16 @@ from .tcp import TcpConnection
 from .udp import UdpConnection
 from .multicast import MulticastConnection
 
-# DDS requires the RTI Connext Python API. We register it opportunistically:
-# the rest of the framework works fine without RTI installed.
+ConnectionManager.register(Protocol.TCP, TcpConnection)
+ConnectionManager.register(Protocol.UDP, UdpConnection)
+ConnectionManager.register(Protocol.MULTICAST, MulticastConnection)
+# DDS requires the RTI Connext Python API.
 try:
     from .dds import DdsConnection
     ConnectionManager.register(Protocol.DDS, DdsConnection)
 except ImportError:
-    print(f"[!]: rti.connext module is not installed,"
-          f"DDS connections will not work")
-    DdsConnection = None  # type: ignore
-
-ConnectionManager.register(Protocol.TCP, TcpConnection)
-ConnectionManager.register(Protocol.UDP, UdpConnection)
-ConnectionManager.register(Protocol.MULTICAST, MulticastConnection)
+    print("[!]: rti.connext module is not installed, DDS connections will not work")
+    DdsConnection = None
 
 __all__ = [
     "ConnectionConfig", "Protocol", "Side",

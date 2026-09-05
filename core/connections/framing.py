@@ -8,7 +8,6 @@ Every TCP / UDP / Multicast payload is prefixed with a fixed header:
 packed LITTLE ENDIAN using a pre-compiled struct.Struct (5 bytes total).
 DDS payloads are data-centric and never touch this module (see dds.py).
 """
-from __future__ import annotations
 
 import struct
 from dataclasses import dataclass

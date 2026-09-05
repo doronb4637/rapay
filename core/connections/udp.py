@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TypeAlias
 
 from core.IRS.irs_parser import IRSDataError
 
@@ -17,16 +18,14 @@ from .framing import unpack_message
 
 logger = logging.getLogger("connmgr.udp")
 
-
-#: What asyncio hands to `datagram_received` and what a UDP peer is addressed
-#: by: an (ip, port) pair.
+#: (ip, port) pair.
 PeerAddress = tuple[str, int]
 
 
 class _DatagramProtocol(asyncio.DatagramProtocol):
-    def __init__(self, owner: UdpConnection, unit: str) -> None:
+    def __init__(self, owner: UdpConnection, unit_name: str) -> None:
         self._owner = owner
-        self._unit = unit
+        self._unit = unit_name
 
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
         pass
@@ -62,16 +61,9 @@ class UdpConnection(FramedConnection):
         self._transports: dict[str, asyncio.DatagramTransport] = {}
         self._peers: dict[str, PeerAddress] = {}  # unit -> address to send to
 
-    def _remember_peer(self, unit: str, addr: PeerAddress) -> None:
-        self._peers[unit] = addr
-        # A UDP unit is "connected" once it has an address to send to -- for
-        # a server, the first inbound datagram. Before that an echo has
-        # nowhere to go.
-        self._mark_unit_connected(unit)
-
     async def _do_start(self) -> None:
         loop = asyncio.get_running_loop()
-        for unit, endpoint in self.config.connections.items():
+        for unit_name, endpoint in self.config.connections.items():
             port = endpoint.port
             if self.config.side == Side.SERVER:
                 local_addr = (self.config.local_ip, port)
@@ -79,17 +71,21 @@ class UdpConnection(FramedConnection):
             else:
                 local_addr = (self.config.local_ip, 0)  # ephemeral local port
                 remote_addr = (self.config.ip, port)
-                self._peers[unit] = remote_addr  # known target even before any inbound reply
+                self._peers[unit_name] = remote_addr  # known target even before any inbound reply
 
             transport, _protocol = await loop.create_datagram_endpoint(
-                lambda unit=unit: _DatagramProtocol(self, unit),
+                lambda unit=unit_name: _DatagramProtocol(self, unit),
                 local_addr=local_addr,
                 remote_addr=remote_addr,
             )
-            self._transports[unit] = transport
-            logger.info("UDP %s bound for unit %s on %s", self.config.side.value, unit, local_addr)
+            self._transports[unit_name] = transport
+            logger.info("UDP %s bound for unit %s on %s", self.config.side.value, unit_name, local_addr)
             if remote_addr is not None:
-                self._mark_unit_connected(unit)  # target known up front
+                self._mark_unit_connected(unit_name)  # We can send data since we know the dst addr
+
+    def _remember_peer(self, unit: str, addr: PeerAddress) -> None:
+        self._peers[unit] = addr
+        self._mark_unit_connected(unit)
 
     async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
         if not self.can_send:
@@ -102,9 +98,7 @@ class UdpConnection(FramedConnection):
         if peer is not None:
             transport.sendto(frame, peer)
             return
-        # No learned peer: only legal if the transport has a remote_addr
-        # (side=client). On an unconnected socket sendto() without an address
-        # corrupts the write buffer instead of raising, so refuse explicitly.
+        # this is dead code that will never be used...
         if transport.get_extra_info("peername") is None:
             raise ConnectionError(
                 f"UDP unit {unit_name!r}: no peer address known yet (nothing received from "

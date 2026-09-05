@@ -39,7 +39,7 @@ def test_composite_combines_send_only_and_receive_only_members(manager, free_por
     })
     manager.start_all()
 
-    unit, message = composite.receive_message(
+    message = composite.receive_message(
         1, unit_name="Peer", timeout=3,
         trigger_function=lambda: peer.send_message(b"to-composite", 1),
     )
@@ -59,7 +59,7 @@ def test_composite_send_uses_the_send_capable_member(manager, free_ports):
     })
     manager.start_all()
 
-    unit, message = peer.receive_message(
+    message = peer.receive_message(
         1, unit_name="Beacon", timeout=3,
         trigger_function=lambda: composite.send_message(b"from-composite", 1, unit_name="Peer"),
     )

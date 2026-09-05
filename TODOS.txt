@@ -1,6 +1,6 @@
 [Fixes]
 1. Fix readMe to IRS(using gemini)
-
+2. in connections(when defining the connected units if the opCode of the message we received doesn't match the opcode we defined we drop the message.
 
 [Improvments]
 2. Add more advanced behaviors in Gsim.

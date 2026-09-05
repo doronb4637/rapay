@@ -4,12 +4,13 @@ imports these back in (`from core.IRS.annotations import *`) so every other
 package keeps seeing the same names under `core.annotations`; IRS itself
 never imports outside its own directory.
 """
-from typing import Iterable
+from typing import Iterable, TypeAlias
 
 from .core import Message
 
 
-IrsMessage = type[Message]
-UnitCode = OpCode = int
-Namespace = str
-NamespaceScope = Namespace | Iterable[Namespace]
+IrsMessage: TypeAlias = type[Message]
+UnitCode: TypeAlias = int
+OpCode: TypeAlias = UnitCode
+Namespace: TypeAlias = str
+NamespaceScope: TypeAlias = Namespace | Iterable[Namespace]

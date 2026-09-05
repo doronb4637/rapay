@@ -7,11 +7,7 @@ every internal module imports absolutely through it --
 `from core.annotations import *`. So it is the REPO ROOT that has to be on
 `sys.path` for `import core` (or anything under it) to resolve at all --
 `core/` itself being on `sys.path` would not help; there is no top-level `IRS`
-or `tools` package any more, only `core.IRS`/`core.tools`. This mirrors
-`core/connections/test_framework.py`'s own bootstrap (it inserts its
-grandparent, i.e. this same repo root) and the repo-root `pytest.ini`'s
-`pythonpath = .`.
-
+or `tools` package any more, only `core.IRS`/`core.tools`.
 Importing this module is idempotent and has no other side effects. Every other
 module in `gsim.core_gateway` imports this first; nothing outside
 `gsim.core_gateway` imports `core` at all.

@@ -8,18 +8,13 @@ for this class:
     Side.SENDER   -> send-only
     Side.RECEIVER -> receive-only
     anything else (CLIENT/SERVER/PUBLISHER/SUBSCRIBER) -> duplex
-
-This is what lets a strictly send-only Multicast connection be paired with
-a strictly receive-only connection of some other protocol inside a single
-CompositeUnit (see composite.py) -- each side's directionality is a direct,
-explicit consequence of how it's configured, not a hidden mode flag.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import socket
-import struct as pystruct
+import struct
 
 from core.IRS.irs_parser import IRSDataError
 
@@ -29,22 +24,23 @@ from .framing import unpack_message
 
 logger = logging.getLogger("connmgr.multicast")
 
+MCAST_GROUP_REQ = struct.Struct("4s4s")
 
 class _MulticastProtocol(asyncio.DatagramProtocol):
-    def __init__(self, owner: MulticastConnection, unit: str) -> None:
+    def __init__(self, owner: MulticastConnection, unit_name: str) -> None:
         self._owner = owner
-        self._unit = unit
+        self._unit_name = unit_name
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         try:
             header, payload = unpack_message(data)
         except IRSDataError:
-            logger.warning("dropping malformed multicast datagram from %s (unit=%s)", addr, self._unit)
+            logger.warning("dropping malformed multicast datagram from %s (unit=%s)", addr, self._unit_name)
             return
-        self._owner._dispatch_incoming(self._unit, header.opcode, payload)
+        self._owner._dispatch_incoming(self._unit_name, header.opcode, payload)
 
     def error_received(self, exc: Exception) -> None:
-        logger.warning("multicast error on unit %s: %s", self._unit, exc)
+        logger.warning("multicast error on unit %s: %s", self._unit_name, exc)
 
 
 class MulticastConnection(FramedConnection):
@@ -64,10 +60,12 @@ class MulticastConnection(FramedConnection):
         else:
             self.can_send, self.can_receive = True, True
         self._transports: dict[str, asyncio.DatagramTransport] = {}
+        self.multicast_ip = self.config.ip
 
     async def _do_start(self) -> None:
         loop = asyncio.get_running_loop()
-        for unit, endpoint in self.config.connections.items():
+
+        for unit_name, endpoint in self.config.connections.items():
             port = endpoint.port
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -76,26 +74,27 @@ class MulticastConnection(FramedConnection):
 
             if self.can_receive:
                 sock.bind((self.config.local_ip, port))
-                mreq = pystruct.pack(
-                    "4s4s",
-                    socket.inet_aton(self.config.ip),
+                mreq = MCAST_GROUP_REQ.pack(
+                    self.multicast_ip,
                     socket.inet_aton(self.config.local_ip),
                 )
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                logger.info("multicast unit %s joined group %s on %s", unit, self.config.ip, port)
+                logger.info("multicast unit %s joined group %s on %s", unit_name, self.multicast_ip, port)
             else:
                 sock.bind((self.config.local_ip, 0))
                 ttl = self.config.extra.get("ttl", 1)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-                logger.info("multicast unit %s ready to send to group %s:%s", unit, self.config.ip, port)
+                # TODO
+                # Direct outgoing multicast packets through the intended physical NIC
+                # sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.config.local_ip))
+                # TODO Until here
+                logger.info("multicast unit %s ready to send to group %s:%s", unit_name, self.config.ip, port)
 
             transport, _protocol = await loop.create_datagram_endpoint(
-                lambda unit=unit: _MulticastProtocol(self, unit), sock=sock
+                lambda unit=unit_name: _MulticastProtocol(self, unit), sock=sock
             )
-            self._transports[unit] = transport
-            # Multicast has no handshake: joining the group (or having a group
-            # to send to) is as connected as a unit ever gets here.
-            self._mark_unit_connected(unit)
+            self._transports[unit_name] = transport
+            self._mark_unit_connected(unit_name)
 
     async def _do_send(self, unit_name: str, data: bytes, opcode: int) -> None:
         if not self.can_send:
@@ -107,7 +106,7 @@ class MulticastConnection(FramedConnection):
         if port is None:
             raise ValueError(f"no configured port for unit {unit_name!r}")
         frame = self._frame(unit_name, data, opcode)
-        transport.sendto(frame, (self.config.ip, port))
+        transport.sendto(frame, (self.multicast_ip, port))
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:
         """Close this unit's socket -- which also drops its multicast group
