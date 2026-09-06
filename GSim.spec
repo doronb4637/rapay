@@ -15,11 +15,60 @@ Getting that wrong is silent -- the window opens on a blank page (no
 `gsim/web/ui_dist`) or the file pickers start in the wrong place -- so the two
 files must be edited together.
 """
+import dis
 import os
 import re
+import sys
 from pathlib import Path
 
 REPO = Path(SPECPATH)
+
+
+def _patch_dis_for_cpython_3_10_0() -> None:
+    """Work around a `dis` bug in CPython **3.10.0 exactly**, fixed in 3.10.1.
+
+    `dis._unpack_opargs` forgets to reset `extended_arg` when it meets an
+    opcode that takes no argument, so a stale `EXTENDED_ARG` leaks into a later
+    instruction and comes back out as a `LOAD_CONST` with an absurd index
+    (16843085 against 334 constants, in the case that surfaced this). PyInstaller
+    walks every dependency's bytecode with exactly this function, so the build
+    dies during Analysis with a traceback that names neither the module nor the
+    real cause:
+
+        File ".../modulegraph/util.py", line 13, in iterate_instructions
+        File ".../lib/dis.py", line 292, in _get_const_info
+        IndexError: tuple index out of range
+
+    It reproduces on `bottle.py` (pulled in by pywebview) and on any module
+    whose bytecode happens to lay out that way -- so it is the interpreter that
+    is wrong, not the dependency and not this spec.
+
+    THE REAL FIX IS TO STOP BUILDING ON 3.10.0: install any later 3.10.x
+    (3.10.11 is the last one with a Windows installer) and recreate `.venv3.10`
+    against it. This shim exists so a machine still on 3.10.0 can build at all,
+    and it is a no-op on every other version -- delete it once no build machine
+    is on 3.10.0.
+    """
+    if sys.version_info[:3] != (3, 10, 0):
+        return
+
+    def _unpack_opargs(code):
+        extended_arg = 0
+        for i in range(0, len(code), 2):
+            op = code[i]
+            if op >= dis.HAVE_ARGUMENT:
+                arg = code[i + 1] | extended_arg
+                extended_arg = (arg << 8) if op == dis.EXTENDED_ARG else 0
+            else:
+                arg = None
+                extended_arg = 0      # <- the missing line in 3.10.0
+            yield (i, op, arg)
+
+    dis._unpack_opargs = _unpack_opargs
+    print("GSim.spec: patched dis._unpack_opargs for CPython 3.10.0")
+
+
+_patch_dis_for_cpython_3_10_0()
 
 #: A windowed build has no stdout/stderr at all, so a frozen app that dies on
 #: startup dies silently -- the one failure mode you most need to see. Set

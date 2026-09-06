@@ -113,23 +113,39 @@ def test_create_composite_names_members_with_a_prefix(manager, free_ports):
 
 
 # --------------------------------------------------------------------------- #
-# _import_config_libs / "Structures" -> IRS.Structures.* normalization
+# _import_config_libs / "Structures": a path, or a module name imported as-is
 # --------------------------------------------------------------------------- #
+#: The structures modules this repo ships inside a real package, so they can be
+#: named the dotted way. Nothing is prefixed onto an entry any more -- a dotted
+#: entry IS the module name.
+TEST_MESSAGES = "core.IRS.Structures.Test.test_messages"
+TIFUL_MESSAGES = "core.IRS.Structures.Tiful.tiful_to_dtu"
+
+
 def test_structures_key_is_a_noop_when_absent(manager, free_port):
     # No exception, no import side effect -- just proves absence is fine.
     manager.create("c", _udp_config(free_port))
 
 
-@pytest.mark.parametrize("spelling", [
-    "Test.test_messages",
-    "Test/test_messages",
-    "Test\\test_messages",
-    "IRS.Structures.Test.test_messages",  # already fully qualified
-])
-def test_structures_key_normalizes_to_irs_structures_package(manager, free_port, spelling):
-    sys.modules.pop("core.IRS.Structures.Test.test_messages", None)
-    manager.create("c", _udp_config(free_port, Structures=[spelling]))
-    assert "core.IRS.Structures.Test.test_messages" in sys.modules
+def test_a_dotted_structures_entry_is_imported_verbatim(manager, free_port):
+    """No prefix, no rewriting, no folder it has to live in.
+
+    Every entry -- short or fully qualified, slashes or dots -- used to be
+    rewritten to sit under one blessed structures package. That made the name a
+    config declared depend on a folder inside the app, and the failure when that
+    folder moved was `No module named 'core.IRS.Structures'` for a module that
+    was importable all along. A dotted entry is now an ordinary import.
+    """
+    sys.modules.pop(TEST_MESSAGES, None)
+    manager.create("c", _udp_config(free_port, Structures=[TEST_MESSAGES]))
+    assert TEST_MESSAGES in sys.modules
+
+
+def test_a_dotted_entry_that_is_not_importable_names_the_entry(manager, free_port):
+    """The error a user can act on: what they wrote, not a package name
+    invented three layers down."""
+    with pytest.raises(ModuleNotFoundError, match=r"Nope\.messages"):
+        manager.create("c", _udp_config(free_port, Structures=["Nope.messages"]))
 
 
 def test_structures_import_happens_before_the_connection_object_is_instantiated(manager, free_port):
@@ -140,12 +156,12 @@ def test_structures_import_happens_before_the_connection_object_is_instantiated(
     from core.IRS.Structures.Test.test_messages import CLIENT_UNIT_CODE, TRACK_OPCODE
 
     connection = manager.create("c", _udp_config(
-        free_port, Structures=["Test.test_messages"]
+        free_port, Structures=[TEST_MESSAGES]
     ))
     # If import ran, the layout is already registered by the time we get the
     # connection object back -- no separate "warm up" step needed. Asserted
     # inside the module's own namespace, which is what the config named.
-    registered = get_specification("core.IRS.Structures.Test.test_messages")
+    registered = get_specification(TEST_MESSAGES)
     assert TRACK_OPCODE in registered[CLIENT_UNIT_CODE]
     assert connection is not None
 
@@ -157,28 +173,30 @@ def test_import_modules_returns_the_namespace_resolve_module_name_predicts():
     """The anti-drift guarantee the whole per-link design rests on: config
     resolution and the actual import go through one function, so a link can
     never be scoped to a namespace nothing registered under."""
+    import importlib
+    from pathlib import Path
+
     from core.tools.general import import_modules, resolve_module_name
 
-    spellings = ["Test.test_messages", "Test/test_messages",
-                 "Test\\test_messages", "IRS.Structures.Test.test_messages"]
+    module_file = str(Path(importlib.import_module(TEST_MESSAGES).__file__).resolve())
+    spellings = [TEST_MESSAGES, module_file]
     assert import_modules(spellings) == [resolve_module_name(s) for s in spellings]
-    assert set(import_modules(spellings)) == {"core.IRS.Structures.Test.test_messages"}
+    # A dotted entry keeps its own name; a path gets a synthetic one derived
+    # from the path. Two spellings of one file are two namespaces -- on purpose:
+    # collapsing them is what used to require a folder to be special.
+    assert import_modules(spellings)[0] == TEST_MESSAGES
 
 
 def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
     """The file named is the file that runs -- location decides nothing.
 
-    Resolution used to branch on WHERE a file sat: a path under
-    `core/IRS/Structures` had that path discarded and was looked up as
-    `core.IRS.Structures.<folder>.<stem>` instead. That lookup rides on
-    `sys.path`, on `core` being importable from the same physical tree, on PEP
-    420 namespace resolution, and in the PyInstaller build on the frozen
-    importer owning `core.IRS` while those folders ship as data -- so a file
-    picked in a dialog could raise `No module named
-    'core.IRS.Structures.<folder>'` while sitting right there on disk, on one
-    machine and not on another. A path is a path now, inside the package or
-    anywhere else, which is also what lets structures files live wherever the
-    user keeps them rather than inside the app.
+    Resolution used to branch on WHERE a file sat, and then -- once that was
+    fixed -- still NAMED every picked file as a member of a structures package
+    inside the app. Both tie a file the user keeps wherever they like to a
+    folder this repo has to keep alive, and both fail the same way the moment
+    it moves: `No module named '<that package>'` for a file sitting right there
+    on disk. The namespace is derived from the path itself now, under a
+    synthetic root that is nothing on disk and is never searched for.
     """
     from pathlib import Path
 
@@ -189,7 +207,9 @@ def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
 
     by_path = str(Path(module.__file__).resolve())
     name = resolve_module_name(by_path)
-    assert name.startswith("core.IRS.Structures._external."), name
+    # <root>.<real folder chain>.<stem> -- nothing in it names a real package.
+    assert name.startswith("irs_structures."), name
+    assert name.endswith(".test_messages"), name
     # ...and it really is imported from the file, registering under that name.
     assert import_modules([by_path]) == [name]
     assert TRACK_OPCODE in get_specification(name)[CLIENT_UNIT_CODE]
@@ -239,10 +259,10 @@ def test_import_config_libs_imports_every_per_unit_list(manager, free_ports):
     """Reads the union across units, not just a connection-level key."""
     config = _udp_config(free_ports(1)[0], connections={
         "A": {"port": free_ports(1)[0], "unitCode": TEXT_UNIT_CODE,
-              "Structures": ["Test.test_messages"]},
+              "Structures": [TEST_MESSAGES]},
         "B": {"port": free_ports(1)[0], "unitCode": TEXT_UNIT_CODE + 1,
-              "Structures": ["Tiful.tiful_to_dtu"]},
+              "Structures": [TIFUL_MESSAGES]},
     })
     manager.create("c", config)
-    assert "core.IRS.Structures.Test.test_messages" in sys.modules
-    assert "core.IRS.Structures.Tiful.tiful_to_dtu" in sys.modules
+    assert TEST_MESSAGES in sys.modules
+    assert TIFUL_MESSAGES in sys.modules
