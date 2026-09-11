@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rapay.local/schemas/connection.schema.json",
+  "title": "ConnectionConfig",
+  "description": "JSON configuration for one core.connections.ConnectionConfig, as parsed by core/connections/config.py:ConnectionConfig.from_json. Validate a config file with: python -c \"import json,jsonschema; jsonschema.validate(json.load(open('myconfig.json')), json.load(open('core/configs/connection.schema.json')))\"",
+  "type": "object",
+  "required": ["protocol", "side", "ip", "connections"],
+  "anyOf": [
+    { "required": ["unitCode"] },
+    { "required": ["UnitCode"] },
+    { "required": ["unit_code"] }
+  ],
+  "$comment": "unitCode is required under ANY ONE of its three spellings (config.py UNIT_CODE_KEYS) -- it is THIS process's own wire identity, not a per-unit code.",
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "enum": ["tcp", "udp", "multicast", "dds"],
+      "description": "Transport for this connection. Drives which protocol-specific extra keys apply and whether 'topics' (dds-only) or the echo keys (rejected on dds) are legal."
+    },
+    "side": {
+      "type": "string",
+      "enum": ["client", "server", "publisher", "subscriber", "sender", "receiver"],
+      "description": "Role this connection plays. tcp: client/server. udp/multicast: sender/receiver (also used as the default direction for multicast, and as the config.side default for dds topics without an explicit 'direction'). dds: publisher/subscriber."
+    },
+    "ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Remote/target address. For tcp client or udp/multicast sender: the peer to dial. For tcp/udp server: the bind address. For dds: unused by the transport (RTI discovery handles addressing) but still required."
+    },
+    "local_ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Local bind address. Alias: 'localIp'. Defaults to '0.0.0.0' if omitted.",
+      "default": "0.0.0.0"
+    },
+    "localIp": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Alias of 'local_ip'.",
+      "default": "0.0.0.0"
+    },
+    "unitCode": {
+      "$ref": "#/$defs/unitCode",
+      "description": "THIS connection's OWN unit code -- required, stamped into every outgoing message header so peers know who sent it. Aliases: 'UnitCode', 'unit_code'. NOT the same thing as connections[name].unitCode (that is the REMOTE unit's code)."
+    },
+    "UnitCode": { "$ref": "#/$defs/unitCode", "description": "Alias of 'unitCode'." },
+    "unit_code": { "$ref": "#/$defs/unitCode", "description": "Alias of 'unitCode'." },
+
+    "connections": {
+      "type": "object",
+      "description": "REQUIRED. Single source of truth for unit routing: maps each logical unit name to where it lives and how it identifies itself. There is no implicit/default unit and no separate port list.",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/unitEndpoint" }
+    },
+
+    "topics": {
+      "type": "array",
+      "description": "DDS ONLY. The list of DDS topics this connection publishes/subscribes. Required (and must be non-empty) when protocol is 'dds'; rejected (must be absent/empty) on every other protocol.",
+      "items": { "$ref": "#/$defs/topicSpec" }
+    },
+
+    "echo_opcode": { "$ref": "#/$defs/opcode", "description": "One opcode used for BOTH heartbeat directions (symmetric echo). Aliases: 'EchoOpcode', 'echoOpcode'. Accepted at the connection level (shared default) and inside a connections[name] entry (per-unit override, whole opcode GROUP overrides the shared default). Not legal on protocol 'dds'." },
+    "EchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'echo_opcode'." },
+    "echoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'echo_opcode'." },
+
+    "recv_echo_opcode": { "$ref": "#/$defs/opcode", "description": "Inbound heartbeat opcode, for peers that heartbeat asymmetrically. Aliases: 'RecvEchoOpcode', 'recvEchoOpcode'. Both recv and send must resolve for echo to be enabled on a unit. Not legal on protocol 'dds'." },
+    "RecvEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'recv_echo_opcode'." },
+    "recvEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'recv_echo_opcode'." },
+
+    "send_echo_opcode": { "$ref": "#/$defs/opcode", "description": "Outbound heartbeat opcode, for peers that heartbeat asymmetrically. Aliases: 'SendEchoOpcode', 'sendEchoOpcode'. Not legal on protocol 'dds'." },
+    "SendEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'send_echo_opcode'." },
+    "sendEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'send_echo_opcode'." },
+
+    "echo_interval": { "$ref": "#/$defs/positiveNumber", "description": "Seconds between outbound echoes. Aliases: 'EchoInterval', 'echoInterval'. Default 1.0. Must be strictly less than the (resolved) echo timeout.", "default": 1.0 },
+    "EchoInterval": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_interval'.", "default": 1.0 },
+    "echoInterval": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_interval'.", "default": 1.0 },
+
+    "echo_timeout": { "$ref": "#/$defs/positiveNumber", "description": "Seconds of silence before a unit is declared dead and dropped. Aliases: 'EchoTimeout', 'echoTimeout'. Default 5.0. Must be strictly greater than the (resolved) echo interval.", "default": 5.0 },
+    "EchoTimeout": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_timeout'.", "default": 5.0 },
+    "echoTimeout": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_timeout'.", "default": 5.0 },
+
+    "Structures": {
+      "$ref": "#/$defs/structures",
+      "description": "IRS structures module(s) for this link, as a connection-level default. Alias: 'structures'. Only legal when there is exactly ONE entry in 'connections' -- OR on protocol 'multicast', where one sender fans out to many receivers over a shared IRS. Otherwise each unit must declare its own 'Structures' inside connections[name]."
+    },
+    "structures": { "$ref": "#/$defs/structures", "description": "Alias of 'Structures'." },
+
+    "ttl": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "MULTICAST ONLY. Multicast TTL / hop limit. Default 1 (stay on the local subnet)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["send_only", "receive_only", "duplex"],
+      "description": "UDP ONLY. Restricts direction on a plain UDP link so it can stand in for a directional multicast link in test setups. Default 'duplex'.",
+      "default": "duplex"
+    },
+
+    "idl_modules": {
+      "description": "DDS ONLY. Python module(s) of @idl.struct classes to import -- by dotted module path or filesystem path. A single string is accepted as a one-element list. Alias: 'idl_file'.",
+      "$ref": "#/$defs/stringOrStringArray"
+    },
+    "idl_file": {
+      "description": "Alias of 'idl_modules' (checked only when 'idl_modules' is absent).",
+      "$ref": "#/$defs/stringOrStringArray"
+    },
+    "qos_file": {
+      "type": "string",
+      "description": "DDS ONLY. Path to the QoS profile XML (e.g. 'core/configs/qos/UNIVERSAL_QOS.xml')."
+    },
+    "qos_profile": {
+      "type": "string",
+      "description": "DDS ONLY. Qualified QoS profile name within qos_file (e.g. 'MyLib::Reliable')."
+    },
+    "header": {
+      "type": "object",
+      "description": "DDS ONLY. Configures where routing fields live inside each sample.",
+      "properties": {
+        "field": {
+          "type": ["string", "null"],
+          "description": "Name of the nested struct field holding the header, or null if the routing fields sit at the sample's top level. Default: framework's DEFAULT_HEADER_FIELD."
+        },
+        "source_unit": { "type": "string", "description": "Field name (inside the header) carrying the sending unit's code. Default: DEFAULT_SOURCE_FIELD." },
+        "destination_unit": { "type": "string", "description": "Field name (inside the header) carrying the destination unit's code. Default: DEFAULT_DESTINATION_FIELD." },
+        "stamp": { "type": "boolean", "description": "Whether outgoing samples get source/destination stamped automatically. Default true.", "default": true }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true,
+  "$comment": "additionalProperties stays true: 'extra' is an intentionally open catch-all (config.py _split_extra) for protocol-specific keys not enumerated above and for forward-compatible additions.",
+
+  "allOf": [
+    {
+      "if": { "properties": { "protocol": { "const": "dds" } } },
+      "then": {
+        "required": ["topics"],
+        "properties": { "topics": { "type": "array", "minItems": 1 } },
+        "not": {
+          "anyOf": [
+            { "required": ["echo_opcode"] }, { "required": ["EchoOpcode"] }, { "required": ["echoOpcode"] },
+            { "required": ["recv_echo_opcode"] }, { "required": ["RecvEchoOpcode"] }, { "required": ["recvEchoOpcode"] },
+            { "required": ["send_echo_opcode"] }, { "required": ["SendEchoOpcode"] }, { "required": ["sendEchoOpcode"] },
+            { "required": ["echo_interval"] }, { "required": ["EchoInterval"] }, { "required": ["echoInterval"] },
+            { "required": ["echo_timeout"] }, { "required": ["EchoTimeout"] }, { "required": ["echoTimeout"] }
+          ]
+        },
+        "$comment": "DDS DataWriters can't carry the echo lifecycle's raw-bytes heartbeat; use DDS LIVELINESS QoS instead (see config.py _reject_echo_on_dds)."
+      },
+      "else": {
+        "not": { "required": ["topics"] },
+        "$comment": "'topics' is a DDS concept; on a socket protocol its presence can only be a mistake (see config.py _reject_topics_on_non_dds)."
+      }
+    }
+  ],
+
+  "$defs": {
+    "unitCode": {
+      "description": "UInt8 unit code (0-255). Decimal or hex-string ('0x1A') are both accepted by the loader; this schema requires a JSON integer.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "opcode": {
+      "description": "UInt16 opcode (0-65535). Decimal or hex-string ('0x0A') are both accepted by the loader; this schema requires a JSON integer.",
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "structures": {
+      "description": "One structures spelling, or a list of them. A dotted module name (must live under core/IRS/Structures/) or a filesystem path to a .py file anywhere on disk.",
+      "$ref": "#/$defs/stringOrStringArray"
+    },
+    "stringOrStringArray": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      ]
+    },
+    "unitEndpoint": {
+      "type": "object",
+      "description": "One entry of 'connections': where a remote unit lives, its own wire identity, and its echo/Structures overrides.",
+      "required": ["port"],
+      "anyOf": [
+        { "required": ["unitCode"] },
+        { "required": ["UnitCode"] },
+        { "required": ["unit_code"] }
+      ],
+      "$comment": "'port' must be spelled exactly 'port' (config.py PORT_KEY, case-sensitive) -- unlike unitCode/Structures/echo keys it has no accepted alias, so 'Port'/'ports' are silently NOT read as the port.",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Transport port this unit is reached on. For DDS, the domain id -- every unit sharing one DdsConnection must use the SAME port/domain id."
+        },
+        "unitCode": { "$ref": "#/$defs/unitCode", "description": "THIS unit's (the remote peer's) wire identity. Required; must be unique among all units in this 'connections' map. Aliases: 'UnitCode', 'unit_code'." },
+        "UnitCode": { "$ref": "#/$defs/unitCode", "description": "Alias of 'unitCode'." },
+        "unit_code": { "$ref": "#/$defs/unitCode", "description": "Alias of 'unitCode'." },
+
+        "echo_opcode": { "$ref": "#/$defs/opcode", "description": "Per-unit override of the connection-level echo_opcode (whole opcode group overrides). Set explicitly to null to opt this unit OUT of echo even though the connection has a default." },
+        "EchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'echo_opcode'." },
+        "echoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'echo_opcode'." },
+        "recv_echo_opcode": { "$ref": "#/$defs/opcode", "description": "Per-unit override of the connection-level recv_echo_opcode." },
+        "RecvEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'recv_echo_opcode'." },
+        "recvEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'recv_echo_opcode'." },
+        "send_echo_opcode": { "$ref": "#/$defs/opcode", "description": "Per-unit override of the connection-level send_echo_opcode." },
+        "SendEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'send_echo_opcode'." },
+        "sendEchoOpcode": { "$ref": "#/$defs/opcode", "description": "Alias of 'send_echo_opcode'." },
+        "echo_interval": { "$ref": "#/$defs/positiveNumber", "description": "Per-unit override of EchoInterval (resolves individually, not as a group)." },
+        "EchoInterval": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_interval'." },
+        "echoInterval": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_interval'." },
+        "echo_timeout": { "$ref": "#/$defs/positiveNumber", "description": "Per-unit override of EchoTimeout (resolves individually, not as a group)." },
+        "EchoTimeout": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_timeout'." },
+        "echoTimeout": { "$ref": "#/$defs/positiveNumber", "description": "Alias of 'echo_timeout'." },
+
+        "Structures": { "$ref": "#/$defs/structures", "description": "This unit's own IRS structures module(s) -- takes priority over the connection-level default." },
+        "structures": { "$ref": "#/$defs/structures", "description": "Alias of 'Structures'." }
+      },
+      "additionalProperties": false
+    },
+    "topicSpec": {
+      "type": "object",
+      "description": "One DDS topic entry.",
+      "required": ["topic", "type"],
+      "properties": {
+        "topic": { "type": "string", "minLength": 1, "description": "DDS topic name on the wire. Alias: 'Topic' (also 'name', lowest priority)." },
+        "Topic": { "type": "string", "minLength": 1, "description": "Alias of 'topic'." },
+        "name": { "type": "string", "minLength": 1, "description": "Fallback alias of 'topic', lowest priority of the three." },
+        "type": { "type": "string", "minLength": 1, "description": "Name of the @idl.struct class carrying this topic. Alias: 'Type'." },
+        "Type": { "type": "string", "minLength": 1, "description": "Alias of 'type'." },
+        "type_name": { "type": "string", "description": "Overrides the DDS wire type name (otherwise the Python class name). Aliases: 'typeName', 'TypeName'. Use when talking to a peer whose type was generated from IDL under a different name." },
+        "typeName": { "type": "string", "description": "Alias of 'type_name'." },
+        "TypeName": { "type": "string", "description": "Alias of 'type_name'." },
+        "direction": {
+          "type": "string",
+          "enum": ["publish", "subscribe", "both"],
+          "description": "Which DDS entities this topic gets. Alias: 'Direction'. Defaults from the connection's 'side' when omitted (publisher/sender -> publish, subscriber/receiver -> subscribe, else both)."
+        },
+        "Direction": { "type": "string", "enum": ["publish", "subscribe", "both"], "description": "Alias of 'direction'." },
+        "opcode": { "$ref": "#/$defs/opcode", "description": "Local-only routing surrogate for this topic (never sent on the wire). Aliases: 'opCode', 'OpCode'. Auto-derived from the topic name (blake2s hash) if omitted; set explicitly only to resolve a collision between two topic names that hash the same." },
+        "opCode": { "$ref": "#/$defs/opcode", "description": "Alias of 'opcode'." },
+        "OpCode": { "$ref": "#/$defs/opcode", "description": "Alias of 'opcode'." }
+      },
+      "additionalProperties": false
+    }
+  }
+}

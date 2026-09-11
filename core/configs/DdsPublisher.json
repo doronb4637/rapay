@@ -1,4 +1,5 @@
 {
+  "$schema": "./connection.schema.json",
   "protocol": "dds",
   "side": "publisher",
   "ip": "0.0.0.0",

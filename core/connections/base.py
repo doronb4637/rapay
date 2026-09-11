@@ -214,23 +214,18 @@ class Connection(ABC):
         self._active_units: set[UnitName] = set()
         # triggered when a new connection is established.
         self._state_event: asyncio.Event = asyncio.Event()
-        # Who owns each (unit_code, opcode) route, and the on-connect callbacks
+        # Stores message subscriptions and callbacks.
         self._routes: RouteTable = RouteTable()
         self._periodic_tasks: dict[RouteKey, asyncio.Task[None]] = {}
-        # Resolved PER UNIT at config load (see config.EchoSettings.resolve):
+        # Resolved PER UNIT at config load
         self._echo: EchoSettings = config.echo
         self._unit_echo: dict[UnitName, EchoSettings] = config.unit_echoes
-        # Heartbeat senders, liveness clocks and timeout watchdogs, one set per
-        # unit. See _echo.UnitEchoSupervisor.
+        # Echo Watchdog
         self._echo_supervisor: UnitEchoSupervisor = UnitEchoSupervisor(self)
-        # Likewise per unit (see config.resolve_structures): which IRS
-        # structures modules scope this link's layouts.
+        # all of connection used structures
         self._structures: tuple[Namespace, ...] = config.structures
+        # dict links connectionName to its used Structure / Structure's.
         self._unit_structures: dict[UnitName, tuple[Namespace, ...]] = config.unit_structures
-        # Registered once per connection, not once per start(): `close()` is
-        # idempotent and safe on a connection that never started, so a single
-        # hook covers every start/close cycle this object goes through. Doing it
-        # in start() piled up a duplicate handler on every restart.
         atexit.register(self.close)
 
     # ------------------------------------------------------------------ #
@@ -286,24 +281,6 @@ class Connection(ABC):
                 await asyncio.sleep(1)
 
     def close(self, timeout: float | int | None = 5.0) -> None:
-        """
-        Sync entrypoint for an ABSOLUTE teardown:
-
-          1. `_do_stop()` closes every socket/transport/server this
-             connection owns, so no new inbound connection or datagram can
-             ever be accepted again.
-          2. Every background task this connection ever spawned via
-             `_track()` (read loops, echo senders, echo watchdogs, periodic
-             senders, in-flight on-receive callbacks) is explicitly canceled
-             and *awaited*, so nothing is left running on the shared loop
-             thread after this call returns.
-          3. Any receive_message() call still parked waiting on a
-             subscription is released (its future is canceled) instead of
-             being left to hang forever, and every standing callback is
-             dropped.
-
-        Idempotent, and safe to call on a connection that was never started.
-        """
         if not self._started:
             return
         self._loop_thread.await_coroutine(self._shutdown_all(), timeout=timeout)
@@ -313,8 +290,6 @@ class Connection(ABC):
         await self._do_stop()
         self._periodic_tasks.clear()
         self._echo_supervisor.forget_all()
-        # Registrations go BEFORE the task sweep, so nothing dispatched on the
-        # way down can still find a callback to invoke.
         self._routes.drop_all_callbacks()
         self._active_units.clear()
         self._notify_state_change()  # release anyone parked in wait_for_connected_units
@@ -325,9 +300,6 @@ class Connection(ABC):
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
-
-        # Parked receives go LAST, so a caller is woken to a connection that is
-        # fully down rather than one mid-collapse.
         self._routes.cancel_all_subscriptions()
 
     def _track(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:

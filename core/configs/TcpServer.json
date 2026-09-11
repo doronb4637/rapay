@@ -1,15 +1,17 @@
 {
+  "$schema": "./connection.schema.json",
   "protocol": "tcp",
   "side": "server",
   "ip": "127.0.0.1",
   "local_ip": "127.0.0.1",
+  "unitCode": 3,
   "connections": {
     "RadarUnit": {
-      "Port": 15000,
+      "port": 15000,
       "unitCode": 1
     },
     "TrackerUnit": {
-      "Port": 15001,
+      "port": 15001,
       "unitCode": 2
     }
   }
