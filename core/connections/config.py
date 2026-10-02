@@ -37,7 +37,7 @@ implicit/"default" unit, and no separate port list to keep in sync with it.
 
 Everything not in the fixed key set above lands in `extra` and is parsed by
 whoever owns it: the echo keys by `EchoSettings` (below), protocol-specific
-keys (ttl, mode, idl_file, qos_file, ...) by the individual protocol classes.
+keys (ttl, mode, ...) by the individual protocol classes.
 
 The echo keys are HIERARCHICAL: the same spellings are accepted at the
 connection level (in `extra`, the shared default for every unit) and inside
@@ -53,16 +53,35 @@ there is exactly one unit to apply it to -- or on multicast, where one sender
 genuinely does fan out to many receivers over a single shared IRS. Anything
 else is a load-time ValueError, since applying one list to several links is
 what let two files silently overwrite each other's layouts.
+
+A `"protocol": "dds"` config is a different shape altogether: a DDS node has no
+socket to describe, and its routing is the system contract's to say. It names
+WHICH UNIT it is in WHICH DDS Interface, and that is all it must name:
+
+{
+  "protocol": "dds",
+  "unit": "SensorUnit",
+  "dds_interface": "C:/ICD/generated/dds_interface.py"
+}
+
+Its own unit code, its peers (`connections`) and its topics are derived from
+the Interface (`dds_config.resolve_unit`), and `side` / `ip` / `local_ip` are
+None. See `_from_dds_json` for the optional keys and the ones it refuses.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Mapping
 
-from core.tools.general import (resolve_module_name, topic_opcode, validated_opcode,
-                               validated_unitcode)
+from core.tools.general import resolve_module_name, validated_opcode, validated_unitcode
 from core.annotations import Namespace, OpCode, UnitCode
+
+# Re-exported: TopicDirection/TopicSpec used to live here, and are still part of
+# what a DDS ConnectionConfig hands out (`config.dds.topics`).
+from .dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE, DdsUnitConfig, TopicDirection,
+                         TopicSpec, resolve_unit)
 
 DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0
@@ -102,16 +121,16 @@ ECHO_TUNING_KEYS: tuple[str, ...] = (*ECHO_INTERVAL_KEYS, *ECHO_TIMEOUT_KEYS)
 
 ECHO_KEYS: frozenset[str] = frozenset(ALL_ECHO_OPCODE_KEYS + ECHO_TUNING_KEYS)
 
-#: DDS topics. A list, not a dict keyed by unit: a topic and a unit are
-#: independent axes there -- one unit speaks several topics, and one topic
-#: carries traffic from several units -- so keying topics by unit (as this
-#: config used to) could express neither.
+#: DDS. A DDS node is configured as ONE UNIT of a DDS Interface; everything else
+#: about its routing is the Interface's to say (see `_from_dds_json`).
+DDS_UNIT_KEYS = ("unit", "unit_id", "Unit", "unitId")
+DDS_INTERFACE_KEYS = ("dds_interface", "DdsInterface", "ddsInterface")
+DDS_DOMAIN_ID_KEYS = ("domain_id", "DomainId", "domainId")
+DDS_QOS_FILE_KEYS = ("qos_file", "QosFile", "qosFile")
+DDS_QOS_PROFILE_KEYS = ("qos_profile", "QosProfile", "qosProfile")
+#: The hand-written topic list DDS configs used to carry. Refused everywhere
+#: now: DDS topics are the classes in the Interface, and no other protocol has any.
 TOPICS_KEY = "topics"
-TOPIC_NAME_KEYS = ("topic", "Topic", "name")
-TOPIC_TYPE_KEYS = ("type", "Type")
-TOPIC_TYPE_NAME_KEYS = ("type_name", "typeName", "TypeName")
-TOPIC_DIRECTION_KEYS = ("direction", "Direction")
-TOPIC_OPCODE_KEYS = ("opcode", "opCode", "OpCode")
 
 
 class Protocol(str, Enum):
@@ -122,29 +141,15 @@ class Protocol(str, Enum):
 
 
 class Side(str, Enum):
+    """Which end of a socket this connection is. DDS has none: what a DDS unit
+    publishes and subscribes is per topic, from its DDS Interface, and its
+    `ConnectionConfig.side` is always None."""
     # TCP
     CLIENT = "client"
     SERVER = "server"
-    # DDS
-    PUBLISHER = "publisher"
-    SUBSCRIBER = "subscriber"
     # UDP / MULTICAST
     SENDER = "sender"
     RECEIVER = "receiver"
-
-
-class TopicDirection(str, Enum):
-    """
-    Which DDS entities a topic gets on this connection.
-
-    Per TOPIC, not per connection: a real unit is normally duplex on one
-    participant -- publishing some topics while subscribing others -- which a
-    single connection-wide `side` cannot describe. `side` only supplies the
-    default when a topic entry doesn't say.
-    """
-    PUBLISH = "publish"
-    SUBSCRIBE = "subscribe"
-    BOTH = "both"
 
 
 # --------------------------------------------------------------------------- #
@@ -333,115 +338,6 @@ def resolve_structures(unit_spec: Mapping[str, Any],
 
 
 @dataclass(frozen=True, slots=True)
-class TopicSpec:
-    """
-    *Immutable class*
-    One DDS topic: its name on the wire, the `@idl.struct` class that carries
-    it, and which direction this connection runs it in.
-
-    `opcode` is a LOCAL routing handle, never transmitted. DDS puts no opcode
-    on the wire -- the topic is the message identity -- but this framework
-    routes on `(unit_code, opcode)`, so each topic is given a stable surrogate
-    derived from its name by `tools.general.topic_opcode`. That is what makes
-    `receive_message`, `handle_on_receive` and `@route` work over DDS at all.
-
-    `type_name` overrides the DDS type name, which otherwise defaults to the
-    Python class name. Remote units match on (topic name, type name, QoS), so
-    this is the knob for talking to a peer whose type was generated from real
-    IDL under a different name (`MyModule::Track`). Usually unset.
-    """
-
-    topic: str
-    type_ref: str
-    direction: TopicDirection
-    opcode: OpCode
-    type_name: str | None = None
-
-    @property
-    def publishes(self) -> bool:
-        return self.direction in (TopicDirection.PUBLISH, TopicDirection.BOTH)
-
-    @property
-    def subscribes(self) -> bool:
-        return self.direction in (TopicDirection.SUBSCRIBE, TopicDirection.BOTH)
-
-
-def parse_topics(raw: Any, side: Side) -> tuple[TopicSpec, ...]:
-    """
-    Build the topic list, defaulting each entry's direction from `side`.
-
-    The surrogate opcodes are assigned AND collision-checked here, at load
-    time, for the same reason every other config error is raised here: two
-    topics sharing a route key is a silent misroute at runtime -- the second
-    topic's samples delivered to the first topic's subscriber -- and there is
-    no later point at which it would announce itself. Both names are put in
-    the message, along with the `opcode` escape hatch that resolves it.
-    """
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        raise ValueError(
-            f"config[{TOPICS_KEY!r}] must be a list of topic objects, got {type(raw).__name__}.\n"
-            f"[*] e.g. [{{'topic': 'TrackTopic', 'type': 'Track', 'direction': 'subscribe'}}]")
-
-    default_direction = {
-        Side.PUBLISHER: TopicDirection.PUBLISH,
-        Side.SENDER: TopicDirection.PUBLISH,
-        Side.SUBSCRIBER: TopicDirection.SUBSCRIBE,
-        Side.RECEIVER: TopicDirection.SUBSCRIBE,
-    }.get(side, TopicDirection.BOTH)
-
-    topics: list[TopicSpec] = []
-    seen_names: dict[str, int] = {}
-    opcode_owner: dict[OpCode, str] = {}
-    for index, entry in enumerate(raw):
-        where = f"config[{TOPICS_KEY!r}][{index}]"
-        if not isinstance(entry, dict):
-            raise ValueError(f"{where} must be an object, got {entry!r}")
-        name = _lookup(entry, *TOPIC_NAME_KEYS)
-        if not name:
-            raise ValueError(f"{where} needs a {TOPIC_NAME_KEYS[0]!r} key naming the DDS topic")
-        name = str(name)
-        if name in seen_names:
-            raise ValueError(
-                f"{where}: topic {name!r} is already declared at index {seen_names[name]}")
-        seen_names[name] = index
-        type_ref = _lookup(entry, *TOPIC_TYPE_KEYS)
-        if not type_ref:
-            raise ValueError(
-                f"{where}: topic {name!r} needs a {TOPIC_TYPE_KEYS[0]!r} key naming its "
-                f"@idl.struct class")
-        raw_direction = _lookup(entry, *TOPIC_DIRECTION_KEYS)
-        try:
-            direction = default_direction if raw_direction is None else TopicDirection(
-                str(raw_direction).lower())
-        except ValueError as exc:
-            raise ValueError(
-                f"{where}: direction {raw_direction!r} is not one of "
-                f"{[d.value for d in TopicDirection]}") from exc
-        raw_opcode = _lookup(entry, *TOPIC_OPCODE_KEYS)
-        opcode = topic_opcode(name) if raw_opcode is None else _as_opcode(
-            raw_opcode, f"{where}['opcode']")
-        if opcode in opcode_owner:
-            raise ValueError(
-                f"{where}: topics {opcode_owner[opcode]!r} and {name!r} both route on opcode "
-                f"{opcode:#06x}, so their samples would be indistinguishable to "
-                f"receive_message()/@route.\n"
-                f"[*] The opcode is derived from the topic NAME (tools.general.topic_opcode) and "
-                f"is local only -- nothing is sent on the wire.\n"
-                f"[*] Fix by giving either topic an explicit {TOPIC_OPCODE_KEYS[0]!r} key.")
-        opcode_owner[opcode] = name
-        topics.append(TopicSpec(
-            topic=name,
-            type_ref=str(type_ref),
-            direction=direction,
-            opcode=opcode,
-            type_name=_lookup(entry, *TOPIC_TYPE_NAME_KEYS),
-        ))
-    return tuple(topics)
-
-
-@dataclass(frozen=True, slots=True)
 class UnitEndpoint:
     """
     *Immutable class*
@@ -497,46 +393,78 @@ def _require_connections(data: Mapping[str, Any]) -> dict[str, Any]:
 
 def _split_extra(data: Mapping[str, Any]) -> dict[str, Any]:
     """Everything outside the fixed key set, left for whoever owns it: the echo
-    keys for `EchoSettings`, protocol-specific keys (ttl, mode, qos_file, ...)
-    for the individual protocol classes."""
-    fixed_keys = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY,
-                  *UNIT_CODE_KEYS, TOPICS_KEY}
+    keys for `EchoSettings`, protocol-specific keys (ttl, mode, ...) for the
+    individual protocol classes."""
+    fixed_keys = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY, *UNIT_CODE_KEYS}
     return {key: value for key, value in data.items() if key not in fixed_keys}
 
 
-def _reject_topics_on_non_dds(protocol: Protocol, topics: tuple[TopicSpec, ...]) -> None:
-    """Topics are a DDS concept; on a socket protocol the key can only be a
-    mistake, and ignoring it silently would hide the real misconfiguration."""
-    if protocol is not Protocol.DDS and topics:
+def _reject_topics(data: Mapping[str, Any], protocol: Protocol) -> None:
+    """A socket protocol has no topics; the key can only be a mistake, and
+    ignoring it silently would hide the real misconfiguration."""
+    if TOPICS_KEY in data:
         raise ValueError(
-            f"config[{TOPICS_KEY!r}] is only meaningful on a 'dds' connection; this one is "
-            f"{protocol.value!r}.")
+            f"config[{TOPICS_KEY!r}] is not a {protocol.value!r} setting: only DDS has topics, "
+            f"and those come from its DDS Interface.")
 
 
-def _reject_echo_on_dds(protocol: Protocol, extra: Mapping[str, Any],
-                        connections_raw: Mapping[str, Any]) -> None:
-    """
-    The echo lifecycle sends a raw `bytes` payload (b'' by default), which a
-    DataWriter cannot accept -- it serializes typed samples through the type's
-    TypeSupport. An echo configured here would therefore never heartbeat, and
-    its watchdog would then drop every unit on EchoTimeout. DDS's own LIVELINESS
-    QoS is the mechanism that belongs in that slot, so this is an error rather
-    than a docstring warning.
-    """
-    if protocol is not Protocol.DDS:
-        return
-    echo_here = sorted(ECHO_KEYS.intersection(extra))
-    echo_in_units = sorted({
-        key for spec in connections_raw.values() if isinstance(spec, dict)
-        for key in ECHO_KEYS.intersection(spec)})
-    if echo_here or echo_in_units:
+# --------------------------------------------------------------------------- #
+# The steps of `_from_dds_json`.
+# --------------------------------------------------------------------------- #
+#: Keys a DDS config refuses, each with the reason. A DDS node has no socket to
+#: describe, and what used to be written here by hand now comes from the DDS
+#: Interface. Refused rather than ignored: a key nothing reads is a setting its
+#: author believes is in force.
+_DDS_REFUSED_KEYS: dict[tuple[str, ...], str] = {
+    (SIDE_KEY,): "DDS has no side -- what a unit publishes and subscribes comes from its "
+                 "DdsUnit in the DDS Interface",
+    (IP_KEY, *LOCAL_IP_KEYS): "DDS has no endpoint address -- peers find each other by discovery",
+    UNIT_CODE_KEYS: "this unit's code comes from its DdsUnit in the DDS Interface",
+    (CONNECTIONS_KEY,): "the peers are derived from the DDS Interface",
+    (TOPICS_KEY,): "the topics are the classes the unit's DdsUnit publishes and subscribes",
+    ("idl_modules", "idl_file"): "the DDS Interface imports its topic classes itself",
+    STRUCTURES_KEYS: "Structures are IRS message layouts; DDS samples are typed by their classes",
+    tuple(sorted(ECHO_KEYS)): "the echo transmits raw bytes, which a DataWriter cannot publish "
+                              "-- use LIVELINESS QoS in the QoS profile instead",
+}
+
+
+def _refuse_non_dds_keys(data: Mapping[str, Any]) -> None:
+    found = [(key, reason) for keys, reason in _DDS_REFUSED_KEYS.items() for key in keys if key in data]
+    if found:
+        reasons = "\n".join(f"[*] {key!r}: {reason}" for key, reason in found)
         raise ValueError(
-            f"echo keys are not supported on a 'dds' connection "
-            f"(found {echo_here + echo_in_units}).\n"
-            f"[*] The echo lifecycle transmits raw bytes, which a DDS DataWriter rejects: "
-            f"it publishes typed samples only.\n"
-            f"[*] Use DDS LIVELINESS QoS in the QoS profile instead -- it is the same "
-            f"mechanism, enforced by the middleware.")
+            f"protocol 'dds' does not accept {[key for key, _ in found]}:\n{reasons}")
+
+
+def _parse_dds_domain_id(data: Mapping[str, Any]) -> int:
+    raw = _lookup(data, *DDS_DOMAIN_ID_KEYS)
+    if raw is None:
+        return DEFAULT_DOMAIN_ID
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError(f"config['domain_id'] must be a non-negative integer DDS domain id, got {raw!r}")
+    return raw
+
+
+def _parse_dds_qos_file(data: Mapping[str, Any]) -> Path:
+    """The QoS file must exist at load, not at start: a missing file is a
+    config error, and `create()` is where config errors surface."""
+    raw = _lookup(data, *DDS_QOS_FILE_KEYS)
+    path = DEFAULT_QOS_FILE if raw is None else Path(str(raw)).resolve()
+    if not path.is_file():
+        source = "config['qos_file']" if raw is not None else "the default QoS file (DEFAULT_QOS_FILE)"
+        raise FileNotFoundError(f"{source} not found: {path}")
+    return path
+
+
+def _parse_dds_qos_profile(data: Mapping[str, Any]) -> str | None:
+    """None selects the QoS file's default (`is_default_qos="true"`) profile.
+    Whether a named profile exists is checked against the parsed file when the
+    connection is built."""
+    raw = _lookup(data, *DDS_QOS_PROFILE_KEYS)
+    if raw is not None and (not isinstance(raw, str) or not raw.strip()):
+        raise ValueError(f"config['qos_profile'] must be a '<Library>::<Profile>' name, got {raw!r}")
+    return raw
 
 
 def _parse_port(unit_name: str, spec: Mapping[str, Any]) -> int:
@@ -625,17 +553,19 @@ class ConnectionConfig:
     JSON is validated and coerced into real types.
     """
     protocol: Protocol
-    side: Side
-    ip: str
-    local_ip: str
+    #: None on DDS, which has no side.
+    side: Side | None
+    #: Both None on DDS, which has no endpoint address.
+    ip: str | None
+    local_ip: str | None
     #: Our unitCode
     unitCode: int
     connections: dict[str, UnitEndpoint]
-    #: DDS only, empty everywhere else. Topics are their own axis, independent
-    #: of `connections` -- see TopicSpec.
-    topics: tuple[TopicSpec, ...] = ()
-    #: (Echo-Opcodes, Echo-Timeout, Echo-Intervals, Mode('send_only'/'receive_only'), IDL_file, QoS_file, local_ip, ...)
+    #: (Echo-Opcodes, Echo-Timeout, Echo-Intervals, Mode('send_only'/'receive_only'), local_ip, ...)
     extra: dict[str, Any] = field(default_factory=dict)
+    #: DDS only: this unit as its DDS Interface defines it -- its topics, peers,
+    #: domain and QoS. None everywhere else.
+    dds: DdsUnitConfig | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> ConnectionConfig:
@@ -646,17 +576,16 @@ class ConnectionConfig:
         order those checks happen in; each step's own function owns the rule and
         the message that explains it.
         """
+        # Protocol first: a DDS config is a different shape altogether.
+        protocol = Protocol(str(data[PROTOCOL_KEY]).lower())
+        if protocol is Protocol.DDS:
+            return cls._from_dds_json(data)
+
         own_unit_code = _parse_own_unit_code(data)
         connections_raw = _require_connections(data)
         extra = _split_extra(data)
-        # Protocol and side are read before the units: the Structures rule below
-        # has to know the protocol to exempt multicast, and to name it if it
-        # rejects the config.
-        protocol = Protocol(str(data[PROTOCOL_KEY]).lower())
         side = Side(str(data[SIDE_KEY]).lower())
-        topics = parse_topics(data.get(TOPICS_KEY), side)
-        _reject_topics_on_non_dds(protocol, topics)
-        _reject_echo_on_dds(protocol, extra, connections_raw)
+        _reject_topics(data, protocol)
 
         connection_structures = _structures_from(extra, "Structures")
         connections = _parse_unit_endpoints(connections_raw, extra)
@@ -669,7 +598,6 @@ class ConnectionConfig:
             local_ip=_lookup(data, *LOCAL_IP_KEYS) or "0.0.0.0",
             unitCode=own_unit_code,
             connections=connections,
-            topics=topics,
             extra=extra,
         )
         # Touch the CONNECTION-level echo and structures blocks too, so a
@@ -678,6 +606,43 @@ class ConnectionConfig:
         config.echo
         config.structures
         return config
+
+    @classmethod
+    def _from_dds_json(cls, data: Mapping[str, Any]) -> ConnectionConfig:
+        """
+        A DDS node is ONE UNIT of a DDS Interface. Its unit code, its peers and
+        its topics are the Interface's to say (`dds_config.resolve_unit`); this
+        config only picks the unit and may override the deployment defaults
+        (`domain_id`, `qos_file`, `qos_profile`). `header` stays in `extra` for
+        `DdsConnection`, unchanged.
+
+        Each derived peer's `port` is the domain id, which keeps "a DDS
+        endpoint's port is its domain" true for anything reading `ports`.
+        """
+        _refuse_non_dds_keys(data)
+        unit = _lookup(data, *DDS_UNIT_KEYS)
+        interface = _lookup(data, *DDS_INTERFACE_KEYS)
+        if not unit or not interface:
+            raise ValueError(
+                f"protocol 'dds' needs {DDS_UNIT_KEYS[0]!r} (which DdsUnit this node is) and "
+                f"{DDS_INTERFACE_KEYS[0]!r} (the path to the generated DDS Interface); got "
+                f"unit={unit!r}, dds_interface={interface!r}")
+        dds = resolve_unit(
+            str(interface), str(unit),
+            domain_id=_parse_dds_domain_id(data),
+            qos_file=_parse_dds_qos_file(data),
+            qos_profile=_parse_dds_qos_profile(data),
+        )
+        return cls(
+            protocol=Protocol.DDS,
+            side=None,
+            ip=None,
+            local_ip=None,
+            unitCode=dds.unit_code,
+            connections={name: UnitEndpoint(port=dds.domain_id, unitCode=code) for name, code in dds.peers},
+            extra={key: value for key, value in data.items() if key != PROTOCOL_KEY},
+            dds=dds,
+        )
 
     # ------------------------------------------------------------------ #
     # Unit lookups
@@ -723,13 +688,6 @@ class ConnectionConfig:
         for name, endpoint in self.connections.items():
             if endpoint.unitCode == unit_code:
                 return name
-        return None
-
-    def topic_for_opcode(self, opcode: OpCode) -> TopicSpec | None:
-        """The topic routing on `opcode`, or None."""
-        for topic in self.topics:
-            if topic.opcode == opcode:
-                return topic
         return None
 
     def structures_for(self, unit_name: str) -> tuple[Namespace, ...]:

@@ -31,8 +31,7 @@ import logging
 import time
 from typing import Any, Coroutine, Protocol
 
-from core.annotations import OpCode
-
+from ._routes import MessageKey
 from .config import EchoSettings
 
 logger = logging.getLogger("connmgr")
@@ -124,7 +123,7 @@ class UnitEchoSupervisor:
     # ------------------------------------------------------------------ #
     # Consumption
     # ------------------------------------------------------------------ #
-    def consume(self, unit_name: UnitName, opcode: OpCode) -> bool:
+    def consume(self, unit_name: UnitName, opcode: MessageKey) -> bool:
         """
         True if this message was `unit_name`'s inbound echo, in which case it
         has been consumed here and must go no further.

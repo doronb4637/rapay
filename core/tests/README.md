@@ -32,11 +32,14 @@ Skip the slower, real-timing echo tests during iteration:
 ```
 
 DDS is exercised by `test_dds.py` (`rti.connext` is installed in this `.venv`),
-which covers the surrogate topic opcodes, config validation, QoS `topic_filter`
-resolution, type lookup, header extraction and routing -- all without a live
-domain. The one test that puts a real `DomainParticipant` on one is gated behind
-`requires_license`: creating a participant needs an RTI license, and a machine
-without one must not read as a code failure. Separately,
+which covers `DdsUnit`, DDS Interface loading and validation (bad Interfaces are
+written to `tmp_path` and loaded by path, like a deployment's), config
+validation, QoS `topic_filter` resolution with and without a named profile,
+topic selectors, sender attribution, send/route checks against the Interface,
+and the teardown ordering -- all without a live domain. The one test that puts
+real `DomainParticipant`s on one is gated behind `requires_license`: creating a
+participant needs an RTI license, and a machine without one must not read as a
+code failure. Separately,
 `test_manager.py::test_create_rejects_unregistered_protocol` self-skips when it
 detects DDS is registered, since that scenario needs a genuinely unregistered
 protocol to prove anything. True IP multicast stays out of

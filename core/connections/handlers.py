@@ -2,9 +2,11 @@
 Class-based message-handler sugar over `Connection.handle_on_receive` and
 `Connection.handle_on_connect`.
 
-`route(opCode)` tags a plain method with the opcode it answers; every
-`BaseUnitHandler` subclass collects its tagged methods into a class-level
-opcode -> method-name map at class-definition time. Installing a handler on
+`route(opCode)` tags a plain method with the opcode it answers -- or, on DDS,
+the topic: `@route(Status)` -- and every `BaseUnitHandler` subclass collects
+its tagged methods into a class-level selector -> method-name map at
+class-definition time. The selector is stored as given and only resolved by
+`handle_on_receive`, which is what lets one decorator serve both kinds of link. Installing a handler on
 a unit (`ConnectionManager.create(..., handler_class=...)`) does nothing more
 than call `unit.handle_on_receive(opcode, bound_method, unit_name=...)` once
 per route -- every existing dispatch behaviour (mutual exclusion with a live
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 from typing import Callable, TypeVar
 
-from .base import Connection, ConnectCallback, ReceiveCallback, UnitName
+from .base import Connection, ConnectCallback, MessageSelector, ReceiveCallback, UnitName
 from .composite import CompositeUnit
 
 _F = TypeVar("_F", bound=Callable)
@@ -32,7 +34,7 @@ _ROUTE_ATTR = "_route_opcode"
 _ON_CONNECT_ATTR = "_is_connect_handler"
 
 
-def route(opCode: int) -> Callable[[_F], _F]:
+def route(opCode: MessageSelector) -> Callable[[_F], _F]:
     """Tags a `BaseUnitHandler` method with '_ROUTE_ATTR'.
     than returns the function unchanged
     `BaseUnitHandler.__init_subclass__` is what turns it into a
@@ -75,8 +77,8 @@ class UnitHandler:
     `unitCode` is REQUIRED on every concrete subclass
     """
     unitCode: int
-    #: opcode -> method name, built once per subclass.
-    _routes: dict[int, str]
+    #: selector (opcode, or DDS topic class) -> method name, built once per subclass.
+    _routes: dict[MessageSelector, str]
     #: name of the `@on_connect`-tagged method, or None if the subclass has
     #: none. Built once per subclass, alongside `_routes`.
     _on_connect_name: str | None
@@ -96,7 +98,7 @@ class UnitHandler:
                 if getattr(value, _ON_CONNECT_ATTR, False):
                     connect_names.add(name)
 
-        routes: dict[int, str] = {}
+        routes: dict[MessageSelector, str] = {}
         for name in tagged_names:
             opcode = getattr(getattr(cls, name), _ROUTE_ATTR, None)
             if opcode is None:

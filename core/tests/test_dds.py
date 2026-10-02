@@ -3,77 +3,124 @@ DDS connection tests.
 
 Split by what each one needs, because RTI has two very different requirements:
 
-  * Parsing a QoS XML and building `@idl.struct` types needs only the
-    `rti.connextdds` package. Most of this file runs there.
-  * Creating a DomainParticipant needs an RTI LICENSE. Everything that puts a
+  * Loading a DDS Interface, parsing a QoS XML and building `@idl.struct` types
+    needs only the `rti.connextdds` package. Almost all of this file runs there.
+  * Creating a DomainParticipant needs an RTI LICENSE. The one test that puts a
     live participant on a domain is gated behind `requires_license`, so this
     suite stays green on a machine without one instead of reporting a code
     failure for an environment problem.
 
-Routing is exercised by driving `_dispatch_incoming` directly -- the same
-technique `test_echo.py` uses to observe `_do_send` -- which proves the header
-extraction, the self-echo filter and the topic-to-opcode mapping without any
-network at all.
+Routing is exercised by driving `_dispatch_incoming` directly, and sends by
+handing a connection a recording writer -- no network at all. Negative-case
+Interfaces are written to `tmp_path` and loaded by path, through the same loader
+a deployment uses.
 """
 from __future__ import annotations
 
+import asyncio
+import dataclasses
+import importlib.util
+import logging
+import sys
+import textwrap
 import threading
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("rti.connextdds", reason="RTI Connext Python API not installed")
 
 import rti.connextdds as dds  # noqa: E402
-import rti.types as idl  # noqa: E402
 
-from core.connections.config import ConnectionConfig, TopicDirection  # noqa: E402
+import core.connections.dds as dds_module  # noqa: E402
+from core.connections.config import ConnectionConfig, Protocol  # noqa: E402
 from core.connections.dds import DdsConnection  # noqa: E402
-from core.tools.general import topic_opcode  # noqa: E402
+from core.connections.dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE,  # noqa: E402
+                                         TopicDirection, load_dds_interface, resolve_unit)
+from core.connections.handlers import UnitHandler, route  # noqa: E402
+from core.DDS import DdsUnit  # noqa: E402
+from core.DDS.idl_types.Example.example_topics import Header, Status, Track  # noqa: E402
 
-TYPE_MODULE = "core.DDS.Structures.Example.example_topics"
-QOS_FILE = "core/configs/qos/UNIVERSAL_QOS.xml"
-TOPIC = "TrackTopic"
-STATUS_TOPIC = "StatusTopic"
-OPCODE = topic_opcode(TOPIC)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INTERFACE = str(REPO_ROOT / "core" / "DDS" / "Interfaces" / "Example" / "example_interface.py")
+INTERFACE_DOTTED = "core.DDS.Interfaces.Example.example_interface"
+QOS_FILE = str(REPO_ROOT / "core" / "configs" / "qos" / "UNIVERSAL_QOS.xml")
 
-OWN_CODE = 22
-PEER_CODE = 7
-PEER_NAME = "RadarUnit"
-#: Well outside the default 0-4 range so a stray participant on the machine
-#: cannot join a test's domain.
+SENSOR, CONTROL = "SensorUnit", "ControlUnit"
+SENSOR_CODE, CONTROL_CODE = 0x01, 0x02
+#: Well outside the default range so a stray participant on the machine cannot
+#: join a test's domain.
 TEST_DOMAIN = 77
+
+#: The imports every stand-in Interface starts with -- absolute, as the rule is.
+PREAMBLE = """\
+from core.DDS import DdsUnit
+from core.DDS.idl_types.Example.example_topics import Status, Track
+INTERFACE_FORMAT = 1
+"""
+
+#: Three units, to have the cases two cannot express:
+#:   * B hears Track from two publishers (A and C), but Status from A alone;
+#:   * C is B's peer without publishing Status, and A's peer without
+#:     subscribing Track.
+THREE_UNITS = """\
+A = DdsUnit(unitCode=0x0A, publish=(Track, Status))
+B = DdsUnit(unitCode=0x0B, subscribe=(Track, Status))
+C = DdsUnit(unitCode=0x0C, publish=(Track,), subscribe=(Status,))
+"""
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def dds_config(**overrides):
-    """A minimal, valid DDS config dict; override any key per test."""
-    config = {
-        "protocol": "dds",
-        "side": "subscriber",
-        "ip": "0.0.0.0",
-        "unitCode": OWN_CODE,
-        "connections": {PEER_NAME: {"port": TEST_DOMAIN, "unitCode": PEER_CODE}},
-        "idl_modules": [TYPE_MODULE],
-        # No explicit direction: it defaults from `side`, which several tests vary.
-        "topics": [{"topic": TOPIC, "type": "Track"}],
-    }
+def dds_config(unit: str = SENSOR, interface: str = INTERFACE, **overrides) -> dict:
+    config = {"protocol": "dds", "unit": unit, "dds_interface": interface}
     config.update(overrides)
     return config
 
 
-def build(**overrides) -> DdsConnection:
+def build(unit: str = SENSOR, interface: str = INTERFACE, **overrides) -> DdsConnection:
     """A DdsConnection that was never started -- no participant, no license."""
-    return DdsConnection(ConnectionConfig.from_json(dds_config(**overrides)))
+    return DdsConnection(ConnectionConfig.from_json(dds_config(unit, interface, **overrides)))
 
 
-def dispatch(connection: DdsConnection, unit_name: str, opcode: int, sample) -> None:
+def write_interface(tmp_path: Path, body: str, preamble: bool = True) -> str:
+    """A stand-in for a generated Interface, written where a deployment's would
+    be. `body` is dedented; the absolute-import preamble is prepended unless the
+    test is about the preamble itself."""
+    path = tmp_path / "dds_interface.py"
+    path.write_text((PREAMBLE if preamble else "") + textwrap.dedent(body), encoding="utf-8")
+    return str(path)
+
+
+def sample_from(cls, source_code: int, **fields):
+    sample = cls(**fields)
+    sample.header.source_unit = source_code
+    return sample
+
+
+def spec_of(connection: DdsConnection, topic: str):
+    spec = connection.config.dds.topic_named(topic)
+    assert spec is not None, f"{connection.config.dds.unit} has no topic {topic}"
+    return spec
+
+
+def dispatch(connection: DdsConnection, unit_name: str, topic: str, sample) -> None:
     """Feed one sample through the framework's dispatch point, on the loop
     thread where a read loop would have called it."""
     async def fire() -> None:
-        connection._dispatch_incoming(unit_name, opcode, sample)
+        connection._dispatch_incoming(unit_name, topic, sample)
     connection._loop_thread.await_coroutine(fire())
+
+
+class RecordingWriter:
+    """Stands in for a DataWriter: keeps what `write` was given."""
+
+    def __init__(self) -> None:
+        self.written: list = []
+
+    def write(self, sample) -> None:
+        self.written.append(sample)
 
 
 def _license_available() -> bool:
@@ -91,142 +138,310 @@ requires_license = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
-def track_type():
-    from core.DDS.Structures.Example.example_topics import Track
-    return Track
+# --------------------------------------------------------------------------- #
+# DdsUnit -- checked at the Interface's own import
+# --------------------------------------------------------------------------- #
+def test_a_lone_class_is_a_one_element_tuple():
+    """`publish=(Track)` has no trailing comma, so it is not a tuple -- a
+    generator's punctuation must not be able to break the contract."""
+    unit = DdsUnit(unitCode=1, publish=(Track), subscribe=Status)
+    assert unit.publish == (Track,) and unit.subscribe == (Status,)
+
+
+def test_any_iterable_of_topic_classes_is_accepted():
+    assert DdsUnit(unitCode=1, publish=[Track, Status]).publish == (Track, Status)
+
+
+@pytest.mark.parametrize("not_a_topic", [int, object, "Track"])
+def test_an_entry_that_is_not_a_topic_type_is_refused(not_a_topic):
+    with pytest.raises(TypeError):
+        DdsUnit(unitCode=1, publish=(not_a_topic,))
+
+
+def test_a_class_without_idl_struct_is_refused_with_the_fix():
+    class Plain:
+        pass
+
+    with pytest.raises(TypeError, match=r"@idl\.struct"):
+        DdsUnit(unitCode=1, subscribe=(Plain,))
+
+
+@pytest.mark.parametrize("code, error", [(-1, ValueError), (256, ValueError),
+                                         ("1", TypeError), (True, TypeError)])
+def test_unit_code_must_be_a_uint8_int(code, error):
+    with pytest.raises(error):
+        DdsUnit(unitCode=code)
+
+
+def test_a_topic_listed_twice_is_refused():
+    with pytest.raises(ValueError, match="more than once"):
+        DdsUnit(unitCode=1, publish=(Track, Track))
+
+
+def test_a_unit_is_immutable():
+    unit = DdsUnit(unitCode=1, publish=(Track,))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        unit.unitCode = 2  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #
-# The surrogate opcode
+# Loading and resolving an Interface
 # --------------------------------------------------------------------------- #
-def test_topic_opcode_is_deterministic_and_uint16():
-    for name in ("TrackTopic", "StatusTopic", "a", "", "Some::Very::Long::Topic::Name"):
-        value = topic_opcode(name)
-        assert topic_opcode(name) == value, "must be stable across calls and processes"
-        assert 0 <= value <= 0xFFFF, f"{name} -> {value:#x} does not fit framing's uint16 OpCode"
+def test_each_unit_gets_its_own_view_of_the_example_interface():
+    sensor = resolve_unit(INTERFACE, SENSOR)
+    assert (sensor.unit_code, sensor.system) == (SENSOR_CODE, "ExampleSystem")
+    assert sensor.peers == ((CONTROL, CONTROL_CODE),)
+    track, status = sensor.topics
+    assert (track.name, track.sample_type, track.direction) == ("Track", Track, TopicDirection.PUBLISH)
+    assert (track.publishers, track.subscribers) == ((), (CONTROL,))
+    assert (status.name, status.direction, status.publishers) == ("Status", TopicDirection.SUBSCRIBE, (CONTROL,))
+
+    control = resolve_unit(INTERFACE, CONTROL)
+    assert control.peers == ((SENSOR, SENSOR_CODE),)
+    assert {spec.name: spec.direction for spec in control.topics} == {
+        "Status": TopicDirection.PUBLISH, "Track": TopicDirection.SUBSCRIBE}
 
 
-def test_distinct_topics_get_distinct_opcodes():
-    assert topic_opcode(TOPIC) != topic_opcode(STATUS_TOPIC)
+def test_an_interface_loads_by_dotted_name_too():
+    assert resolve_unit(INTERFACE_DOTTED, SENSOR).unit_code == SENSOR_CODE
 
 
-def test_opcode_collision_is_a_load_time_error():
-    """
-    Two topics on one route key would deliver one topic's samples to the other
-    topic's subscriber, silently. It has to fail at load, naming both.
-    """
+def test_one_file_is_one_module_object():
+    """The identity the topic classes depend on: loading the same file again --
+    however its path is spelled -- must not mint a second module."""
+    spelled_differently = str(Path(INTERFACE).parent / ".." / "Example" / Path(INTERFACE).name)
+    assert load_dds_interface(INTERFACE) is load_dds_interface(spelled_differently)
+
+
+def test_the_interface_classes_are_the_ones_application_code_imports():
+    assert load_dds_interface(INTERFACE).Track is Track
+
+
+@pytest.mark.parametrize("format_line, expected", [
+    ("", "the generated file must set it"),
+    ("INTERFACE_FORMAT = 2", "reads format 1"),
+])
+def test_the_interface_format_is_checked(tmp_path, format_line, expected):
+    path = write_interface(tmp_path, f"""\
+        from core.DDS import DdsUnit
+        from core.DDS.idl_types.Example.example_topics import Status, Track
+        {format_line}
+        A = DdsUnit(unitCode=1, publish=(Track,))
+        B = DdsUnit(unitCode=2, subscribe=(Track,))
+        """, preamble=False)
+    with pytest.raises(ValueError, match=expected):
+        resolve_unit(path, "A")
+
+
+def test_an_interface_with_no_units_is_refused(tmp_path):
+    path = write_interface(tmp_path, "")
+    with pytest.raises(ValueError, match="defines no DdsUnit"):
+        resolve_unit(path, "A")
+
+
+def test_an_interface_defining_its_own_ddsunit_class_is_told_to_import_it(tmp_path):
+    path = write_interface(tmp_path, """\
+        from core.DDS.idl_types.Example.example_topics import Status, Track
+        INTERFACE_FORMAT = 1
+
+        class DdsUnit:
+            def __init__(self, unitCode, publish, subscribe):
+                self.unitCode, self.publish, self.subscribe = unitCode, publish, subscribe
+
+        SensorUnit = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Status,))
+        """, preamble=False)
+    with pytest.raises(ValueError, match="from core.DDS import DdsUnit"):
+        resolve_unit(path, "SensorUnit")
+
+
+def test_an_unknown_unit_lists_the_ones_that_exist():
     with pytest.raises(ValueError) as excinfo:
-        build(topics=[
-            {"topic": "Alpha", "type": "Track", "opcode": 0x1234},
-            {"topic": "Beta", "type": "Track", "opcode": 0x1234},
-        ])
-    message = str(excinfo.value)
-    assert "Alpha" in message and "Beta" in message
-    assert "0x1234" in message
+        resolve_unit(INTERFACE, "Nobody")
+    assert SENSOR in str(excinfo.value) and CONTROL in str(excinfo.value)
 
 
-def test_explicit_opcode_resolves_a_collision():
-    connection = build(topics=[
-        {"topic": "Alpha", "type": "Track", "opcode": 0x1234},
-        {"topic": "Beta", "type": "Track", "opcode": 0x1235},
-    ])
-    assert {t.topic: t.opcode for t in connection.config.topics} == {
-        "Alpha": 0x1234, "Beta": 0x1235}
+def test_duplicate_unit_codes_are_refused(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=7, publish=(Track,))
+        B = DdsUnit(unitCode=7, subscribe=(Track,))
+        """)
+    with pytest.raises(ValueError, match="both use unitCode 0x07"):
+        resolve_unit(path, "A")
 
 
-def test_duplicate_topic_name_is_rejected():
-    with pytest.raises(ValueError, match="already declared"):
-        build(topics=[
-            {"topic": TOPIC, "type": "Track"},
-            {"topic": TOPIC, "type": "Status"},
-        ])
+def test_one_unit_under_two_names_is_refused(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Track,))
+        B = DdsUnit(unitCode=2, subscribe=(Track,))
+        Alias = A
+        """)
+    with pytest.raises(ValueError, match="same DdsUnit"):
+        resolve_unit(path, "B")
+
+
+def test_two_classes_with_one_name_are_refused(tmp_path):
+    """A topic is named after its class, so these would be one topic on the
+    wire carried by two types -- or one module imported two ways."""
+    path = write_interface(tmp_path, """\
+        import rti.types as idl
+        from core.DDS.idl_types.Example import example_topics
+
+        @idl.struct
+        class Track:
+            x: idl.int32 = 0
+
+        A = DdsUnit(unitCode=1, publish=(example_topics.Track,))
+        B = DdsUnit(unitCode=2, subscribe=(Track,))
+        """)
+    with pytest.raises(ValueError, match="two different classes"):
+        resolve_unit(path, "A")
+
+
+def test_a_unit_with_no_peers_is_refused(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Track,))
+        B = DdsUnit(unitCode=2, publish=(Status,))
+        """)
+    with pytest.raises(ValueError, match="no peers"):
+        resolve_unit(path, "A")
+
+
+def test_dangling_topics_are_warned_about(tmp_path, caplog):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Track, Status))
+        B = DdsUnit(unitCode=2, subscribe=(Track,))
+        """)
+    with caplog.at_level(logging.WARNING, logger="connmgr.dds"):
+        resolve_unit(path, "A")
+    assert any("publishes 'Status', but no other unit subscribes it" in r.message for r in caplog.records)
+
+
+def test_a_relative_import_is_refused_with_the_reason(tmp_path):
+    (tmp_path / "topics.py").write_text("X = 1\n", encoding="utf-8")
+    path = write_interface(tmp_path, """\
+        from core.DDS import DdsUnit
+        from .topics import X
+        INTERFACE_FORMAT = 1
+        """, preamble=False)
+    with pytest.raises(ImportError, match="absolute module name"):
+        load_dds_interface(path)
+
+
+def test_a_missing_interface_file_is_named(tmp_path):
+    with pytest.raises(FileNotFoundError, match="DDS Interface not found"):
+        load_dds_interface(str(tmp_path / "nowhere.py"))
+
+
+def test_publishing_and_subscribing_one_topic_is_both(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Track,))
+        B = DdsUnit(unitCode=2, publish=(Track,), subscribe=(Track,))
+        """)
+    (spec,) = resolve_unit(path, "A").topics
+    assert spec.direction is TopicDirection.BOTH
+    assert (spec.publishers, spec.subscribers) == (("B",), ("B",))
 
 
 # --------------------------------------------------------------------------- #
-# Config validation
+# Config
 # --------------------------------------------------------------------------- #
-def test_topics_are_rejected_on_a_non_dds_protocol():
-    config = dds_config(protocol="udp", side="receiver")
-    with pytest.raises(ValueError, match="only meaningful on a 'dds' connection"):
-        ConnectionConfig.from_json(config)
+def test_a_dds_config_is_one_unit_of_an_interface():
+    config = ConnectionConfig.from_json(dds_config())
+    assert config.protocol is Protocol.DDS
+    assert (config.side, config.ip, config.local_ip) == (None, None, None)
+    assert config.unitCode == SENSOR_CODE
+    assert list(config.connections) == [CONTROL]
+    assert config.connections[CONTROL].unitCode == CONTROL_CODE
+    assert config.dds.unit == SENSOR
 
 
-def test_a_dds_connection_needs_topics():
-    with pytest.raises(ValueError, match=r"config\['topics'\]"):
-        build(topics=[])
+def test_unit_id_is_accepted_for_unit():
+    config = ConnectionConfig.from_json({"protocol": "dds", "unit_id": CONTROL, "dds_interface": INTERFACE})
+    assert config.unitCode == CONTROL_CODE
 
 
-@pytest.mark.parametrize("echo_key", ["echo_opcode", "recv_echo_opcode", "EchoInterval"])
-def test_echo_is_rejected_on_dds_at_connection_level(echo_key):
-    """The echo lifecycle transmits raw bytes; a DataWriter cannot accept them,
-    so an echo here would never heartbeat and its watchdog would then drop
-    every unit. Better a load error than a connection that dies on a timer."""
-    with pytest.raises(ValueError, match="not supported on a 'dds' connection"):
-        ConnectionConfig.from_json(dds_config(**{echo_key: 5}))
-
-
-def test_echo_is_rejected_on_dds_inside_a_unit_block():
+@pytest.mark.parametrize("missing", ["unit", "dds_interface"])
+def test_unit_and_interface_are_required(missing):
     config = dds_config()
-    config["connections"][PEER_NAME]["echo_opcode"] = 9
-    with pytest.raises(ValueError, match="not supported on a 'dds' connection"):
+    del config[missing]
+    with pytest.raises(ValueError, match="protocol 'dds' needs"):
         ConnectionConfig.from_json(config)
 
 
-def test_all_units_must_share_a_domain_id():
-    connection = build(connections={
-        "A": {"port": 77, "unitCode": 7},
-        "B": {"port": 78, "unitCode": 8},
-    })
-    with pytest.raises(ValueError, match="must share a domain id"):
-        _ = connection.domain_id
+@pytest.mark.parametrize("key, value", [
+    ("side", "publisher"), ("ip", "0.0.0.0"), ("local_ip", "0.0.0.0"), ("unitCode", 22),
+    ("connections", {"Peer": {"port": 0, "unitCode": 7}}), ("topics", []),
+    ("idl_modules", ["x"]), ("idl_file", "x.py"), ("Structures", ["x"]),
+    ("echo_opcode", 5), ("EchoInterval", 1.0),
+])
+def test_socket_and_hand_routed_keys_are_refused(key, value):
+    """A DDS node has no socket to describe, and its routing is the Interface's
+    to say: each of these is refused with the reason, never silently ignored."""
+    with pytest.raises(ValueError, match="protocol 'dds' does not accept") as excinfo:
+        ConnectionConfig.from_json(dds_config(**{key: value}))
+    assert repr(key) in str(excinfo.value)
 
 
-def test_domain_id_comes_from_the_port():
-    assert build().domain_id == TEST_DOMAIN
+def test_topics_are_refused_on_socket_protocols_too():
+    config = {"protocol": "tcp", "side": "server", "ip": "127.0.0.1", "unitCode": 1,
+              "connections": {"Peer": {"port": 5000, "unitCode": 2}}, "topics": []}
+    with pytest.raises(ValueError, match="only DDS has topics"):
+        ConnectionConfig.from_json(config)
+
+
+def test_domain_and_qos_file_default_to_the_constants():
+    config = ConnectionConfig.from_json(dds_config())
+    assert config.dds.domain_id == DEFAULT_DOMAIN_ID
+    assert config.dds.qos_file == DEFAULT_QOS_FILE
+    assert DEFAULT_QOS_FILE.is_absolute() and DEFAULT_QOS_FILE.is_file()
+    assert config.dds.qos_profile is None
+
+
+def test_domain_and_qos_file_can_still_be_overridden():
+    config = ConnectionConfig.from_json(dds_config(domain_id=TEST_DOMAIN, qos_file=QOS_FILE,
+                                                   qos_profile="MyLib::Reliable"))
+    assert (config.dds.domain_id, config.dds.qos_profile) == (TEST_DOMAIN, "MyLib::Reliable")
+    assert config.dds.qos_file == Path(QOS_FILE).resolve()
+    assert config.ports == [TEST_DOMAIN], "a DDS endpoint's port is its domain"
+
+
+@pytest.mark.parametrize("bad", [-1, "7", True, 1.5])
+def test_a_bad_domain_id_is_refused(bad):
+    with pytest.raises(ValueError, match="domain_id"):
+        ConnectionConfig.from_json(dds_config(domain_id=bad))
+
+
+def test_a_missing_qos_file_fails_at_load():
+    with pytest.raises(FileNotFoundError, match="qos_file"):
+        ConnectionConfig.from_json(dds_config(qos_file="core/configs/qos/does_not_exist.xml"))
+
+
+def test_an_unknown_qos_profile_fails_at_create_naming_the_files_profiles():
+    with pytest.raises(ValueError) as excinfo:
+        build(qos_profile="MyLib::Nope")
+    message = str(excinfo.value)
+    assert "MyLib::Nope" in message and "MyLib::Reliable" in message
+    assert "BuiltinQosLib::" not in message, "RTI's built-in profiles would bury the file's own"
+
+
+def test_a_builtin_qos_profile_is_accepted():
+    build(qos_profile="BuiltinQosLib::Generic.StrictReliable")
 
 
 # --------------------------------------------------------------------------- #
-# Direction and capabilities
+# Capabilities: the union of this unit's topic directions
 # --------------------------------------------------------------------------- #
-def test_direction_defaults_from_side():
-    publisher = build(side="publisher")
-    assert publisher.config.topics[0].direction is TopicDirection.PUBLISH
-    subscriber = build(side="subscriber")
-    assert subscriber.config.topics[0].direction is TopicDirection.SUBSCRIBE
-
-
-def test_explicit_direction_overrides_side():
-    connection = build(
-        side="publisher",
-        topics=[{"topic": TOPIC, "type": "Track", "direction": "both"}])
-    topic = connection.config.topics[0]
-    assert topic.publishes and topic.subscribes
-
-
-def test_capabilities_are_the_union_of_topic_directions():
-    """A subscribe-only DDS connection must not advertise itself as a sender --
-    that is what stops CompositeUnit picking it as one."""
-    subscriber = build(side="subscriber")
-    assert (subscriber.can_send, subscriber.can_receive) == (False, True)
-
-    publisher = build(side="publisher")
-    assert (publisher.can_send, publisher.can_receive) == (True, False)
-
-    duplex = build(topics=[
-        {"topic": TOPIC, "type": "Track", "direction": "subscribe"},
-        {"topic": STATUS_TOPIC, "type": "Status", "direction": "publish"},
-    ])
-    assert (duplex.can_send, duplex.can_receive) == (True, True)
-
-
-def test_bad_direction_is_rejected():
-    with pytest.raises(ValueError, match="is not one of"):
-        build(topics=[{"topic": TOPIC, "type": "Track", "direction": "sideways"}])
+def test_capabilities_follow_the_interface(tmp_path):
+    """A subscribe-only unit must not advertise itself as a sender -- that is
+    what stops CompositeUnit picking it as one."""
+    assert (build(SENSOR).can_send, build(SENSOR).can_receive) == (True, True)
+    path = write_interface(tmp_path, THREE_UNITS)
+    assert (build("A", path).can_send, build("A", path).can_receive) == (True, False)
+    assert (build("B", path).can_send, build("B", path).can_receive) == (False, True)
 
 
 # --------------------------------------------------------------------------- #
-# QoS: the topic_filter fix
+# QoS: topic filters, with and without a named profile
 # --------------------------------------------------------------------------- #
 def test_topic_filter_is_honored_and_the_profile_only_lookup_is_not():
     """
@@ -235,264 +450,330 @@ def test_topic_filter_is_honored_and_the_profile_only_lookup_is_not():
     profile's baseline. Only the topic-aware accessor sees the override.
     """
     provider = dds.QosProvider(QOS_FILE)
-    baseline = provider.set_topic_datawriter_qos("MyLib::Reliable", TOPIC)
-    filtered = provider.set_topic_datawriter_qos("MyLib::Reliable", STATUS_TOPIC)
-    profile_only = provider.datawriter_qos_from_profile("MyLib::Reliable")
-
-    assert filtered.history.depth == 37, "the topic_filter override should apply"
-    assert baseline.history.depth == 10, "an unfiltered topic keeps the baseline"
-    assert profile_only.history.depth == 10, "profile-only lookup is blind to the filter"
+    assert provider.set_topic_datawriter_qos("MyLib::Reliable", "Status").history.depth == 37
+    assert provider.set_topic_datawriter_qos("MyLib::Reliable", "Track").history.depth == 10
+    assert provider.datawriter_qos_from_profile("MyLib::Reliable").history.depth == 10
 
 
-def test_qos_for_prefers_the_topic_aware_accessor():
-    connection = build(qos_file=QOS_FILE, qos_profile="MyLib::Reliable")
-    connection._qos_provider = connection._load_qos_provider()
-    assert connection._qos_for("datawriter", STATUS_TOPIC).history.depth == 37
-    assert connection._qos_for("datawriter", TOPIC).history.depth == 10
-
-
-def test_qos_for_returns_none_without_a_qos_file():
-    connection = build()
-    assert connection._load_qos_provider() is None
-    assert connection._qos_for("datawriter", TOPIC) is None
-
-
-def test_missing_qos_file_fails_loudly():
-    connection = build(qos_file="core/configs/qos/does_not_exist.xml")
-    with pytest.raises(FileNotFoundError, match="qos_file"):
-        connection._load_qos_provider()
+@pytest.mark.parametrize("profile", [None, "MyLib::Reliable"])
+def test_entity_qos_honors_topic_filters_with_or_without_a_profile(profile):
+    """With no profile named, the file's default profile is used -- through the
+    topic-aware `get_topic_*_qos`, not the filter-blind `.datawriter_qos`."""
+    overrides = {} if profile is None else {"qos_profile": profile}
+    connection = build(SENSOR, **overrides)
+    assert connection._qos_for("datawriter", "Status").history.depth == 37
+    assert connection._qos_for("datawriter", "Track").history.depth == 10
 
 
 # --------------------------------------------------------------------------- #
-# Types
+# Selectors: topics, not opcodes
 # --------------------------------------------------------------------------- #
-def test_type_resolution_finds_the_class_in_the_named_module():
-    connection = build()
-    connection._type_modules = connection._import_all((TYPE_MODULE,))
-    resolved = connection._resolve_type(connection.config.topics[0])
-    idl.get_type_support(resolved)
-    assert resolved.__name__ == "Track"
+@pytest.mark.parametrize("selector", [Track, Track(), "Track"])
+def test_a_topic_is_selected_by_class_sample_or_name(selector):
+    assert build()._message_key(selector) == "Track"
 
 
-def test_unknown_type_names_the_topic_and_what_is_available():
-    connection = build(topics=[{"topic": TOPIC, "type": "Nonexistent"}])
-    connection._type_modules = connection._import_all((TYPE_MODULE,))
+def test_an_opcode_is_refused_with_the_reason():
+    with pytest.raises(TypeError, match="DDS has no opcodes"):
+        build()._message_key(0x12)
+
+
+@pytest.mark.parametrize("selector", ["Nope", Header])
+def test_an_unknown_topic_lists_the_units_topics(selector):
     with pytest.raises(ValueError) as excinfo:
-        connection._resolve_type(connection.config.topics[0])
-    message = str(excinfo.value)
-    assert "Nonexistent" in message and TOPIC in message and "Track" in message
+        build()._message_key(selector)
+    assert "Track" in str(excinfo.value) and "Status" in str(excinfo.value)
 
 
-def test_a_class_without_idl_struct_is_rejected():
-    connection = build(topics=[{"topic": TOPIC, "type": "NotAType"}])
-
-    class NotAType:
-        pass
-
-    module = type("fake", (), {"NotAType": NotAType})
-    connection._type_modules = [module]
-    with pytest.raises(TypeError, match="@idl.struct"):
-        connection._resolve_type(connection.config.topics[0])
-
-
-def test_type_resolver_escape_hatch_wins(track_type):
-    connection = build(type_resolver=lambda topic_name: track_type)
-    assert connection._resolve_type(connection.config.topics[0]) is track_type
+def test_a_second_copy_of_a_topic_class_is_named_as_such():
+    """The trap a path-loaded module sets: same class name, different object.
+    It must say so, not report an unknown topic."""
+    source = REPO_ROOT / "core" / "DDS" / "idl_types" / "Example" / "example_topics.py"
+    spec = importlib.util.spec_from_file_location("_second_copy_of_example_topics", source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        with pytest.raises(TypeError, match="two copies of one generated module"):
+            build()._message_key(module.Track)
+        with pytest.raises(TypeError, match="two copies of one generated module"):
+            build().send_message(module.Track())
+    finally:
+        sys.modules.pop("_second_copy_of_example_topics", None)
 
 
 # --------------------------------------------------------------------------- #
-# Header extraction, routing, self-echo
+# Inbound: who sent it
 # --------------------------------------------------------------------------- #
-def test_sending_unit_comes_from_the_header(track_type):
-    connection = build()
-    sample = track_type()
-    sample.header.source_unit = PEER_CODE
-    assert connection._sending_unit(sample, connection.config.topics[0]) == PEER_NAME
+def test_the_sender_comes_from_the_header():
+    control = build(CONTROL)
+    assert control._sending_unit(sample_from(Track, SENSOR_CODE), spec_of(control, "Track")) == SENSOR
 
 
-def test_unconfigured_source_unit_is_dropped(track_type):
-    connection = build(connections={
-        PEER_NAME: {"port": TEST_DOMAIN, "unitCode": PEER_CODE},
-        "Other": {"port": TEST_DOMAIN, "unitCode": 9},
-    })
-    sample = track_type()
-    sample.header.source_unit = 200  # nobody's
-    assert connection._sending_unit(sample, connection.config.topics[0]) is None
+def test_a_headerless_sample_falls_back_to_the_sole_publisher():
+    control = build(CONTROL, header={"field": "no_such_header"})
+    assert control._sending_unit(Track(), spec_of(control, "Track")) == SENSOR
 
 
-def test_a_headerless_sample_falls_back_to_the_single_configured_unit(track_type):
-    """Bring-up case: a type without our header still routes when there is only
-    one unit it could possibly have come from."""
-    connection = build(header={"field": "no_such_header"})
-    assert connection._sending_unit(track_type(), connection.config.topics[0]) == PEER_NAME
+def test_with_several_publishers_the_header_decides(tmp_path):
+    b = build("B", write_interface(tmp_path, THREE_UNITS))
+    assert b._sending_unit(sample_from(Track, 0x0C), spec_of(b, "Track")) == "C"
+    assert b._sending_unit(sample_from(Track, 0x0A), spec_of(b, "Track")) == "A"
 
 
-def test_a_headerless_sample_with_several_units_is_dropped(track_type):
-    connection = build(
-        header={"field": "no_such_header"},
-        connections={
-            PEER_NAME: {"port": TEST_DOMAIN, "unitCode": PEER_CODE},
-            "Other": {"port": TEST_DOMAIN, "unitCode": 9},
-        })
-    assert connection._sending_unit(track_type(), connection.config.topics[0]) is None
+def test_several_publishers_and_no_header_fails_at_load(tmp_path):
+    """Every sample would be unattributable -- a load error, not silent drops."""
+    with pytest.raises(ValueError, match=r"2 publishers \['A', 'C'\]"):
+        build("B", write_interface(tmp_path, THREE_UNITS), header={"field": "no_such_header"})
 
 
-def test_dispatch_delivers_under_the_topics_opcode(track_type):
-    """The whole point of the surrogate: a standing callback registered for a
-    topic's opcode receives that topic's samples."""
-    connection = build()
+def test_a_topic_the_unit_also_publishes_needs_the_header(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Track,))
+        B = DdsUnit(unitCode=2, publish=(Track,), subscribe=(Track,))
+        """)
+    with pytest.raises(ValueError, match="hears its own writes"):
+        build("A", path, header={"field": "no_such_header"})
+
+
+def test_a_units_own_samples_are_filtered(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Track,))
+        B = DdsUnit(unitCode=2, publish=(Track,), subscribe=(Track,))
+        """)
+    a = build("A", path)
+    assert a._sending_unit(sample_from(Track, 1), spec_of(a, "Track")) is None
+    assert a._sending_unit(sample_from(Track, 2), spec_of(a, "Track")) == "B"
+
+
+def test_a_peer_the_interface_does_not_list_as_publisher_is_dropped_and_warned_once(tmp_path, caplog):
+    b = build("B", write_interface(tmp_path, THREE_UNITS))
+    with caplog.at_level(logging.WARNING, logger="connmgr.dds"):
+        for _ in range(3):
+            assert b._sending_unit(sample_from(Status, 0x0C), spec_of(b, "Status")) is None
+    warnings = [r for r in caplog.records if "does not list C as publishing it" in r.message]
+    assert len(warnings) == 1, "a cause is warned about once, not once per sample"
+
+
+def test_a_sample_from_an_unknown_unit_code_is_dropped():
+    control = build(CONTROL)
+    assert control._sending_unit(sample_from(Track, 0x99), spec_of(control, "Track")) is None
+
+
+# --------------------------------------------------------------------------- #
+# Receiving through the public API
+# --------------------------------------------------------------------------- #
+def test_a_callback_registered_by_class_gets_the_topics_samples():
+    control = build(CONTROL)
+    received: list = []
+    done = threading.Event()
+    control.handle_on_receive(Track, lambda message: (received.append(message), done.set()))
+    dispatch(control, SENSOR, "Track", sample_from(Track, SENSOR_CODE, track_id=41))
+    assert done.wait(5), "the callback registered for Track never fired"
+    assert received[0].track_id == 41
+
+
+def test_receive_message_by_class_returns_the_sample(receive_in_background):
+    control = build(CONTROL)
+    background = receive_in_background(control, Track, None, 5.0)
+    threading.Event().wait(0.3)  # subscribe-or-drop: let the subscription arm
+    dispatch(control, SENSOR, "Track", sample_from(Track, SENSOR_CODE, track_id=7))
+    background.join()
+    assert background.result.track_id == 7
+
+
+def test_route_decorator_takes_a_topic_class(manager):
     received: list = []
     done = threading.Event()
 
-    connection.handle_on_receive(OPCODE, lambda message: (received.append(message), done.set()),
-                                 unit_name=PEER_NAME)
-    sample = track_type(track_id=41)
-    sample.header.source_unit = PEER_CODE
-    dispatch(connection, PEER_NAME, OPCODE, sample)
+    class SensorHandler(UnitHandler):
+        unitCode = SENSOR_CODE
 
-    assert done.wait(5), "callback registered on the topic's opcode never fired"
-    assert received[0].track_id == 41
-    connection.close()
+        @route(Track)
+        def on_track(self, message):
+            received.append(message)
+            done.set()
 
-
-def test_a_sample_from_ourselves_is_filtered(track_type):
-    """DDS delivers a participant's own writes back to its own readers, so a
-    duplex connection hears itself. `source_unit` is what says so."""
-    connection = build()
-    sample = track_type()
-    sample.header.source_unit = OWN_CODE
-    assert sample.header.source_unit == connection._own_unit_code
-    # `_read_loop` skips these before dispatch; assert the discriminator it uses.
-    assert connection._sending_unit(sample, connection.config.topics[0]) != PEER_NAME
+    control = manager.create("control", dds_config(CONTROL), handler_class=SensorHandler)
+    dispatch(control, SENSOR, "Track", sample_from(Track, SENSOR_CODE, track_id=5))
+    assert done.wait(5) and received[0].track_id == 5
 
 
-def test_custom_header_field_names(track_type):
-    connection = build(header={"field": "header", "source_unit": "destination_unit"})
-    sample = track_type()
-    sample.header.destination_unit = PEER_CODE
-    assert connection._sending_unit(sample, connection.config.topics[0]) == PEER_NAME
+def test_subscribing_to_a_topic_the_unit_only_publishes_fails_loudly():
+    with pytest.raises(ValueError, match="does not subscribe 'Status'"):
+        build(CONTROL).handle_on_receive(Status, lambda message: None)
+
+
+def test_subscribing_for_a_unit_that_does_not_publish_the_topic_fails_loudly(tmp_path):
+    b = build("B", write_interface(tmp_path, THREE_UNITS))
+    with pytest.raises(ValueError, match="'C' does not publish 'Status'"):
+        b.handle_on_receive(Status, lambda message: None, unit_name="C")
+
+
+def test_unit_name_comes_from_the_interface_only_when_unambiguous(tmp_path):
+    b = build("B", write_interface(tmp_path, THREE_UNITS))
+    b.handle_on_receive(Status, lambda message: None)  # only A publishes Status
+    with pytest.raises(ValueError, match="unit_name is required"):
+        b.handle_on_receive(Track, lambda message: None)  # A and C both publish Track
+    b.handle_on_receive(Track, lambda message: None, unit_name="C")
 
 
 # --------------------------------------------------------------------------- #
-# Send path
+# Sending
 # --------------------------------------------------------------------------- #
-def test_outgoing_header_is_stamped(track_type):
-    connection = build()
-    sample = track_type()
-    connection._stamp_outgoing(sample, PEER_NAME)
-    assert sample.header.source_unit == OWN_CODE
-    assert sample.header.destination_unit == PEER_CODE
+def test_a_sample_is_sent_on_its_classs_topic_to_its_sole_subscriber():
+    sensor = build(SENSOR)
+    sensor._writers["Track"] = writer = RecordingWriter()
+    sample = Track(track_id=3)
+    sensor.send_message(sample)
+    assert writer.written == [sample]
+    assert (sample.header.source_unit, sample.header.destination_unit) == (SENSOR_CODE, CONTROL_CODE)
 
 
-def test_caller_set_header_values_are_not_overwritten(track_type):
-    connection = build()
-    sample = track_type()
-    sample.header.source_unit = 111
-    sample.header.destination_unit = 112
-    connection._stamp_outgoing(sample, PEER_NAME)
+def test_caller_set_header_values_are_not_overwritten():
+    sensor = build(SENSOR)
+    sensor._writers["Track"] = RecordingWriter()
+    sample = Track()
+    sample.header.source_unit, sample.header.destination_unit = 111, 112
+    sensor.send_message(sample)
     assert (sample.header.source_unit, sample.header.destination_unit) == (111, 112)
 
 
-def test_stamping_can_be_disabled(track_type):
-    connection = build(header={"stamp": False})
-    sample = track_type()
-    connection._stamp_outgoing(sample, PEER_NAME)
+def test_stamping_can_be_disabled():
+    sensor = build(SENSOR, header={"stamp": False})
+    sensor._writers["Track"] = RecordingWriter()
+    sample = Track()
+    sensor.send_message(sample)
     assert (sample.header.source_unit, sample.header.destination_unit) == (0, 0)
 
 
-def test_send_on_an_unknown_opcode_names_the_configured_topics(track_type):
-    connection = build(side="publisher")
-    with pytest.raises(ValueError) as excinfo:
-        connection._loop_thread.await_coroutine(
-            connection._do_send(PEER_NAME, track_type(), 0xABCD))
-    assert TOPIC in str(excinfo.value)
-
-
-def test_send_on_a_subscribe_only_topic_is_refused(track_type):
-    connection = build(side="subscriber")
-    with pytest.raises(ConnectionError, match="no DataWriter"):
-        connection._loop_thread.await_coroutine(
-            connection._do_send(PEER_NAME, track_type(), OPCODE))
+def test_send_before_start_says_so():
+    with pytest.raises(ConnectionError, match="start"):
+        build(SENSOR).send_message(Track())
 
 
 def test_send_refuses_raw_bytes():
-    connection = build(side="publisher")
-    connection._writers[TOPIC] = object()  # a writer exists; the payload is wrong
     with pytest.raises(TypeError, match="typed samples, not bytes"):
-        connection._loop_thread.await_coroutine(
-            connection._do_send(PEER_NAME, b"raw", OPCODE))
+        build(SENSOR).send_message(b"raw")
+
+
+def test_a_sample_must_match_the_topic_it_is_sent_on():
+    with pytest.raises(TypeError, match="carried by Track"):
+        build(SENSOR).send_message(Status(), "Track")
+
+
+def test_send_on_a_topic_the_unit_only_subscribes_is_refused():
+    with pytest.raises(ValueError, match="does not publish 'Status'"):
+        build(SENSOR).send_message(Status())
+
+
+def test_send_to_a_unit_that_does_not_subscribe_the_topic_is_refused(tmp_path):
+    a = build("A", write_interface(tmp_path, THREE_UNITS))
+    a._writers["Track"] = RecordingWriter()
+    with pytest.raises(ValueError, match="'C' does not subscribe 'Track'"):
+        a.send_message(Track(), unit_name="C")
+
+
+def test_periodic_sending_is_keyed_by_topic():
+    sensor = build(SENSOR)
+    sensor._writers["Track"] = writer = RecordingWriter()
+    sensor.periodic_sending(Track(track_id=3), None, 0.02)
+    deadline = threading.Event()
+    for _ in range(100):
+        if len(writer.written) >= 2:
+            break
+        deadline.wait(0.02)
+    assert sensor.stop_periodic(Track) is True, "stop_periodic(Track) must find the schedule"
+    assert len(writer.written) >= 2
 
 
 # --------------------------------------------------------------------------- #
-# Route validation (the IRS blocker)
+# Lifecycle
 # --------------------------------------------------------------------------- #
-def test_subscribing_to_a_configured_topic_is_allowed():
-    """Regression: this used to raise IRSNotFoundError for every DDS route,
-    because DDS registers no IRS layouts and the check was unconditional."""
-    connection = build()
-    connection._validate_route(PEER_NAME, (PEER_CODE, OPCODE))
+def test_read_loops_stop_before_the_participant_closes():
+    """The one teardown ordering RTI cannot do for us: a read loop's
+    ReadCondition sits on rti.asyncio's process-wide WaitSet, and cancelling the
+    loop is what detaches it -- so loops first, participant second."""
+    connection = build(CONTROL)
+    order: list = []
+
+    class FakeParticipant:
+        def close(self) -> None:
+            order.append(("participant.close", all(task.done() for task in tasks)))
+
+    async def read_loop() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("read loop stopped")
+
+    async def scenario() -> None:
+        tasks.append(connection._track(read_loop()))
+        connection._read_tasks.extend(tasks)
+        connection._participant = FakeParticipant()
+        await asyncio.sleep(0)  # let the loop start waiting
+        await connection._close_entities()
+
+    tasks: list = []
+    connection._loop_thread.await_coroutine(scenario())
+    assert order == ["read loop stopped", ("participant.close", True)]
+    assert connection._participant is None and connection._read_tasks == []
 
 
-def test_subscribing_to_an_unconfigured_opcode_still_fails_loudly():
-    connection = build()
-    with pytest.raises(ValueError) as excinfo:
-        connection._validate_route(PEER_NAME, (PEER_CODE, 0x4242))
-    message = str(excinfo.value)
-    assert TOPIC in message, "the error should name the topics that do exist"
-    assert "topic_opcode" in message
+def test_a_failed_start_closes_what_it_created(monkeypatch):
+    closed: list = []
 
+    class FakeParticipant:
+        implicit_publisher = implicit_subscriber = None
 
-def test_receive_message_accepts_a_dds_route(track_type, receive_in_background):
-    connection = build()
-    background = receive_in_background(connection, OPCODE, PEER_NAME, 5.0)
-    sample = track_type(track_id=7)
-    sample.header.source_unit = PEER_CODE
-    # Give the background subscription time to arm -- subscribe-or-drop.
-    threading.Event().wait(0.3)
-    dispatch(connection, PEER_NAME, OPCODE, sample)
-    background.join()
-    unit, message = background.result
-    assert unit == PEER_NAME and message.track_id == 7
-    connection.close()
+        def __init__(self, *args) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append(True)
+
+    def failing_topic(*args, **kwargs):
+        raise RuntimeError("topic creation failed")
+
+    monkeypatch.setattr(dds_module.dds, "DomainParticipant", FakeParticipant)
+    monkeypatch.setattr(dds_module.dds, "Topic", failing_topic)
+    live_before = dds_module._live_connections
+    connection = build(CONTROL)
+    with pytest.raises(RuntimeError, match="topic creation failed"):
+        connection.start()
+    assert closed == [True], "the participant created before the failure must be closed"
+    assert connection._participant is None and not connection._counted_live
+    assert dds_module._live_connections == live_before
 
 
 # --------------------------------------------------------------------------- #
 # Live domain (needs an RTI license)
 # --------------------------------------------------------------------------- #
 @requires_license
-def test_publish_and_subscribe_over_a_real_domain(manager, track_type):
+def test_two_units_talk_over_a_real_domain(manager):
     """
-    The end-to-end proof: two participants, one topic, a real sample.
+    The end-to-end proof: each unit gets exactly the entities the Interface
+    gives it, and samples flow both ways, attributed from their headers.
 
     This is what fails if `rti.asyncio` stops being imported (no
-    `take_data_async`) or if route validation regresses -- neither of which any
-    of the offline tests above can catch.
+    `take_data_async`) -- which none of the offline tests above can catch.
     """
-    def config(own, peer_name, peer_code, direction):
-        return {
-            "protocol": "dds",
-            "side": "publisher" if direction == "publish" else "subscriber",
-            "ip": "0.0.0.0",
-            "unitCode": own,
-            "connections": {peer_name: {"port": TEST_DOMAIN, "unitCode": peer_code}},
-            "idl_modules": [TYPE_MODULE],
-            "qos_file": QOS_FILE,
-            "qos_profile": "MyLib::Reliable",
-            "topics": [{"topic": TOPIC, "type": "Track", "direction": direction}],
-        }
+    sensor = manager.create("sensor", dds_config(SENSOR, domain_id=TEST_DOMAIN))
+    control = manager.create("control", dds_config(CONTROL, domain_id=TEST_DOMAIN))
+    control.start()
+    sensor.start()
+    assert (set(sensor._writers), set(sensor._readers)) == ({"Track"}, {"Status"})
+    assert (set(control._writers), set(control._readers)) == ({"Status"}, {"Track"})
 
-    subscriber = manager.create("sub", config(PEER_CODE, "Pub", OWN_CODE, "subscribe"))
-    publisher = manager.create("pub", config(OWN_CODE, "Sub", PEER_CODE, "publish"))
-    subscriber.start()
-    publisher.start()
     # TRANSIENT_LOCAL durability in the profile means a sample published before
     # discovery completes is still delivered, so no sleep is load-bearing here.
-    unit, message = subscriber.receive_message(
-        OPCODE, timeout=15,
-        trigger_function=lambda: publisher.send_message(
-            track_type(track_id=99, x=1.5), opcode=OPCODE, unit_name="Sub"))
+    track = control.receive_message(
+        Track, timeout=15,
+        trigger_function=lambda: sensor.send_message(Track(track_id=99, x=1.5)))
+    assert track.track_id == 99 and track.x == 1.5
+    assert (track.header.source_unit, track.header.destination_unit) == (SENSOR_CODE, CONTROL_CODE)
 
-    assert unit == "Pub", "the sender should be identified from header.source_unit"
-    assert message.track_id == 99 and message.x == 1.5
-    assert message.header.source_unit == OWN_CODE
-    assert message.header.destination_unit == PEER_CODE
+    status = sensor.receive_message(
+        Status, timeout=15,
+        trigger_function=lambda: control.send_message(Status(healthy=False, message="degraded")))
+    assert status.message == "degraded" and status.header.source_unit == CONTROL_CODE

@@ -13,7 +13,8 @@ rotting.
 
 ```
 IRS            standalone -- imports nothing else in this repo
-DDS            standalone -- @idl.struct type modules; imports only rti (third-party)
+DDS            standalone -- @idl.struct type modules + the DDS Interface vocabulary (DdsUnit);
+               imports only rti (third-party), and only in Structures/
   ^
   |
 core           uses IRS + DDS + connections + tools + core/annotations.py
@@ -29,15 +30,18 @@ gsim           uses core (the whole package -- connections, IRS, tools, annotati
   vocabulary (`IrsMessage`, `UnitCode`, `OpCode`, `Namespace`, `NamespaceScope`) for exactly this
   reason: those names are needed by `IRS.REGISTRY` / `IRS.irs_parser` internally, so they live
   inside IRS rather than being borrowed from `core.annotations`.
-- **`core/DDS`** is the topic-based counterpart to `IRS`, and is deliberately almost empty. It holds
-  `Structures/` -- plain Python modules of `@idl.struct` classes -- and no registry, no engine, and
-  no code of its own. The asymmetry with `IRS` is the whole point: a binary IRS payload carries no
-  type information, so *something* has to look up a layout by `(unitCode, opCode)`; a DDS sample
-  carries its type on the wire and RTI matches publishers to subscribers itself, so there is nothing
-  to register. `core/DDS/__init__.py` does not import `rti`, so `core.DDS` stays importable in a
-  process without Connext; only the `Structures/` modules themselves need it. `core.connections.dds`
-  imports the named modules (see `core/connections/CLAUDE.md` section 9) -- the arrow points from
-  `connections` into `DDS`, never the reverse.
+- **`core/DDS`** is the topic-based counterpart to `IRS`, and is deliberately small. It holds
+  `Structures/` -- plain Python modules of `@idl.struct` classes -- and `interface.py`, the
+  vocabulary (`DdsUnit`) that a generated **DDS Interface** is written in: the system contract
+  naming each unit, its code, and the topic classes it publishes and subscribes. There is still no
+  TYPE registry and no engine. The asymmetry with `IRS` is the whole point: a binary IRS payload
+  carries no type information, so *something* has to look up a layout by `(unitCode, opCode)`; a
+  DDS sample carries its type on the wire and RTI matches publishers to subscribers itself. The
+  Interface is a *routing* contract, not a type registry. `core/DDS/__init__.py` and
+  `interface.py` do not import `rti`, so `core.DDS` stays importable in a process without Connext;
+  only the `Structures/` modules (and the Interfaces importing them) need it.
+  `core.connections.dds_config` loads and validates an Interface (see `core/connections/CLAUDE.md`
+  section 9) -- the arrow points from `connections` into `DDS`, never the reverse.
 - **`core/annotations.py`** re-exports those same names (`from core.IRS.annotations import ...`)
   purely so `core.connections` and `core.tools` keep one familiar import (`from core.annotations
   import *`) for both the IRS vocabulary and the connections-specific `Task`/`Future` aliases. The
@@ -90,9 +94,17 @@ grep -rn "core\.IRS" core/IRS/Structures --include=*.py
 # must print nothing -- structures files spell it `from IRS...`, see "One IRS, two spellings" above
 ```
 
+`core/DDS` follows the same rule, and is checked the same way:
+
+```bash
+grep -rn "^from core\.\(annotations\|connections\|tools\|IRS\)\|^import core\.\(annotations\|connections\|tools\|IRS\)" core/DDS --include=*.py
+# must print nothing -- DDS imports only itself and rti; connections imports DDS, never the reverse
+```
+
 If IRS ever needs something from `connections`, `tools`, or `core/annotations.py`, that is
 backwards -- the fix is to move the shared piece into `IRS` (as was done for the type aliases in
-`core/IRS/annotations.py`), not to add the import.
+`core/IRS/annotations.py`), not to add the import. The same holds for `DDS`: `DdsUnit` lives in
+`core/DDS/interface.py` precisely so generated Interfaces never import `core.connections`.
 
 Structures files are the one deliberate exception: those are user-defined message layout files, not
 part of the IRS engine itself. They are loaded as plugins (by `tools.general.import_modules`, on

@@ -4,28 +4,77 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`core/DDS` holds hand-written DDS type definitions used by `core.connections.dds.DdsConnection`. It
-is the topic-based counterpart to `core/IRS`, and is deliberately much smaller: no engine, no parser,
-no registry -- just `Structures/`, a package of plain Python modules defining `@idl.struct` classes.
+`core/DDS` holds what a DDS system is *described* in, as opposed to how a connection runs it:
 
-Standalone in the repo's dependency graph (see root `CLAUDE.md`): `core/DDS` imports nothing else in
-this repo. `core/DDS/__init__.py` itself must never import `rti`, so `core.DDS` stays importable in a
-process without Connext installed -- only the individual `Structures/` modules need it, and only once
-someone actually imports one.
+- `idl_types/` -- plain Python modules of `@idl.struct` topic types (`Example/example_topics.py`).
+- `interface.py` -- `DdsUnit`, the vocabulary a **DDS Interface** is written in, plus
+  `INTERFACE_FORMAT`. Re-exported by `__init__.py`.
+- `Interfaces/Example/example_interface.py` -- the reference DDS Interface: the exact shape the
+  system-XML -> Python XSLT (written and owned by the user, not in this repo) must produce.
 
-## Why there is no registry
+Standalone in the repo's dependency graph (see root `CLAUDE.md`): nothing here imports
+`core.connections`, `core.tools`, `core.IRS` or `core.annotations`. `__init__.py` and
+`interface.py` must never import `rti`, so `core.DDS` stays importable in a process without Connext
+-- only the `idl_types` modules (and the Interfaces that import them) need it.
+`core.connections.dds_config` is what loads and validates an Interface; the arrow points from
+`connections` into `DDS`, never back.
 
-If you've written an `IRS/Structures` file before, the instinct here will be to look for
-`register_message` or something like it. There isn't one, and that's not an oversight.
+## The DDS Interface
 
-IRS needs a registry because a binary payload carries no type information of its own: something has
-to look up a layout by `(unitCode, opCode)` before the bytes can even be parsed, or parsing is simply
-impossible. DDS is the opposite -- the type travels with the sample on the wire, and RTI Connext
-matches publishers to subscribers on `(topic name, type name, QoS compatibility)` itself, during
-discovery. Nothing in this repo needs to know that mapping in advance.
+A generated module, one per system, naming every unit, its wire unit code, and the topic classes
+it publishes and subscribes:
 
-So a file under `Structures/` is exactly what an RTI Connext Python developer writes on any project,
-with nothing of this repo's own layered on top:
+```python
+from core.DDS import DdsUnit
+from my_icd.topics import Status, Track      # ABSOLUTE imports
+
+INTERFACE_FORMAT = 1
+SYSTEM = "ExampleSystem"                     # optional, used in logs
+
+SensorUnit = DdsUnit(unitCode=0x01, publish=(Track,), subscribe=(Status,))
+ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
+```
+
+A connection then names only which unit it is: `{"protocol": "dds", "unit": "SensorUnit",
+"dds_interface": "<path to this file>"}`. Its own code, its peers, its topics and therefore its
+DataWriters/DataReaders all follow from the Interface.
+
+The rules, each enforced -- by `DdsUnit.__post_init__` at the Interface's own import, or by
+`dds_config.resolve_unit` when a config loads it:
+
+- **A unit's name is its variable.** `DdsUnit` deliberately has no `name` field. One object bound
+  to two names is an error, and so are two units sharing a `unitCode` (it identifies senders).
+- **A topic's name is its class's `__name__`.** There is no topic table: the classes ARE the
+  topics. Two different classes sharing a `__name__` are an error -- they would be one topic on the
+  wire carried by two types.
+- **Import `DdsUnit` from `core.DDS`, never define it.** The loader finds units by `isinstance`
+  against this one class; an Interface with its own `class DdsUnit` gets an error saying so.
+- **Imports are absolute.** The Interface's topic classes must be the very objects the application
+  builds samples from. An Interface is loaded by *path*, so it has no package to be relative to,
+  and giving it one would load a private second copy of every class -- the same two-module-objects
+  failure `core/IRS/_alias.py` exists to prevent for IRS. The loader refuses relative imports and
+  says why.
+- **`(Track)` is not a tuple.** `DdsUnit` accepts a lone class or any iterable for
+  `publish`/`subscribe`, so a missing trailing comma in generated code cannot change the contract.
+- **`INTERFACE_FORMAT`** must equal `interface.INTERFACE_FORMAT`. Bump both, and the XSLT, if the
+  shape ever changes; an Interface written for another format is refused rather than half-read.
+
+## There is no "topic" marker on a struct
+
+RTI's `@idl.struct` takes only extensibility, `type_name`, data-representation and XTypes
+annotations -- nothing says "this struct is a topic" versus "this struct is nested inside one". So
+the generated type modules cannot tell the two apart, and do not need to: a struct becomes a topic
+only by appearing in some `DdsUnit`'s `publish`/`subscribe`. `Header` in the example appears in
+none, so no unit ever gets an entity for it.
+
+## Still no TYPE registry
+
+IRS needs a registry because a binary payload carries no type information of its own: something
+has to look up a layout by `(unitCode, opCode)` before the bytes can be parsed at all. DDS is the
+opposite -- the type travels with the sample, and RTI matches publishers to subscribers on (topic
+name, type name, QoS compatibility) during discovery. The DDS Interface is a *routing* contract
+(who publishes and subscribes what), not a type registry; a type module stays exactly what an RTI
+Connext Python developer writes on any project:
 
 ```python
 import rti.types as idl
@@ -42,42 +91,28 @@ class Track:
     x: float = 0.0
 ```
 
-`@idl.struct` builds the TypeSupport Connext needs to serialize the class and publish its definition
-during discovery. Importing the module is the entire job -- there is nothing else to call.
-
-## How a module gets used
-
-A `DdsConnection` config names the module in `config['idl_modules']` -- either a dotted path
-(`core.DDS.Structures.Example.example_topics`) or an absolute file path for a type kept outside the
-repo -- and `DdsConnection` imports it in an executor (`connections/dds.py`,
-`_load_type_modules`/`_import_all`). Each entry in `config['topics']` then names one class from that
-module by its `type` key. See `core/DDS/Structures/Example/example_topics.py` for a worked example to
-copy from, and `core/connections/CLAUDE.md` §9 for the mechanics of how `DdsConnection` turns a topic
-list into DataWriters/DataReaders, derives its local routing opcode, and resolves QoS -- this file is
-about what lives in `core/DDS` and how to write a `Structures` module, not how the connection uses it.
-
 ## Two Python gotchas
 
 - **Nested struct members need `field(default_factory=...)`, not a bare instance.** `@idl.struct`
   builds a dataclass under the hood, so `header: Header = Header()` raises `ValueError: mutable
   default ... is not allowed` at import time. Always `header: Header = field(default_factory=Header)`.
 - **Include a `Header` struct with `source_unit`/`destination_unit` fields** (or whatever
-  `config['header']` on the connection is set to name instead). A DDS DataReader serves every
-  publisher on its topic at once and has no per-peer transport to infer a sender from, so
-  `DdsConnection` reads `source_unit` off the sample itself to work out which configured unit sent
-  it, and stamps both fields on the way out. A type with no such field only works when the connection
-  has exactly one configured unit.
+  `config['header']` on the connection names instead). A DataReader serves every publisher of its
+  topic at once, so the sample is the only thing that says who sent it. A topic with a single
+  publisher still routes without it, but one with several publishers -- or one a unit both
+  publishes and subscribes -- is refused at load if its type lacks the field.
 
 ## Two ways this fails silently
 
-Both produce the same symptom: discovery succeeds, the entities show up in RTI Admin Console, and no
-sample ever arrives -- with no error anywhere.
+Both produce the same symptom: discovery succeeds, the entities show up in RTI Admin Console, and
+no sample ever arrives -- with no error anywhere.
 
-- **Type name mismatch.** `@idl.struct` names the DDS type after the Python class by default. A peer
-  whose type came from real IDL may be advertising a different name (`MyModule::Track`); set
-  `type_name` on the topic's config entry when that's the case.
+- **Type name mismatch.** `@idl.struct` names the DDS type after the Python class. A peer whose
+  type came from real IDL may be advertising a different name (`MyModule::Track`); pin it on the
+  type with `@idl.struct(type_annotations=[idl.type_name("MyModule::Track")])`. The TOPIC name is
+  unaffected -- it stays the class name.
 - **Extensibility mismatch.** `idl.final` / `idl.extensible` / `idl.mutable` (passed via
   `@idl.struct(type_annotations=[...])`) must agree with what the peer's IDL declares.
 
-`rtiddsspy -domainId <N>` is the fastest way to check both: it shows the type name and extensibility
-the peer is actually advertising on the wire.
+`rtiddsspy -domainId <N>` is the fastest way to check both: it shows the type name and
+extensibility the peer is actually advertising on the wire.

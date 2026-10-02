@@ -1,6 +1,7 @@
 """
-`RouteTable` -- who owns a `(unit_code, opcode)` route, and the rule that
-exactly one thing does.
+`RouteTable` -- who owns a `(unit_code, key)` route, and the rule that
+exactly one thing does. The key is the opcode on IRS-framed links and the topic
+name on DDS; this module only ever hashes and compares it.
 
 `Connection` hands each inbound message to that route's owner: a parked
 `receive_message()` future if one is in flight, else a standing
@@ -28,15 +29,23 @@ from typing import Any, Callable
 from core.annotations import IrsMessage, OpCode, UnitCode
 
 UnitName = str
-RouteKey = tuple[UnitCode, OpCode]
+#: What names a message on a link: its opcode on IRS-framed links, its topic
+#: name on DDS (which puts no opcode on the wire -- the topic IS the message).
+MessageKey = OpCode | str
+RouteKey = tuple[UnitCode, MessageKey]
 ReceiveCallback = Callable[[IrsMessage], Any]
 ConnectCallback = Callable[[UnitName], Any]
+
+
+def describe_key(key: MessageKey) -> str:
+    """A message key as logs and errors spell it."""
+    return f"opcode={key:#06x}" if isinstance(key, int) else f"topic={key!r}"
 
 
 def _describe(route: RouteKey) -> str:
     """How a route is spelled in every error below -- one place, so the four
     refusals cannot drift apart."""
-    return f"(unit_code={route[0]}, opcode={route[1]})"
+    return f"(unit_code={route[0]}, {describe_key(route[1])})"
 
 
 class RouteTable:

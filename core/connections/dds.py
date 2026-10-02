@@ -1,125 +1,70 @@
 """
 RTI Connext DDS connection.
 
-DDS is data-centric and topic-based rather than socket/port based, but it still
-honors the same JSON config / unit-routing contract as everything else. Two
-things make that possible, and both are worth understanding before touching
-this file:
+A DDS node is configured as ONE UNIT of a DDS Interface -- the generated module
+that is the system contract (`core/DDS/interface.py`, `dds_config.py`) -- and
+everything else follows from that:
 
-  * A TOPIC is not a unit. On the framed protocols, inbound routing comes from
-    the transport -- which socket a message arrived on identifies the peer. A
-    DDS DataReader has no such property: it serves every publisher on its topic
-    at once. So topics and units are separate axes here (`config.topics` and
-    `config.connections`), and the sending unit is identified from the SAMPLE,
-    by reading `header.source_unit` off it.
+  * Entities. A DataWriter for each topic the unit publishes, a DataReader for
+    each topic it subscribes, and nothing else. A topic's name is its class's
+    name.
+  * Routing. DDS puts the topic, not an opcode, on the wire, so routes here are
+    keyed by TOPIC NAME. Wherever the framed protocols take an opcode, callers
+    name a topic by its class, a sample of it, or its name:
 
-  * DDS puts no opcode on the wire -- the topic IS the message identity. But
-    this framework routes on `(unit_code, opcode)`, so each topic is given a
-    stable local surrogate opcode derived from its name
-    (`tools.general.topic_opcode`, collision-checked in `config.parse_topics`).
-    Nothing about it is transmitted. It exists so that `receive_message`,
-    `handle_on_receive`, `@route` and `periodic_sending` work over DDS exactly
-    as they do over TCP.
+        unit.send_message(Track(track_id=1))        # destination: Track's only subscriber
+        status = unit.receive_message(Status, timeout=5)
+        unit.handle_on_receive(Status, on_status)   # or @route(Status) on a UnitHandler
 
-Payloads are handed to and from Connext's Python API natively: NO
-(UnitCode,OpCode,DataLength) header is added or expected, `uses_irs_parser`
-stays False, and `_do_send` takes a typed sample instance rather than bytes.
+  * Senders. A DataReader serves every publisher of its topic at once, so the
+    sending unit is read off the SAMPLE (`header.source_unit`), falling back to
+    the Interface when it lists exactly one publisher of the topic.
+  * Lifecycle. `participant.close()` closes every topic, writer and reader the
+    participant contains. The one ordering that is ours to get right is
+    stopping the read loops before it (see `_close_entities`).
 
-Requires the `rti.connextdds` package (RTI Connext Python API, Connext 6.1+).
-If it isn't installed, importing this module raises ImportError, and
-connections/__init__.py simply skips registering the "dds" protocol -- the rest
-of the system works fine without RTI present.
+Payloads are native: no (UnitCode,OpCode,DataLength) header, `uses_irs_parser`
+stays False, and `_do_send` takes a typed sample rather than bytes.
 
-------------------------------------------------------------------------
-Where the type modules and QoS file fit
-------------------------------------------------------------------------
-DDS splits "what the data looks like" from "how the middleware behaves" about
-it, and each half comes from its own place:
-
-  * The TYPES answer WHAT. They are ordinary Python modules using the
-    `rti.types` decorators -- there is no `.idl` text file and no rtiddsgen
-    step:
-
-        import rti.types as idl
-
-        @idl.struct
-        class Header:
-            source_unit: idl.uint8 = 0
-            destination_unit: idl.uint8 = 0
-
-        @idl.struct
-        class Track:
-            # @idl.struct builds a dataclass, so a NESTED struct member needs
-            # default_factory; `= Header()` raises "mutable default" on import.
-            header: Header = field(default_factory=Header)
-            x: float = 0.0
-
-    `@idl.struct` builds the TypeSupport that Connext uses to serialize
-    instances and to publish the type's definition during discovery. There is
-    nothing to register with this framework: DDS carries the type on the wire
-    and RTI does the matching itself. `config['idl_modules']` just names the
-    modules to import so the classes exist.
-
-  * The QoS (XML) file answers HOW. One universal file is the normal shape: it
-    is a library of named profiles, and per-topic settings live INSIDE a
-    profile as `topic_filter` attributes. That is why every QoS lookup below
-    passes a topic name -- the profile-only accessors cannot see a
-    `topic_filter` and would silently hand every topic the profile's base QoS.
-
-Both are plain entries in the JSON config:
+Configuration -- only `unit` and `dds_interface` are required:
 
     {
       "protocol": "dds",
-      "side": "publisher",
-      "ip": "0.0.0.0",
-      "unitCode": 22,
-      "connections": {
-        "RadarUnit": {"port": 0, "unitCode": 7}
-      },
-      "idl_modules": ["core.DDS.Structures.Example.example_topics"],
-      "qos_file": "core/configs/qos/UNIVERSAL_QOS.xml",
-      "qos_profile": "MyLib::Reliable",
-      "topics": [
-        {"topic": "TrackTopic",  "type": "Track",  "direction": "subscribe"},
-        {"topic": "StatusTopic", "type": "Status", "direction": "publish"}
-      ]
+      "unit": "SensorUnit",
+      "dds_interface": "C:/ICD/generated/dds_interface.py",
+      "domain_id": 0,                     # default dds_config.DEFAULT_DOMAIN_ID
+      "qos_file": ".../UNIVERSAL_QOS.xml",  # default dds_config.DEFAULT_QOS_FILE
+      "qos_profile": "MyLib::Reliable",   # default: the file's is_default_qos profile
+      "header": {"field": "header", "source_unit": "source_unit",
+                 "destination_unit": "destination_unit", "stamp": true}
     }
 
-`port` is the DDS domain id (one participant per connection, so every unit here
-must agree on it). `ip` / `local_ip` are unused -- DDS addressing is discovery
-and QoS, not endpoints.
+QoS answers HOW, from one universal file of named profiles. Per-topic settings
+live inside a profile as `topic_filter` attributes, which is why every entity
+QoS lookup passes the topic name (`_qos_for`).
 
-The exact Connext calls, and the order they must happen in, are documented
-inline in `_do_start()` below.
-
-Echo is rejected at config load time for DDS (see `config.from_json`): the echo
-lifecycle transmits raw bytes, which a DataWriter cannot accept. DDS LIVELINESS
-QoS is the mechanism that belongs in that slot.
+Requires `rti.connextdds` (Connext 6.1+). Without it, importing this module
+raises ImportError and connections/__init__.py skips registering "dds".
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import importlib
-import importlib.util
 import logging
-import sys
-from pathlib import Path
-from types import ModuleType
 from typing import Any
 
-from .base import Connection
-from .config import ConnectionConfig, TopicSpec
-
-logger = logging.getLogger("connmgr.dds")
-
 import rti.connextdds as dds  # type: ignore  # raises ImportError if not installed
-import rti.types as idl  # type: ignore
 # Importing this is what ATTACHES `take_data_async` to dds.DataReader -- it is a
 # monkey-patch at the bottom of rti/asyncio.py, not a method on the class. It
 # looks unused to a linter and is load-bearing: without it `_read_loop` below
 # raises AttributeError and no sample is ever received.
 import rti.asyncio as rti_asyncio  # type: ignore
+
+from ._routes import MessageKey, RouteKey, UnitName
+from .base import Connection, MessageSelector
+from .config import ConnectionConfig
+from .dds_config import DdsUnitConfig, TopicDirection, TopicSpec, second_copy_message
+
+logger = logging.getLogger("connmgr.dds")
 
 #: Default names for the routing fields inside a sample. Overridable per
 #: connection through config['header'], because the layout is an ICD's
@@ -136,30 +81,29 @@ _live_connections = 0
 
 class DdsConnection(Connection):
     """
-    One DomainParticipant, one domain, and a DataWriter and/or DataReader per
-    configured topic.
+    One DomainParticipant on one domain, with a DataWriter / DataReader for
+    exactly the topics this unit's DdsUnit publishes / subscribes.
 
-    Unit state is reported at `_do_start`: DDS discovery is asynchronous and
+    Peers are marked connected at `_do_start`: DDS discovery is asynchronous and
     peer-driven, so there is no handshake to wait on and no per-unit transport
     whose loss could be observed. Liveliness is DDS's own concern.
     """
 
     def __init__(self, config: ConnectionConfig) -> None:
+        if config.dds is None:
+            raise ValueError(
+                "DdsConnection needs a protocol 'dds' config -- ConnectionConfig.from_json of "
+                "{'protocol': 'dds', 'unit': ..., 'dds_interface': ...} -- but config.dds is None")
         super().__init__(config)
+        self._dds: DdsUnitConfig = config.dds
         self._participant: dds.DomainParticipant | None = None
-        # Both keyed by TOPIC name: a topic's entities are shared by every unit
-        # that speaks it, which is exactly why they cannot be keyed by unit.
+        # Keyed by TOPIC name: a topic's entities serve every peer that speaks it.
         self._writers: dict[str, Any] = {}
         self._readers: dict[str, Any] = {}
-
-        self._qos_provider: dds.QosProvider | None = None
-        self._type_modules: list[ModuleType] = []
-        self._closed_asyncio = False
-
-        self._qos_file: str | None = config.extra.get("qos_file")
-        self._qos_profile: str | None = config.extra.get("qos_profile")
-        idl_modules = config.extra.get("idl_modules") or config.extra.get("idl_file") or []
-        self._idl_modules: list[str] = [idl_modules] if isinstance(idl_modules, str) else list(idl_modules)
+        #: The read loops, held apart from `_tasks` because they must stop
+        #: BEFORE the participant closes, not after (see `_close_entities`).
+        self._read_tasks: list[asyncio.Task[None]] = []
+        self._counted_live = False
 
         header_cfg: dict[str, Any] = config.extra.get("header") or {}
         #: None means the routing fields sit at the top level of the sample
@@ -168,231 +112,104 @@ class DdsConnection(Connection):
         self._source_field: str = header_cfg.get("source_unit", DEFAULT_SOURCE_FIELD)
         self._destination_field: str = header_cfg.get("destination_unit", DEFAULT_DESTINATION_FIELD)
         self._stamp_header: bool = bool(header_cfg.get("stamp", True))
-        #: One warning per topic, not one per sample -- a mis-shaped header is a
-        #: property of the type, so it would otherwise repeat at full data rate.
-        self._header_warned: set[str] = set()
+        #: Warnings about inbound traffic are once per cause, not once per
+        #: sample: a cause is a property of a peer or a type, so it would
+        #: otherwise repeat at full data rate.
+        self._warned: set[tuple[Any, ...]] = set()
 
-        if not config.topics:
-            raise ValueError(
-                "a 'dds' connection needs config['topics']: DDS has no port to listen on, so a "
-                "topic list is the only thing that says what to publish or subscribe. "
-                "e.g. [{'topic': 'TrackTopic', 'type': 'Track', 'direction': 'subscribe'}]")
+        # Direction is per topic, so the connection's capabilities are the
+        # union. This is what stops a subscribe-only unit being handed to
+        # `CompositeUnit` as a sender.
+        self.can_send = any(spec.publishes for spec in self._dds.topics)
+        self.can_receive = any(spec.subscribes for spec in self._dds.topics)
 
-        # Direction is a property of each topic, so the connection's own
-        # capabilities are the union. This is what stops a subscribe-only DDS
-        # connection being handed to `CompositeUnit` as a sender.
-        self.can_send = any(topic.publishes for topic in config.topics)
-        self.can_receive = any(topic.subscribes for topic in config.topics)
+        # Both in the caller's thread, so a bad QoS file/profile or a topic whose
+        # senders cannot be told apart fails create(), not start().
+        self._qos_provider: dds.QosProvider = self._load_qos_provider()
+        self._check_senders_identifiable()
+
+        logger.info(
+            "DDS unit %s (unitCode %#04x) of %s: publishes %s, subscribes %s; peers %s; "
+            "domain %d; QoS %s [%s]",
+            self._dds.unit, self._dds.unit_code, self._dds.system,
+            [spec.name for spec in self._dds.topics if spec.publishes],
+            [spec.name for spec in self._dds.topics if spec.subscribes],
+            [name for name, _code in self._dds.peers], self._dds.domain_id,
+            self._dds.qos_file.name, self._dds.qos_profile or "default profile")
 
     @property
     def domain_id(self) -> int:
-        """
-        The DDS domain this connection joins.
-
-        Every unit on one DdsConnection shares a single DomainParticipant, so
-        they must share a domain: the first connection entry's port supplies
-        it, and any entry disagreeing is a config error rather than a silent
-        half-connected participant.
-        """
-        ports = self.config.ports
-        if not ports:
-            raise ValueError("DDS config has no connections; cannot determine a domain id")
-        if len(set(ports)) > 1:
-            raise ValueError(
-                f"all units on one DDS connection must share a domain id, got ports={ports}; "
-                f"split them into separate connections if they really are on different domains")
-        return ports[0]
-
-    # ------------------------------------------------------------------ #
-    # Python type modules
-    # ------------------------------------------------------------------ #
-    async def _load_type_modules(self) -> list[ModuleType]:
-        """
-        Import every module named by `idl_modules`.
-
-        A DDS type module registers nothing with this framework -- it just
-        defines `@idl.struct` classes -- so this deliberately does NOT go
-        through `tools.general.import_modules`, whose `_assert_registered`
-        would reject every one of them for populating no IRS registry.
-
-        Importing executes the module, which is why it runs in an executor:
-        module-level work must never block the shared event-loop thread.
-        """
-        if not self._idl_modules:
-            return []
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._import_all, tuple(self._idl_modules))
-
-    @staticmethod
-    def _import_all(specs: tuple[str, ...]) -> list[ModuleType]:
-        """Import each spec, by dotted name or by path (blocking; in an executor)."""
-        modules: list[ModuleType] = []
-        for spec in specs:
-            path = Path(spec)
-            if spec.endswith(".py") or path.is_file():
-                modules.append(DdsConnection._import_from_path(path))
-            else:
-                # Dotted names get plain importlib: sys.modules caching is
-                # already correct, and DDS type identity is per-class, so a
-                # re-import would mint distinct types with the same name.
-                modules.append(importlib.import_module(spec))
-        return modules
-
-    @staticmethod
-    def _import_from_path(path: Path) -> ModuleType:
-        """
-        Import an out-of-tree type module by file path.
-
-        The `sys.modules` key carries a digest of the RESOLVED path, not just
-        the file stem: two different `tracks.py` under different directories
-        are two different type modules, and keying on the stem alone would
-        silently hand the second one the first one's classes.
-        """
-        resolved = path.resolve()
-        if not resolved.is_file():
-            raise FileNotFoundError(f"config['idl_modules'] entry not found: {resolved}")
-        if resolved.suffix != ".py":
-            raise ValueError(
-                f"config['idl_modules'] entries must be Python modules defining @idl.struct "
-                f"types, got {resolved.name}")
-        digest = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:8]
-        module_name = f"_connmgr_dds_{resolved.stem}_{digest}"
-        cached = sys.modules.get(module_name)
-        if cached is not None:
-            return cached
-        spec = importlib.util.spec_from_file_location(module_name, resolved)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"cannot load a Python module from {resolved}")
-        module = importlib.util.module_from_spec(spec)
-        # Registered before exec_module so the module can be found by name
-        # while its own body is still running.
-        sys.modules[module_name] = module
-        try:
-            spec.loader.exec_module(module)
-        except BaseException:
-            sys.modules.pop(module_name, None)  # don't cache a half-built module
-            raise
-        logger.info("loaded DDS type module %s from %s", module_name, resolved)
-        return module
-
-    def _resolve_type(self, topic: TopicSpec) -> Any:
-        """
-        The `@idl.struct` class carrying `topic`.
-
-        Preference order:
-          1. `config.extra['type_resolver'](topic_name)` -- an escape hatch for
-             callers holding a live type class this JSON-driven factory could
-             never have imported itself.
-          2. The class named by the topic's `type`, looked up across every
-             imported type module.
-
-        The result is checked to be an actual DDS type: `@idl.struct` attaches
-        TypeSupport to the class, and `idl.get_type_support()` is what fails if
-        the decorator was forgotten. Catching it here turns a confusing error
-        from deep inside Connext's Topic constructor into one that names the
-        class.
-        """
-        type_resolver = self.config.extra.get("type_resolver")
-        if type_resolver is not None:
-            return type_resolver(topic.topic)
-
-        matches = [(module, getattr(module, topic.type_ref))
-                   for module in self._type_modules if hasattr(module, topic.type_ref)]
-        if not matches:
-            available = sorted({
-                name for module in self._type_modules for name in vars(module)
-                if not name.startswith("_") and hasattr(getattr(module, name, None), "type_support")})
-            raise ValueError(
-                f"type {topic.type_ref!r} for topic {topic.topic!r} was not found in "
-                f"config['idl_modules']={self._idl_modules}; DDS types available there: "
-                f"{available or 'none -- is the module listed, and are its classes @idl.struct?'}")
-        if len({type_cls for _module, type_cls in matches}) > 1:
-            raise ValueError(
-                f"type {topic.type_ref!r} for topic {topic.topic!r} is ambiguous: defined in "
-                f"{[module.__name__ for module, _ in matches]}. DDS type identity is per-class, so "
-                f"picking one arbitrarily would silently disagree with the other. Rename one, or "
-                f"list only the module you meant in config['idl_modules'].")
-        type_cls = matches[0][1]
-        try:
-            idl.get_type_support(type_cls)
-        except Exception as exc:  # noqa: BLE001 - surfaced with actionable context
-            raise TypeError(
-                f"{topic.type_ref!r} (for topic {topic.topic!r}) is not a DDS type; decorate it "
-                f"with @idl.struct (from `import rti.types as idl`)") from exc
-        return type_cls
+        """The DDS domain this unit's participant joins."""
+        return self._dds.domain_id
 
     # ------------------------------------------------------------------ #
     # QoS
     # ------------------------------------------------------------------ #
-    def _load_qos_provider(self) -> dds.QosProvider | None:
+    def _load_qos_provider(self) -> dds.QosProvider:
         """
-        `dds.QosProvider(url)` parses the QoS XML immediately and holds every
-        `<qos_profile>` it declares. Nothing is applied yet -- a profile only
-        takes effect when it is pulled out and passed to an entity's
-        constructor, which is what `_qos_for()` below does.
+        Parse the QoS file. Nothing is applied yet: a profile only takes effect
+        when it is pulled out and handed to an entity's constructor (`_qos_for`).
+        A named profile is checked here so a typo fails at load.
         """
-        if not self._qos_file:
-            return None
-        qos_path = Path(self._qos_file)
-        if not qos_path.is_file():
-            raise FileNotFoundError(f"config['qos_file'] not found: {qos_path.resolve()}")
-        logger.info("loading DDS QoS profiles from %s", qos_path)
-        return dds.QosProvider(str(qos_path))
+        provider = dds.QosProvider(str(self._dds.qos_file))
+        profile = self._dds.qos_profile
+        if profile is not None:
+            try:
+                provider.participant_qos_from_profile(profile)
+            except Exception as exc:  # noqa: BLE001 - surfaced with the file and the profiles it has
+                raise ValueError(
+                    f"config['qos_profile'] = {profile!r} is not a profile in {self._dds.qos_file}; "
+                    f"it defines {self._profiles_in(provider)}, besides RTI's Builtin* "
+                    f"libraries") from exc
+        return provider
 
-    #: Per entity kind: the topic-aware accessor, then the profile-only one.
-    _QOS_ACCESSORS: dict[str, tuple[str | None, str]] = {
-        "participant": (None, "participant_qos"),
-        "topic": ("set_topic_name_qos", "topic_qos"),
-        "datawriter": ("set_topic_datawriter_qos", "datawriter_qos"),
-        "datareader": ("set_topic_datareader_qos", "datareader_qos"),
+    @staticmethod
+    def _profiles_in(provider: dds.QosProvider) -> list[str]:
+        """The file's own profiles -- RTI's ~130 built-in ones would bury them."""
+        try:
+            return [f"{library}::{profile}" for library in provider.qos_profile_libraries
+                    if not library.startswith("Builtin")
+                    for profile in provider.qos_profiles(library)]
+        except Exception:  # noqa: BLE001 - only ever used to word an error
+            return []
+
+    #: Per entity kind: the accessor taking (profile, topic), and the one taking
+    #: only (topic) for the file's default profile. Both evaluate the profile's
+    #: `topic_filter`s against the topic name. The profile-only accessors
+    #: (`datawriter_qos_from_profile`, `.datawriter_qos`) take no topic, so they
+    #: cannot see a filter and would silently hand every topic the baseline.
+    _QOS_ACCESSORS: dict[str, tuple[str, str]] = {
+        "topic": ("set_topic_name_qos", "get_topic_name_qos"),
+        "datawriter": ("set_topic_datawriter_qos", "get_topic_datawriter_qos"),
+        "datareader": ("set_topic_datareader_qos", "get_topic_datareader_qos"),
     }
 
-    def _qos_for(self, entity: str, topic_name: str | None = None) -> Any:
+    def _qos_for(self, entity: str, topic_name: str) -> Any:
         """
-        Fetch the QoS policy object for one entity kind, for one topic.
-
-        The topic name matters. A universal QoS file carries its per-topic
-        settings as `topic_filter` attributes INSIDE a profile, and only the
-        topic-aware accessors evaluate those filters:
-
-            set_topic_name_qos(profile, topic)       -> TopicQos
-            set_topic_datawriter_qos(profile, topic) -> DataWriterQos
-            set_topic_datareader_qos(profile, topic) -> DataReaderQos
-
-        The profile-only accessors (`datawriter_qos_from_profile(profile)`) take
-        no topic and therefore cannot see a `topic_filter` at all -- they would
-        hand every topic the profile's base QoS and never say so. They are kept
-        strictly as the fallback for a file that declares no filters.
-
-        With no `qos_profile` configured we use the provider's default profile
-        (the `datawriter_qos` / ... properties), which is the one marked
-        `is_default_qos="true"` in the XML. With no QoS file at all we return
-        None and let each constructor fall back to the DDS spec defaults
-        (best-effort, volatile, ...).
-
-        The returned object is applied at CONSTRUCTION time -- QoS is largely
-        immutable once an entity exists, which is why every entity below is
-        built with its QoS in hand rather than configured afterwards.
+        One entity kind's QoS for one topic. Applied at CONSTRUCTION: QoS is
+        largely immutable once an entity exists, and writer/reader QoS is what
+        RxO matching compares -- mismatch it and the pair never connects, with
+        no error, just silence.
         """
-        if self._qos_provider is None:
-            return None
-        topic_getter_name, default_property = self._QOS_ACCESSORS[entity]
-        if topic_getter_name is not None and topic_name is not None and self._qos_profile:
-            topic_getter = getattr(self._qos_provider, topic_getter_name, None)
-            if topic_getter is not None:
-                try:
-                    return topic_getter(self._qos_profile, topic_name)
-                except Exception as exc:  # noqa: BLE001 - older/simpler XML has no filters
-                    logger.debug(
-                        "%s(%r, %r) failed (%s); falling back to the profile-wide QoS",
-                        topic_getter_name, self._qos_profile, topic_name, exc)
-        if self._qos_profile:
-            return getattr(self._qos_provider, f"{entity}_qos_from_profile")(self._qos_profile)
-        return getattr(self._qos_provider, default_property)
+        with_profile, default_profile = self._QOS_ACCESSORS[entity]
+        profile = self._dds.qos_profile
+        if profile:
+            return getattr(self._qos_provider, with_profile)(profile, topic_name)
+        return getattr(self._qos_provider, default_profile)(topic_name)
+
+    def _participant_qos(self) -> Any:
+        profile = self._dds.qos_profile
+        if profile:
+            return self._qos_provider.participant_qos_from_profile(profile)
+        return self._qos_provider.participant_qos
 
     # ------------------------------------------------------------------ #
     # Header access
     # ------------------------------------------------------------------ #
+    @property
+    def _source_path(self) -> str:
+        return self._source_field if self._header_field is None else f"{self._header_field}.{self._source_field}"
+
     def _header_of(self, sample: Any) -> Any:
         """The struct carrying the routing fields, or None if this type has none."""
         if self._header_field is None:
@@ -403,30 +220,36 @@ class DdsConnection(Connection):
         header = self._header_of(sample)
         return None if header is None else getattr(header, field, None)
 
-    def _sending_unit(self, sample: Any, topic: TopicSpec) -> str | None:
-        """
-        Which configured unit sent `sample`, from its header.
-
-        A DataReader serves every publisher on its topic, so this is the only
-        thing that can tell two senders apart -- there is no per-peer socket to
-        infer it from. A type that carries no header at all still works when the
-        connection has exactly one configured unit, which is the common
-        bring-up case and the one where the answer is unambiguous anyway.
-        """
-        source = self._header_value(sample, self._source_field)
-        if source is None:
-            units = self.config.connected_units
-            if len(units) == 1:
-                return units[0]
-            if topic.topic not in self._header_warned:
-                self._header_warned.add(topic.topic)
-                logger.warning(
-                    "topic %r: samples carry no %r field, and this connection has %d units (%s), "
-                    "so the sender cannot be identified -- dropping. Set config['header'] to match "
-                    "your type, or configure a single unit.",
-                    topic.topic, self._source_field, len(units), units)
+    def _carries_source(self, sample_type: type) -> bool | None:
+        """Whether `sample_type` has the source field, or None if a default
+        sample cannot be built to look."""
+        try:
+            sample = sample_type()
+        except Exception:  # noqa: BLE001 - a type we cannot probe is not a type we can fault
             return None
-        return self.config.unit_for_code(int(source))
+        header = self._header_of(sample)
+        return header is not None and hasattr(header, self._source_field)
+
+    def _check_senders_identifiable(self) -> None:
+        """
+        A subscribed topic needs the header when anything but one peer can
+        write to it: when several units publish it, or when this unit publishes
+        it too (a participant's reader hears its own writer). Without the header
+        every such sample would be unattributable and silently dropped, so it is
+        a load error instead.
+        """
+        for spec in self._dds.topics:
+            hears_itself = spec.publishes
+            if not spec.subscribes or (len(spec.publishers) < 2 and not hears_itself):
+                continue
+            if self._carries_source(spec.sample_type) is False:
+                why = ("also publishes it, and a participant hears its own writes" if hears_itself
+                       else f"it has {len(spec.publishers)} publishers {list(spec.publishers)}")
+                raise ValueError(
+                    f"unit {self._dds.unit!r} subscribes {spec.name!r} and {why}, but "
+                    f"{spec.sample_type.__qualname__} has no {self._source_path!r} field to tell "
+                    f"the senders apart. Add the header to the type, or point config['header'] "
+                    f"at the fields it does carry.")
 
     def _stamp_outgoing(self, sample: Any, unit_name: str) -> None:
         """
@@ -453,160 +276,202 @@ class DdsConnection(Connection):
             except Exception as exc:  # noqa: BLE001
                 logger.debug("could not stamp %r: %s", self._destination_field, exc)
 
-    # ------------------------------------------------------------------ #
-    # Routing
-    # ------------------------------------------------------------------ #
-    def _validate_route(self, unit_name: str, route_key: tuple[int, int]) -> None:
+    def _warn_once(self, cause: tuple[Any, ...], message: str, *args: Any) -> None:
+        if cause not in self._warned:
+            self._warned.add(cause)
+            logger.warning(message, *args)
+
+    def _sending_unit(self, sample: Any, spec: TopicSpec) -> str | None:
         """
-        DDS registers no IRS layouts, so the base implementation's `validate_irs`
-        could never pass here. The question it asks is still the right one --
-        "could this connection ever deliver this route?" -- so it is asked
-        against the topic list instead: an opcode no configured topic routes on
-        is a subscription that would block forever.
+        Which peer sent `sample`, or None to drop it.
+
+        A DataReader serves every publisher of its topic, so the sample is the
+        only thing that can say. Senders the Interface does not list as
+        publishing this topic are a third party's fault, not ours: warned about
+        once, and dropped.
         """
-        _unit_code, opcode = route_key
-        if self.config.topic_for_opcode(opcode) is None:
-            known = {topic.topic: f"{topic.opcode:#06x}" for topic in self.config.topics}
+        source = self._header_value(sample, self._source_field)
+        if source is None:
+            if len(spec.publishers) == 1:
+                return spec.publishers[0]
+            self._warn_once(
+                ("no-header", spec.name),
+                "topic %r: samples carry no %r field and the DDS Interface lists %d publishers "
+                "of it %s, so the sender cannot be identified -- dropping",
+                spec.name, self._source_path, len(spec.publishers), list(spec.publishers))
+            return None
+        code = int(source)
+        if code == self._own_unit_code:
+            # Our own write, heard back by our own reader. Preferred to
+            # `ignore_participant`, which would also block a legitimate second
+            # process of ours on the same host.
+            return None
+        unit_name = self.config.unit_for_code(code)
+        if unit_name is None:
+            self._warn_once(
+                ("unknown-unit", spec.name, code),
+                "topic %r: sample from unit code %#04x, which is not a peer of %s %s -- dropping",
+                spec.name, code, self._dds.unit, self.config.unit_codes)
+            return None
+        if unit_name not in spec.publishers:
+            self._warn_once(
+                ("not-a-publisher", spec.name, unit_name),
+                "topic %r: %s sent it, but the DDS Interface does not list %s as publishing it "
+                "(publishers: %s) -- dropping",
+                spec.name, unit_name, unit_name, list(spec.publishers))
+            return None
+        return unit_name
+
+    # ------------------------------------------------------------------ #
+    # Routing: topics, not opcodes
+    # ------------------------------------------------------------------ #
+    def _message_key(self, selector: MessageSelector) -> MessageKey:
+        """A topic class, a sample of it, or its name -> the topic name."""
+        return self._dds.topic_for(selector).name
+
+    def _send_key(self, data: Any, selector: MessageSelector | None) -> MessageKey:
+        """The topic `data` goes out on: the one `selector` names, or -- the
+        normal case -- the one its own class carries."""
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"DDS publishes typed samples, not bytes: build an instance of one of "
+                f"{self._dds.topic_names}")
+        spec = self._dds.topic_for(data if selector is None else selector)
+        if not isinstance(data, spec.sample_type):
+            if type(data).__name__ == spec.name:
+                raise TypeError(second_copy_message(type(data), spec))
+            raise TypeError(
+                f"topic {spec.name!r} is carried by {spec.sample_type.__qualname__}, but the "
+                f"sample is a {type(data).__qualname__}")
+        return spec.name
+
+    @staticmethod
+    def _speakers(spec: TopicSpec) -> tuple[str, ...]:
+        """The peers at the other end of `spec` from this unit."""
+        if spec.direction is TopicDirection.SUBSCRIBE:
+            return spec.publishers
+        if spec.direction is TopicDirection.PUBLISH:
+            return spec.subscribers
+        return tuple(dict.fromkeys((*spec.publishers, *spec.subscribers)))
+
+    def _resolve_route(self, unit_name: str | None, key: MessageKey) -> tuple[UnitName, RouteKey]:
+        """
+        `unit_name` may be left out whenever the Interface leaves no choice:
+        when exactly one peer is at the other end of the topic. A unit usually
+        has several peers, so the base rule -- "only when the connection has a
+        single unit" -- would demand a name on nearly every call.
+        """
+        spec = self._dds.topic_named(key) if unit_name is None and isinstance(key, str) else None
+        if spec is not None:
+            speakers = self._speakers(spec)
+            if not speakers:
+                raise ValueError(f"topic {spec.name!r} has no peer at the other end in the DDS Interface")
+            if len(speakers) > 1:
+                raise ValueError(
+                    f"unit_name is required: topic {spec.name!r} has {list(speakers)} at the other end")
+            unit_name = speakers[0]
+        return super()._resolve_route(unit_name, key)
+
+    def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
+        """
+        DDS registers no IRS layouts, so the base `validate_irs` could never
+        pass here. The question it asks is still the right one -- "could this
+        route ever deliver?" -- so it is asked of the Interface: a topic this
+        unit does not subscribe, or a unit that does not publish it, is a
+        subscription that would block forever.
+        """
+        _unit_code, key = route_key
+        spec = self._dds.topic_for(key)
+        if not spec.subscribes:
             raise ValueError(
-                f"no DDS topic on this connection routes on opcode {opcode:#06x}; configured "
-                f"topics and their opcodes are {known}. Opcodes are derived from the topic name "
-                f"-- use tools.general.topic_opcode('<TopicName>') rather than a literal.")
+                f"{self._dds.unit} does not subscribe {spec.name!r} in the DDS Interface (it only "
+                f"publishes it), so nothing could ever arrive on this route")
+        if unit_name not in spec.publishers:
+            raise ValueError(
+                f"{unit_name!r} does not publish {spec.name!r} in the DDS Interface; its "
+                f"publishers are {list(spec.publishers)}")
 
     # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
     async def _do_start(self) -> None:
         global _live_connections
-
-        # -- 1. Load the QoS file and the type modules up front. Neither touches
-        #       the network; this is XML parsing and a Python import, so a typo
-        #       fails fast and loudly before any DDS entity exists.
-        self._qos_provider = self._load_qos_provider()
-        self._type_modules = await self._load_type_modules()
-
-        # -- 2. The DomainParticipant is the root entity and the unit of
-        #       discovery: it joins the domain, starts the discovery endpoints,
-        #       and owns every topic/reader/writer created under it. Its QoS
-        #       (transports, discovery peers, buffer sizes) can only be set
-        #       here, at construction.
-        participant_qos = self._qos_for("participant")
-        self._participant = (
-            dds.DomainParticipant(self.domain_id, participant_qos)
-            if participant_qos is not None
-            else dds.DomainParticipant(self.domain_id))
-
-        for topic_spec in self.config.topics:
-            type_cls = self._resolve_type(topic_spec)
-
-            # -- 3. Creating the Topic is what REGISTERS the type with the
-            #       participant. Remote applications match on (topic name, type
-            #       name, QoS compatibility), so this is the point where a
-            #       Python class stops being a class and becomes half of a wire
-            #       contract. `type_name` overrides the name the class is
-            #       registered under, which is what a peer whose type came from
-            #       real IDL will be advertising.
-            topic = dds.Topic(
-                self._participant,
-                topic_spec.topic,
-                type_cls,
-                qos=self._qos_for("topic", topic_spec.topic),
-                type_name=topic_spec.type_name,
-            )
-
-            # -- 4. Writers and readers carry the QoS that actually governs
-            #       delivery (reliability, durability, history, deadline).
-            #       These are the policies checked for RxO compatibility during
-            #       discovery: mismatch them and the pair simply never connects
-            #       -- no error, just silence.
-            #       Unlike Topic, DataWriter/DataReader have no overload taking
-            #       a None qos -- `qos` is a required positional on the
-            #       (publisher, topic, qos) form -- so with no QoS file
-            #       configured they must be built without the argument rather
-            #       than with None, which would fail overload resolution.
-            if topic_spec.publishes:
-                writer_qos = self._qos_for("datawriter", topic_spec.topic)
-                self._writers[topic_spec.topic] = (
-                    dds.DataWriter(self._participant.implicit_publisher, topic, writer_qos)
-                    if writer_qos is not None
-                    else dds.DataWriter(self._participant.implicit_publisher, topic))
-            if topic_spec.subscribes:
-                reader_qos = self._qos_for("datareader", topic_spec.topic)
-                reader = (
-                    dds.DataReader(self._participant.implicit_subscriber, topic, reader_qos)
-                    if reader_qos is not None
-                    else dds.DataReader(self._participant.implicit_subscriber, topic))
-                self._readers[topic_spec.topic] = reader
-                self._track(self._read_loop(topic_spec, reader))
-
+        try:
+            # The participant is the unit of discovery and owns everything below
+            # it; its QoS (transports, discovery peers) can only be set here.
+            self._participant = dds.DomainParticipant(self._dds.domain_id, self._participant_qos())
+            for spec in self._dds.topics:
+                self._create_entities(self._participant, spec)
+        except BaseException:
+            await self._close_entities()
+            raise
         _live_connections += 1
-        self._closed_asyncio = False
-
-        # Discovery is asynchronous and peer-driven, so there is no handshake to
-        # wait on: a unit is usable here once the entities exist.
+        self._counted_live = True
+        logger.info(
+            "DDS unit %s joined domain %d: %d writer(s) %s, %d reader(s) %s",
+            self._dds.unit, self._dds.domain_id, len(self._writers), list(self._writers),
+            len(self._readers), list(self._readers))
         for unit in self.config.connected_units:
             self._mark_unit_connected(unit)
 
-    async def _read_loop(self, topic: TopicSpec, reader: Any) -> None:
+    def _create_entities(self, participant: dds.DomainParticipant, spec: TopicSpec) -> None:
         """
-        Feed every inbound sample for `topic` into the framework's single
-        dispatch point, tagged with the unit that sent it.
+        One topic's entities. Creating the Topic is what registers the type with
+        the participant: remote units match on (topic name, type name, QoS), so
+        this is where a Python class becomes half of a wire contract.
+        """
+        topic = dds.Topic(participant, spec.name, spec.sample_type, qos=self._qos_for("topic", spec.name))
+        if spec.publishes:
+            self._writers[spec.name] = dds.DataWriter(
+                participant.implicit_publisher, topic, self._qos_for("datawriter", spec.name))
+            logger.info("DDS unit %s: DataWriter on %r (type %s)", self._dds.unit, spec.name, spec.type_name)
+        if spec.subscribes:
+            reader = dds.DataReader(
+                participant.implicit_subscriber, topic, self._qos_for("datareader", spec.name))
+            self._readers[spec.name] = reader
+            self._read_tasks.append(self._track(self._read_loop(spec, reader)))
+            logger.info("DDS unit %s: DataReader on %r (type %s)", self._dds.unit, spec.name, spec.type_name)
 
-        `take_data_async` exists only because this module imports `rti.asyncio`
-        (which monkey-patches it onto DataReader); its waitset dispatcher is
-        created on first use, which is here -- on the shared loop thread, where
-        it must be. `take_data` yields valid samples only, so the `valid_data`
-        check callers would otherwise need is already done.
+    async def _read_loop(self, spec: TopicSpec, reader: Any) -> None:
+        """
+        Feed every inbound sample on `spec` into the framework's single dispatch
+        point, keyed by the topic and tagged with the unit that sent it.
+
+        `take_data_async` exists only because this module imports `rti.asyncio`;
+        its waitset dispatcher is created on first use, which is here -- on the
+        shared loop thread, where it must be. `take_data` yields valid samples
+        only, so the `valid_data` check callers would otherwise need is done.
         """
         try:
             async for sample in reader.take_data_async():
-                source = self._header_value(sample, self._source_field)
-                # DDS delivers a participant's own writes back to its own
-                # readers. Any connection that both publishes and subscribes a
-                # topic therefore hears itself; the header says so plainly.
-                if source is not None and int(source) == self._own_unit_code:
-                    continue
-                unit_name = self._sending_unit(sample, topic)
-                if unit_name is None:
-                    if source is not None:
-                        # A third party on our topic is their business, not a
-                        # fault of ours: warn once and keep reading.
-                        key = f"{topic.topic}:{source}"
-                        if key not in self._header_warned:
-                            self._header_warned.add(key)
-                            logger.warning(
-                                "topic %r: sample from unconfigured unit code %s (configured: %s) "
-                                "-- dropping", topic.topic, source, self.config.unit_codes)
-                    continue
-                self._dispatch_incoming(unit_name, topic.opcode, sample)
+                unit_name = self._sending_unit(sample, spec)
+                if unit_name is not None:
+                    self._dispatch_incoming(unit_name, spec.name, sample)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("DDS read loop failed for topic %s", topic.topic)
+            logger.exception("DDS read loop failed for topic %s", spec.name)
 
-    async def _do_send(self, unit_name: str, data: Any, opcode: int) -> None:
+    async def _do_send(self, unit_name: str, data: Any, key: MessageKey) -> None:
         """
-        Publish one sample on the topic that `opcode` routes to.
+        Publish one sample on topic `key`, addressed to `unit_name`.
 
-        `data` must be an instance of that topic's `@idl.struct` type, not
-        bytes: DDS serializes through the type's TypeSupport, so there is
-        nothing for this layer to frame. `opcode` is the topic's local surrogate
-        (`tools.general.topic_opcode`) -- it selects the writer and is not
-        transmitted.
+        DDS delivers to every subscriber regardless; the destination is stamped
+        into the header for the peers that route on it, and is checked against
+        the Interface so a send no one is listening for fails here.
         """
-        topic = self.config.topic_for_opcode(opcode)
-        if topic is None:
-            known = {spec.topic: f"{spec.opcode:#06x}" for spec in self.config.topics}
+        spec = self._dds.topic_for(key)
+        if not spec.publishes:
             raise ValueError(
-                f"no DDS topic routes on opcode {opcode:#06x}; configured topics are {known}")
-        writer = self._writers.get(topic.topic)
+                f"{self._dds.unit} does not publish {spec.name!r} in the DDS Interface (it only "
+                f"subscribes it)")
+        if unit_name not in spec.subscribers:
+            raise ValueError(
+                f"{unit_name!r} does not subscribe {spec.name!r} in the DDS Interface; its "
+                f"subscribers are {list(spec.subscribers)}")
+        writer = self._writers.get(spec.name)
         if writer is None:
-            raise ConnectionError(
-                f"topic {topic.topic!r} has no DataWriter on this connection: its direction is "
-                f"{topic.direction.value!r}. Set it to 'publish' or 'both' to send on it.")
-        if isinstance(data, (bytes, bytearray, memoryview)):
-            raise TypeError(
-                f"DDS publishes typed samples, not bytes: topic {topic.topic!r} expects an "
-                f"instance of {topic.type_ref}, got {type(data).__name__}.")
+            raise ConnectionError(f"topic {spec.name!r} has no DataWriter yet: start() the connection first")
         self._stamp_outgoing(data, unit_name)
         writer.write(data)
 
@@ -616,35 +481,44 @@ class DdsConnection(Connection):
 
         A DDS reader/writer belongs to a TOPIC and serves every unit speaking
         it, so closing entities here would cut off the other units too. There is
-        also nothing that triggers this in practice: echo is rejected on DDS
+        also nothing that triggers this in practice: echo is refused on DDS
         configs, so the watchdog that calls it never arms. The base class has
         already marked the unit disconnected by the time this runs.
         """
         logger.debug(
             "DDS unit %s marked disconnected; topic entities are shared and stay open", unit_name)
 
-    async def _do_stop(self) -> None:
-        """Close every DDS entity, innermost first: readers and writers before
-        the participant that owns them."""
-        global _live_connections
+    async def _close_entities(self) -> None:
+        """
+        Stop the read loops, THEN close the participant.
 
-        for reader in self._readers.values():
-            reader.close()
-        for writer in self._writers.values():
-            writer.close()
-        if self._participant is not None:
-            self._participant.close()
-        self._readers.clear()
+        That order is the one piece of teardown RTI cannot do for us. Each read
+        loop has a ReadCondition attached to `rti.asyncio`'s process-wide
+        WaitSet, and cancelling the loop is what detaches it; closing the reader
+        first would leave that shared WaitSet holding a condition of a closed
+        entity. After that, a single `participant.close()` closes every topic,
+        writer and reader the participant contains.
+        """
+        tasks, self._read_tasks = self._read_tasks, []
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        participant, self._participant = self._participant, None
+        if participant is not None:
+            participant.close()
         self._writers.clear()
-        self._participant = None
-        self._qos_provider = None
-        # Type modules are deliberately left in sys.modules: their classes carry
-        # DDS type identity, and re-importing on a later start() would mint
-        # distinct types with the same name.
-        self._type_modules = []
+        self._readers.clear()
 
-        if not self._closed_asyncio:
-            self._closed_asyncio = True
+    async def _do_stop(self) -> None:
+        global _live_connections
+        writers, readers = len(self._writers), len(self._readers)
+        await self._close_entities()
+        logger.info(
+            "DDS unit %s left domain %d (%d writer(s), %d reader(s) closed)",
+            self._dds.unit, self._dds.domain_id, writers, readers)
+        if self._counted_live:
+            self._counted_live = False
             _live_connections = max(0, _live_connections - 1)
             if _live_connections == 0:
                 # Shared with every other DdsConnection in this process, so only

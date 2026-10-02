@@ -14,7 +14,8 @@ connection_framework/
   tcp.py          TcpConnection
   udp.py          UdpConnection
   multicast.py    MulticastConnection (direction derived from config.side)
-  dds.py          DdsConnection (RTI Connext; native payloads, no framing)
+  dds.py          DdsConnection (RTI Connext; native payloads, no framing, topic routing)
+  dds_config.py   DDS Interface loading + one unit's view of it, DDS defaults (no rti import)
   composite.py    CompositeUnit -- combines direction-limited connections into one Unit
   handlers.py     UnitHandler/route -- class-based sugar over handle_on_receive
   manager.py      ConnectionManager -- factory + centralized absolute-shutdown
@@ -225,6 +226,10 @@ optional wherever exactly one unit is connected (auto-resolved from
 `config.connections`); otherwise it's required and validated, with strict
 unit filtering: a `receive_message()` call only ever returns a message
 matching **both** the requested `opcode` and the resolved `unit_name`.
+
+On DDS the same parameter is the **topic** -- its class, a sample of it, or its
+name -- and it is optional on `send_message`, since a sample names its own topic
+through its class. There are no opcodes on a DDS link; see §9.
 
 ## 5. Subscribe-or-drop message filtering
 
@@ -663,116 +668,121 @@ used to be reported as failures:
   context, including any other `OSError`, is passed to
   `loop.default_exception_handler` unchanged.
 
-## 9. DDS: topics, types and QoS
+## 9. DDS: one unit of a DDS Interface
 
-`dds.py` is the one protocol here that is not socket-based, and two adaptations
-carry that difference. Both are structural, not cosmetic.
-
-**A topic is not a unit.** On TCP/UDP/multicast, inbound routing comes from the
-transport: which socket a message arrived on identifies the peer. A DDS
-DataReader has no such property -- it serves every publisher on its topic at
-once. So topics and units are separate axes: `config["connections"]` stays the
-list of real remote units, `config["topics"]` is its own list, and the sending
-unit is read off the SAMPLE, from `header.source_unit`. The field names are
-configurable (`config["header"]`); a type with no header still routes when the
-connection has exactly one configured unit, which is the case where the answer
-is unambiguous anyway.
-
-**DDS puts no opcode on the wire** -- the topic *is* the message identity. But
-this framework routes on `(unit_code, opcode)`, so each topic gets a stable
-local surrogate derived from its name by `tools.general.topic_opcode`
-(blake2s, 16 bits, matching `framing.py`'s `OpCode` field). Nothing about it is
-transmitted. It exists so `receive_message`, `handle_on_receive`, `@route` and
-`periodic_sending` work over DDS exactly as they do over TCP:
+`dds.py` is the one protocol here that is not socket-based. A DDS node is not
+configured with sockets and hand-written routes but as **one unit of a DDS
+Interface** -- the generated Python module that is the system contract:
 
 ```python
-from core.tools.general import topic_opcode
+# GENERATED from the system XML -- reference: core/DDS/Interfaces/Example/example_interface.py
+from core.DDS import DdsUnit
+from my_icd.topics import Status, Track      # ABSOLUTE imports
 
-unit, track = subscriber.receive_message(topic_opcode("TrackTopic"), timeout=5)
+INTERFACE_FORMAT = 1
+SYSTEM = "ExampleSystem"
+
+SensorUnit = DdsUnit(unitCode=0x01, publish=(Track,), subscribe=(Status,))
+ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
 ```
 
-Two topics landing on one opcode would deliver one topic's samples to the
-other's subscriber, silently, so `config.parse_topics` checks every pair at
-**load time** and names both -- with an explicit `"opcode"` key as the escape
-hatch. Guessing at runtime is what this replaces.
+```json
+{"protocol": "dds", "unit": "SensorUnit", "dds_interface": "C:/ICD/generated/dds_interface.py"}
+```
 
-### The type modules
+Two naming rules keep the Interface that small: a unit's name is the variable
+its `DdsUnit` is bound to, and a topic's name is its class's `__name__`. From
+the config's `unit`, `dds_config.resolve_unit` derives -- at load, so a broken
+contract fails `create()` -- this unit's code, its peers (every unit that
+publishes what it subscribes or subscribes what it publishes) and its topics.
+`side`, `ip` and `local_ip` are `None`. A config naming any of them, or
+`unitCode` / `connections` / `topics` / `idl_modules` / `Structures` / an echo
+key, is refused with the reason -- each is either a socket concept or now the
+Interface's to say.
 
-`config["idl_modules"]` names Python modules of `@idl.struct` classes -- by
-dotted path (`core.DDS.Structures.Example.example_topics`) or by file path for
-out-of-tree types. There is no text `.idl`, no `rtiddsgen`, and **no
-registration call of this project's own**:
+Optional keys override deployment defaults that are constants in
+`dds_config`: `domain_id` (`DEFAULT_DOMAIN_ID`), `qos_file` (`DEFAULT_QOS_FILE`,
+an absolute path to `core/configs/qos/UNIVERSAL_QOS.xml`) and `qos_profile`
+(default: the file's `is_default_qos` profile). `header` names the routing
+fields inside a sample (below).
+
+**Entities follow the Interface, and nothing else**: a DataWriter per topic the
+unit publishes, a DataReader per topic it subscribes. `@idl.struct` has no
+"this is a topic" marker; a struct is a topic only because a `DdsUnit` lists
+it, so a nested `Header` never gets an entity.
+
+**Routes are keyed by topic, not opcode.** DDS puts the topic on the wire, so
+the route key is `(unit_code, topic_name)`, and callers name a topic by its
+class, a sample of it, or its name -- wherever the framed protocols take an
+opcode:
 
 ```python
-import rti.types as idl
-
-@idl.struct
-class Track:
-    header: Header = field(default_factory=Header)
-    x: float = 0.0
+unit.send_message(Track(track_id=1))              # topic from the sample's class
+status = unit.receive_message(Status, timeout=5)  # topic from the class
+unit.handle_on_receive(Status, on_status)          # or @route(Status) in a UnitHandler
 ```
 
-That absence is the point, and it is why `core/DDS/` is so much smaller than
-`core/IRS/`. IRS needs a registry because a binary payload carries no type
-information: something must look up a layout by `(unitCode, opCode)` or the
-bytes cannot be parsed at all. DDS is the opposite -- the type travels with the
-sample and RTI matches on (topic name, type name, QoS) itself -- so importing
-the module is the whole job. `dds.Topic(...)` is what registers the class with
-the participant.
+`unit_name` may be left out whenever exactly one peer is at the other end of
+the topic. An int is refused: DDS has no opcodes.
 
-Two ways this fails **silently**, with discovery succeeding and no sample ever
-arriving: the type NAME (defaults to the Python class name; set `type_name` on
-the topic entry when the peer's type came from real IDL under another name),
-and EXTENSIBILITY (`idl.final` / `idl.extensible` / `idl.mutable` must match the
-peer's IDL). `rtiddsspy -domainId <N>` shows what the peer actually advertises.
+**A topic is not a unit.** A DataReader serves every publisher of its topic at
+once, so the sending unit is read off the SAMPLE (`header.source_unit`; field
+names configurable via `config["header"]`), falling back to the Interface when
+it lists exactly one publisher. A topic with several publishers -- or one this
+unit also publishes, since a participant hears its own writes -- must carry the
+header, and a type that does not is a load error. A sample from a peer the
+Interface does not list as publishing that topic is warned about once and
+dropped.
+
+### Class identity
+
+The Interface imports the topic classes, and application code builds samples
+from them, so both must hold the SAME class objects. Generated files use
+absolute imports (a path-loaded Interface has no package to be relative to, and
+giving it one would load a private copy of every class); `load_dds_interface`
+keys a path by its resolved location, so one file is one module; and a class
+named like a topic but not identical to it is reported as "two copies of one
+generated module", never as an unknown topic.
 
 ### QoS
 
-One universal QoS XML shared by every topic is the normal shape: it is a
-library of named profiles, and per-topic settings live *inside* a profile as
-`topic_filter` attributes. Reading them requires the topic-aware accessors, and
-this matters more than it looks:
+One universal QoS XML of named profiles; per-topic settings live *inside* a
+profile as `topic_filter` attributes. Only the topic-aware accessors read them:
 
 ```
-set_topic_name_qos(profile, topic)       -> TopicQos
-set_topic_datawriter_qos(profile, topic) -> DataWriterQos
-set_topic_datareader_qos(profile, topic) -> DataReaderQos
+set_topic_*_qos(profile, topic)   # a named qos_profile
+get_topic_*_qos(topic)            # the file's default profile
 ```
 
-The profile-only accessors (`datawriter_qos_from_profile(profile)`) take no
-topic name and therefore **cannot see a `topic_filter` at all** -- they hand
-every topic the profile's baseline and never say so. They are kept strictly as
-the fallback for a file that declares no filters. `core/configs/qos/UNIVERSAL_QOS.xml`
-is a template with a worked example of both.
+The profile-only accessors (`datawriter_qos_from_profile(profile)`,
+`.datawriter_qos`) take no topic and so **cannot see a filter** -- they hand
+every topic the baseline and never say so, which is why `dds.py` does not use
+them for topics, writers or readers. Nothing applies until a QoS object is
+passed to an entity's **constructor**, and writer/reader QoS is what RxO
+matching compares: mismatch it and the pair never connects, with no error and
+no data.
 
-Nothing applies until a profile is pulled out per entity kind and passed to that
-entity's **constructor** -- QoS is largely immutable afterwards, which is why
-every entity is built with its QoS in hand. Writer/reader QoS is what discovery
-checks for RxO compatibility: mismatch it and the pair never connects, with no
-error and no data.
+### Lifecycle
+
+`participant.close()` closes every topic, writer and reader the participant
+contains, so teardown is that one call -- after the read loops are cancelled.
+The order is the one thing RTI cannot do for us: each loop's ReadCondition sits
+on `rti.asyncio`'s process-wide WaitSet, and cancelling the loop is what
+detaches it. A start that fails part-way closes what it had created.
 
 ### Everything else that differs
 
-- **Self-reception is real.** A participant's own DataReader matches its own
-  DataWriter, so a connection that both publishes and subscribes a topic hears
-  itself. `source_unit == our own unit code` is the filter; it costs nothing and
-  is more selective than `ignore_participant`, which would also block a
-  legitimate second process of ours on the same host.
-- **Direction is per topic** (`"publish"` / `"subscribe"` / `"both"`, defaulting
-  from `side`), and `can_send` / `can_receive` are the union across topics -- so
-  a subscribe-only DDS connection cannot be picked as a `CompositeUnit` sender.
-- **Echo is rejected at config load.** The echo lifecycle transmits raw bytes,
-  which a DataWriter cannot accept, so an echo here would never heartbeat and
-  its watchdog would then drop every unit on `EchoTimeout`. DDS LIVELINESS QoS
-  is the mechanism that belongs in that slot.
-- **`_do_send` takes a typed sample, not bytes**, and stamps `source_unit` /
-  `destination_unit` on the way out (values the caller set are never
-  overwritten). The peer routes on those exactly as we do.
-- **`port` is the DDS domain id**; `ip` / `local_ip` are unused. All units on
-  one connection must agree on the domain, since they share one participant.
+- **Two silent failures remain DDS's own**: the type NAME (the class name,
+  unless pinned with `@idl.struct(type_annotations=[idl.type_name(...)])`) and
+  EXTENSIBILITY must match the peer's IDL. `rtiddsspy -domainId <N>` shows what
+  a peer actually advertises.
+- **Echo is refused at config load.** It transmits raw bytes, which a
+  DataWriter cannot accept; LIVELINESS QoS is the mechanism that belongs there.
+- **`_do_send` takes a typed sample, not bytes**, checks that the destination
+  subscribes the topic, and stamps `source_unit` / `destination_unit` (values
+  the caller set are never overwritten).
 - **`rti.asyncio` must stay imported.** `DataReader.take_data_async` does not
-  exist until that import monkey-patches it on. It looks unused to a linter and
-  is what makes the read loop work at all.
+  exist until that import monkey-patches it on.
 
 ## Verified
 

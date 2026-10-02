@@ -3,17 +3,18 @@ A worked example of a DDS type module -- copy this shape for a real ICD.
 
 Nothing here registers anything with this project. `@idl.struct` builds the
 TypeSupport Connext needs, `dds.Topic(...)` in `connections/dds.py` registers it
-with the participant, and discovery does the rest. A connection reaches these
-classes by naming this module in `config['idl_modules']` and each class in a
-`config['topics']` entry's `type`.
+with the participant, and discovery does the rest. A struct becomes a TOPIC only
+by appearing in a unit's publish/subscribe list in a DDS Interface
+(`example_interface.py` imports `Track` and `Status` from here); the topic is
+named after the class. `Header` appears in none, so it never gets an entity.
 
 Two details matter for talking to a real unit, and both fail SILENTLY when they
 are wrong -- discovery succeeds, the entities appear in Admin Console, and no
 sample ever arrives:
 
   * The type NAME. It defaults to the Python class name. If the peer's type came
-    from real IDL it may be advertised as something else, in which case set
-    `type_name` on the topic's config entry (e.g. "MyModule::Track").
+    from real IDL it may be advertised as something else, in which case pin it
+    on the type: `@idl.struct(type_annotations=[idl.type_name("MyModule::Track")])`.
 
   * EXTENSIBILITY. `@idl.struct(type_annotations=[idl.final])` and friends must
     agree with the peer's IDL. `rtiddsspy -domainId <N>` shows what the peer
@@ -35,10 +36,10 @@ class Header:
     The routing header every message on this link carries.
 
     `connections/dds.py` reads `source_unit` off inbound samples to work out
-    which configured unit sent them -- a DataReader serves every publisher on
-    its topic at once, so the sample itself is the only thing that can say --
-    and stamps both fields on outbound ones. The field names are configurable
-    per connection via config['header'] if an ICD spells them differently.
+    which unit sent them -- a DataReader serves every publisher on its topic at
+    once, so the sample itself is the only thing that can say -- and stamps both
+    fields on outbound ones. The field names are configurable per connection
+    via config['header'] if an ICD spells them differently.
     """
     source_unit: idl.uint8 = 0
     destination_unit: idl.uint8 = 0

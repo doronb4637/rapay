@@ -1,0 +1,5 @@
+{
+  "protocol": "dds",
+  "unit": "SensorUnit",
+  "dds_interface": "core/DDS/Interfaces/Example/example_interface.py"
+}
