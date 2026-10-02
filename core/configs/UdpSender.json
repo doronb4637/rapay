@@ -1,8 +1,10 @@
 {
+  "$schema": "./connection.schema.json",
   "protocol": "udp",
   "side": "server",
   "ip": "127.0.0.1",
   "local_ip": "127.0.0.1",
+  "unitCode": 1,
   "connections": {
     "PingClient": {
       "port": 16000,

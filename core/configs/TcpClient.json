@@ -1,4 +1,5 @@
 {
+  "$schema": "./connection.schema.json",
   "protocol": "tcp",
   "side": "client",
   "ip": "127.0.0.1",

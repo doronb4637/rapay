@@ -299,29 +299,29 @@ def test_from_json_resolves_structures_per_unit():
     captures -- so the config and the registry cannot name the module
     differently."""
     config = ConnectionConfig.from_json(_base(connections={
-        "A": {"port": 5000, "unitCode": 9, "Structures": ["Test.test_messages"]},
-        "B": {"port": 5001, "unitCode": 10, "Structures": ["Tiful.tiful_to_dtu"]},
+        "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
+        "B": {"port": 5001, "unitCode": 10, "Structures": [TIFUL_MESSAGES]},
     }))
     assert config.structures_for("A") == (TEST_MESSAGES,)
     assert config.structures_for("B") == (TIFUL_MESSAGES,)
     assert config.unit_structures == {"A": (TEST_MESSAGES,), "B": (TIFUL_MESSAGES,)}
     # The raw spelling survives too -- a path cannot be recovered from a namespace.
-    assert config.connections["A"].structures_raw == ("Test.test_messages",)
+    assert config.connections["A"].structures_raw == (TEST_MESSAGES,)
 
 
 def test_all_structures_raw_is_the_deduplicated_union():
     """What ConnectionManager imports: miss this and a per-unit config would
     register no layouts at all."""
     config = ConnectionConfig.from_json(_base(connections={
-        "A": {"port": 5000, "unitCode": 9, "Structures": ["Test.test_messages"]},
-        "B": {"port": 5001, "unitCode": 10, "Structures": ["Tiful.tiful_to_dtu"]},
-        "C": {"port": 5002, "unitCode": 11, "Structures": ["Test.test_messages"]},
+        "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
+        "B": {"port": 5001, "unitCode": 10, "Structures": [TIFUL_MESSAGES]},
+        "C": {"port": 5002, "unitCode": 11, "Structures": [TEST_MESSAGES]},
     }))
-    assert config.all_structures_raw == ("Test.test_messages", "Tiful.tiful_to_dtu")
+    assert config.all_structures_raw == (TEST_MESSAGES, TIFUL_MESSAGES)
 
 
 def test_connection_level_structures_is_legal_for_a_single_unit():
-    config = ConnectionConfig.from_json(_base(Structures=["Test.test_messages"]))
+    config = ConnectionConfig.from_json(_base(Structures=[TEST_MESSAGES]))
     assert config.structures == (TEST_MESSAGES,)
     assert config.structures_for("Peer") == (TEST_MESSAGES,)
 
@@ -331,7 +331,7 @@ def test_connection_level_structures_with_several_units_is_rejected():
     to all of them is how two files used to overwrite each other."""
     with pytest.raises(ValueError, match="exactly one unit"):
         ConnectionConfig.from_json(_base(
-            Structures=["Test.test_messages"],
+            Structures=[TEST_MESSAGES],
             connections={
                 "A": {"port": 5000, "unitCode": 9},
                 "B": {"port": 5001, "unitCode": 10},
@@ -342,7 +342,7 @@ def test_connection_level_structures_with_several_units_is_rejected():
 def test_multicast_may_share_one_structures_list_across_receivers():
     """The sole exception: one sender fans out to many receivers over one IRS."""
     config = ConnectionConfig.from_json(_base(
-        protocol="multicast", side="sender", Structures=["Test.test_messages"],
+        protocol="multicast", side="sender", Structures=[TEST_MESSAGES],
         connections={
             "A": {"port": 5000, "unitCode": 9},
             "B": {"port": 5001, "unitCode": 10},
@@ -355,9 +355,9 @@ def test_unit_structures_replace_the_connection_level_list_as_a_group():
     """Same granularity rule as the echo opcode keys: a unit naming any
     structures file is describing its whole link."""
     config = ConnectionConfig.from_json(_base(
-        Structures=["Test.test_messages"],
+        Structures=[TEST_MESSAGES],
         connections={"Peer": {"port": 5000, "unitCode": 2,
-                              "Structures": ["Tiful.tiful_to_dtu"]}},
+                              "Structures": [TIFUL_MESSAGES]}},
     ))
     assert config.structures_for("Peer") == (TIFUL_MESSAGES,)
 
@@ -375,7 +375,7 @@ def test_a_unit_may_declare_no_structures_on_a_multi_unit_connection():
     """Byte-oriented units register no layouts at all (see CLAUDE.md 2a), so
     this is legal -- only a connection-LEVEL list is restricted."""
     config = ConnectionConfig.from_json(_base(connections={
-        "A": {"port": 5000, "unitCode": 9, "Structures": ["Test.test_messages"]},
+        "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
         "B": {"port": 5001, "unitCode": 10},
     }))
     assert config.structures_for("A") == (TEST_MESSAGES,)
@@ -383,7 +383,7 @@ def test_a_unit_may_declare_no_structures_on_a_multi_unit_connection():
 
 
 def test_structures_accepts_a_bare_string():
-    config = ConnectionConfig.from_json(_base(Structures="Test.test_messages"))
+    config = ConnectionConfig.from_json(_base(Structures=TEST_MESSAGES))
     assert config.structures_for("Peer") == (TEST_MESSAGES,)
 
 

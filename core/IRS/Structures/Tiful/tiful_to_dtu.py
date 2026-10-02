@@ -4,6 +4,7 @@ from IRS.REGISTRY import register_message
 
 Tiful = 0x01
 DTU = 0x02
+
 """ Data Types """
 @baseType(1)
 class E_Flag(IntEnum):

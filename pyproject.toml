@@ -19,11 +19,16 @@ dds = []
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core", "core.*"]
+namespaces = true
+include = ["core", "core.*", "IRS-stubs"]
 exclude = [
     "core.tests", "core.tests.*",
+    "core.IRS.Structures", "core.IRS.Structures.*",
     "core.IRS.benchmark", "core.IRS.benchmark.*",
 ]
+
+[tool.setuptools.package-data]
+"IRS-stubs" = ["*.pyi"]
 
 #python -m pip install build
 #python -m build --wheel
