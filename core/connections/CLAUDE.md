@@ -30,15 +30,6 @@ There is no separate lint/build step. DDS support (`dds.py`) is optional and sel
 (`DdsConnection = None`) when the RTI Connext Python API isn't installed; the rest of the
 framework works without it.
 
-> **Known blocker with the shipped `tools` stub.** `tools.general.validated_opCode` /
-> `validated_unitCode` are typed `int | str` but their bodies are `int(x, 0)`, which raises
-> `TypeError` on an `int`. Every config in this repo writes unit codes and opcodes as ints, so
-> with the stub in place `ConnectionConfig.from_json` rejects all of them and the suite fails at
-> the first test. This is a `tools` implementation gap, not a `connections` one: the whole suite
-> passes once those two functions accept ints (`int(x, 0) if isinstance(x, str) else int(x)`).
-> Do not work around it inside this package — coercing to `str` at the call sites would defeat
-> the point of routing coercion through `tools` at all.
-
 ## Layout
 
 ```
@@ -69,10 +60,10 @@ neither the payload codec nor the project's generic helpers:
 
 | import | used for |
 | --- | --- |
-| `IRS.irs_parser.irs_to_bytes` / `parse_irs` | the payload codec, in `base.Connection._encode` / `_decode` (there is no local `irs_parser.py` any more; `connections/__init__.py` re-exports both names so `from connections import parse_irs` still works) |
-| `tools.general.validated_opCode` | every opcode entering the framework: `send_message`, `periodic_sending`, `stop_periodic`, and `config._as_opcode` |
-| `tools.general.validated_unitCode` | both kinds of unit code, in `config._as_unit_code` |
-| `tools.general.import_modules` | `ConnectionManager._import_config_libs` -- imports every module in a config's `Structures` (connection-level plus per-unit) so `IRS.REGISTRY` is populated before the connection exists |
+| `IRS.irs_parser.irs_to_bytes` / `parse_irs` | the payload codec, in `base.Connection._encode` / `_decode` |
+| `tools.general.extract_opcode` / `validated_opcode` | every opcode entering the framework (`Connection._message_key`), and `config._as_opcode` |
+| `tools.general.validated_unitcode` | both kinds of unit code, in `config._as_unit_code` |
+| `tools.general.import_modules` | `Connection.__init__` -- imports every module in a config's `Structures` (connection-level plus per-unit) so `IRS.REGISTRY` is populated however the connection was built |
 | `tools.general.resolve_module_name` | `config.resolve_structures` -- the namespace a structures spelling registers under. Shared with `import_modules` so the two can never disagree |
 | `tools.file_functions.read_unit_config` | `ConnectionManager.create(name, "TcpServer")` -- loads `config/Units/TcpServer.json` |
 
@@ -238,20 +229,20 @@ Inbound routing still comes from the transport (which socket/port a message arri
 the header, so the header's unit code is informational to us and identifying to the peer.
 
 It's **required** — `ConnectionConfig.from_json` raises `ValueError` if missing/empty, no
-default/anonymous-unit fallback. `config.ports` is derived, not separately maintained.
-Each connection's `unitCode` is likewise **required** (no default/derived value -- a spec
-missing it is a load-time `ValueError`), and always range- and collision-checked. Lookups:
-`endpoint_for(name)`, `unit_code_for(name)`, `unit_from_port(port)`,
-`port_for_unit(name)`. `ConnectionConfig` is `frozen=True, slots=True` — a live `Connection`
+default/anonymous-unit fallback. Each connection's `unitCode` is likewise **required** (no
+default/derived value -- a spec missing it is a load-time `ValueError`), and always range- and
+collision-checked; ports must be unique too. Lookups: `config.connections[name]` (the
+`UnitEndpoint`), `unit_names`, `unit_codes`, `unit_for_code(code)`.
+`ConnectionConfig` is `frozen=True, slots=True` — a live `Connection`
 caches state derived from it, so mutating it post-construction would desync those caches.
 
 ### 4. opcode: mandatory on send, subscription key on receive
 
 ```python
-connection.send_message(data: bytes, opcode: int, unit_name: str | None = None) -> None
+connection.send_message(data: IrsMessage | bytes, opcode: int, unit_name: str | None = None) -> None
 connection.receive_message(opcode: int, unit_name: str | None = None,
                             timeout: float | int | None = None,
-                            trigger_function: Callable[[], Any] | None = None) -> tuple[str, bytes]
+                            trigger_function: Callable[[], Any] | None = None) -> IrsMessage
 connection.handle_on_receive(opcode: int, callback_func: Callable[[bytes], Any],
                              unit_name: str | None = None) -> None
 connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
@@ -261,14 +252,15 @@ connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
 (auto-resolved); otherwise required and validated — `receive_message()` only returns a message
 matching both the requested `opcode` and resolved `unit_name`.
 
-The parameter is a *selector*, turned into the route key by two `Connection` hooks:
-`_message_key(selector)` (default `tools.general.extract_opcode`) and `_send_key(data, selector)`
-(default: the same, so framed links still require the opcode). **DDS overrides both**: its
-selector is the topic — the `@idl.struct` class, a sample of it, or the topic name — its key is
-the topic name, and on send it is optional because a sample names its own topic. DDS also
-overrides `_resolve_route` so `unit_name` may be omitted whenever exactly one peer is at the other
-end of the topic. `send_message` resolves through `_resolve_route` (not `_resolve_unit`) for
-exactly that reason.
+The parameter is a *selector*, turned into the route key by `Connection` hooks:
+`_message_key(selector)` (default `tools.general.extract_opcode`; `None` is a `TypeError`) and
+`_send_key(data, selector)` (default: the same, so framed links require the opcode). Sends pick
+their destination through `_send_unit(unit_name, key)`. **DDS overrides all three**: its selector
+is the topic — the `@idl.struct` class, a sample of it, or the topic name — its key is the topic
+name; on send the selector is optional (a sample names its own topic, and a selector naming a
+different topic is refused), and the destination is None (every subscriber) unless the caller
+names a subscriber of the topic. DDS also overrides `_resolve_route` so a receive's `unit_name` may
+be omitted whenever exactly one peer is at the other end of the topic.
 
 ### 5. Subscribe-or-drop message filtering
 
@@ -296,7 +288,7 @@ exists, the message is discarded immediately.**
   exception propagates.
 
 - **`handle_on_receive`** registers a standing `callback_func(payload)` for a route until
-  `stop_on_receive()`/`close()`. Callbacks run on an **executor thread, never the event loop**
+  `stop_on_receive()`. Registrations survive `close()`, so a restarted connection keeps them. Callbacks run on an **executor thread, never the event loop**
   (a callback that called back into the sync API from the loop thread would deadlock).
   Exceptions inside callbacks are logged, not propagated.
 
@@ -345,16 +337,17 @@ exceptions logged and swallowed rather than killing the read loop.
 ### 5a. Per-unit connection state
 
 `Connection` tracks which units currently have a live peer in `self._active_units` (distinct from
-`config.connected_units`, which is only what was *configured*). Protocol classes report
+`config.unit_names`, which is only what was *configured*). Protocol classes report
 transitions on the loop thread:
 
 | protocol | connected when | disconnected when |
 | --- | --- | --- |
-| TCP server | `_on_client` accepts a peer | that peer's read loop ends |
-| TCP client | `open_connection` succeeds | its read loop ends |
-| UDP client | `_do_start` (remote_addr known) | unit disconnect |
-| UDP server | first inbound datagram (`_remember_peer`) | unit disconnect |
-| Multicast / DDS | `_do_start` (group join / entities built) | unit disconnect |
+| TCP server | `_on_client` accepts a peer (a previous one is closed) | that peer's read loop ends |
+| TCP client | `open_connection` succeeds (again, after a drop, with `start(retry=True)`) | its read loop ends |
+| UDP client | `_do_start` (remote_addr known), then any inbound datagram | unit disconnect |
+| UDP server | any inbound datagram (`_remember_peer`) | unit disconnect (learned peer forgotten) |
+| Multicast | `_do_start`, then any inbound datagram | unit disconnect |
+| DDS | `_do_start` (entities built) | unit disconnect |
 
 DDS is the one row with no per-unit transport behind it: reader/writer belong to a *topic* and
 serve every unit speaking it, so `_do_disconnect_unit` closes nothing. Nothing triggers it
@@ -421,7 +414,8 @@ Parsed by `config.EchoSettings`:
 | `EchoInterval` (`echo_interval`) | seconds between outbound echoes | `1.0` |
 | `EchoTimeout` (`echo_timeout`) | seconds of silence before the unit is dropped | `5.0` |
 
-Stays inactive for a unit unless both of that unit's opcodes resolve. `EchoTimeout` must exceed
+Stays inactive for a unit unless both of that unit's opcodes resolve. The heartbeat body is
+always empty (`b""`). `EchoTimeout` must exceed
 `EchoInterval` (config-time `ValueError` otherwise, naming the unit when it came from a unit block).
 
 #### Hierarchical resolution: connection-level default, per-unit override
@@ -455,9 +449,9 @@ difference is load-bearing:
   its timeout still wants the shared interval, and `timeout > interval` is checked on the merge.
 
 Missing at both levels means echo stays off **for that unit alone** — the same "absent means
-disabled" rule as before, now applied per unit instead of per connection. An explicit `null`
-(SilentUnit above) is the opt-out: it overrides the global value like any other, and an absent
-opcode disables the heartbeat.
+disabled" rule as before, now applied per unit instead of per connection. An explicit `null` on
+any opcode key (SilentUnit above) is the opt-out: a present key names the group even when null,
+so the connection-level opcodes drop out whatever spelling they used.
 
 Resolution happens once, in `ConnectionConfig.from_json`, and lands in `UnitEndpoint.echo`
 (`config.echo_for(unit)` / `config.unit_echoes`). Doing it at load time keeps the invariant the
@@ -476,9 +470,11 @@ would aim heartbeats at peers that don't exist yet — each on that unit's own r
 2. **Consumption** — `_dispatch_incoming` intercepts `recv_echo_opcode` messages before the
    subscribe-or-drop check: refreshes liveness, never visible to `receive_message()`, no reply
    sent (replying would double-answer with a single shared `echo_opcode`).
-3. **Watchdog** — if no echo within `EchoTimeout`, disconnects just that unit: cancels its
-   periodic senders, fails any parked `receive_message()` with `ConnectionError`, drops standing
-   callbacks, closes its socket. Other units on the same connection are untouched. Only on
+3. **Watchdog** — if no echo within `EchoTimeout`, disconnects just that unit
+   (`_disconnect_unit`): cancels its periodic senders, fails any parked `receive_message()` with
+   `ConnectionError`, drops its on-receive callbacks, and calls `_do_disconnect_unit` -- TCP closes
+   the peer socket; UDP and Multicast keep theirs open so the unit's next datagram re-arms it.
+   Other units on the same connection are untouched. Only on
    `can_receive` connections. Sleeps until each unit's deadline (`last echo + EchoTimeout`)
    rather than polling a fixed tick, so worst-case detection is exactly `EchoTimeout`, not ~2x.
 
@@ -486,10 +482,9 @@ A unit that drops has its echo tasks cancelled and its liveness entry cleared; a
 back re-arms both through the same `_mark_unit_connected` path, so reconnection needs no special
 case. `_last_echo_at` is seeded at connect time, not at `start()`.
 
-An echo send that raises `ConnectionError` retires the unit on the spot (`_mark_unit_disconnected`
-then return) rather than warning and retrying: the link is provably gone. This closes the race
-with the read loop noticing the same thing — whichever gets there first wins, the other is a
-no-op. Other exceptions keep the old behaviour (log, retry next tick, let the watchdog decide).
+An echo send that raises `ConnectionError` retires the unit on the spot, through the same
+`_disconnect_unit` the watchdog uses, rather than warning and retrying: the link is provably gone.
+Other exceptions keep the old behaviour (log, retry next tick, let the watchdog decide).
 
 ### 6a. Periodic sending
 
@@ -512,7 +507,9 @@ composition (not monkey-patching). Every `Connection` exposes `can_send`/`can_re
 `Side.RECEIVER` -> receive-only, else duplex — no `mode`/`duplex` extra key for multicast).
 `CompositeUnit.__init__` picks the one send-capable and one receive-capable member and raises
 immediately if ambiguous/impossible; `send_message`/`receive_message` delegate to the right
-member with the same signature as a plain `Connection`.
+member with the same signature as a plain `Connection`. `create_composite` registers only the
+composite -- its members belong to it -- and registers nothing if any step fails.
+`wait_for_connected_units` applies a name only to the members that configure it.
 
 ```python
 beacon = mgr.create_composite("BeaconUnit", {
@@ -529,8 +526,11 @@ beacon = mgr.create_composite("BeaconUnit", {
 ### 8. Lifecycle: absolute teardown
 
 `Connection.close()` closes every socket/transport (`_do_stop()`), cancels and awaits every
-tracked background task, then cancels any `receive_message()` calls still parked on a
-subscription. Every async task the framework starts (read loops, echo replies/senders/watchdogs,
+tracked background task, then fails any `receive_message()` still parked with `ConnectionError`;
+a `wait_for_connected_units()` parked across it returns False. While closing, `_closing` stops
+dispatch, connect transitions and reconnects. A `_do_start` that fails part-way is undone the same
+way (`_abort_start`: `_do_stop` plus cancelling the tasks that attempt spawned), so neither a
+retry nor a later `start()` inherits half a connection. Every async task the framework starts (read loops, echo replies/senders/watchdogs,
 `periodic_sending` schedules) goes through `self._track()`, so one sweep over `self._tasks`
 covers all of them. `ConnectionManager.shutdown_all()` does this for every managed connection in
 reverse creation order, tolerating individual failures.
@@ -580,7 +580,8 @@ its `TopicSpec`s, each carrying the peer `publishers`/`subscribers` the routing 
 `config.dds` holds the result; `unitCode`/`connections` are derived from it (a peer's `port` is
 the domain id), and `side`/`ip`/`local_ip` are **None**. A DDS config naming `side`, `ip`,
 `local_ip`, `unitCode`, `connections`, `topics`, `idl_modules`/`idl_file`, `Structures` or an echo
-key is refused with the reason — never silently ignored.
+key is refused with the reason, and so is any other key it does not read (including unknown
+`header` sub-keys) — never silently ignored.
 
 **Deployment defaults are constants** in `dds_config`: `DEFAULT_DOMAIN_ID` and `DEFAULT_QOS_FILE`
 (absolute, derived from `__file__`, so it does not depend on the working directory). The

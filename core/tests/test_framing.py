@@ -74,9 +74,8 @@ def test_unpack_message_rejects_truncated_payload():
         unpack_message(truncated)
 
 
-def test_unpack_message_ignores_trailing_garbage_after_declared_length():
-    """A well-formed datagram followed by extra bytes still parses -- only
-    the declared length is sliced off; nothing downstream reads past it."""
-    frame = pack_message(unit_code=1, opcode=1, payload=b"hello") + b"EXTRA"
-    header, payload = unpack_message(frame)
-    assert payload == b"hello"
+def test_unpack_message_rejects_trailing_bytes():
+    """A datagram longer than its header declares is as corrupt as a short one."""
+    frame = pack_message(unit_code=1, opcode=1, payload=b"hello")
+    with pytest.raises(IRSDataError):
+        unpack_message(frame + b"xx")

@@ -2,30 +2,20 @@
 connection_framework
 =====================
 
-A protocol-agnostic connection management system for TCP, UDP, Multicast and
-RTI Connext DDS, driven by JSON configuration, with asyncio doing the I/O
-under the hood and a plain synchronous API on top.
-
-Message payloads themselves are not this package's business: `irs_to_bytes` /
-`parse_irs` come from the project's `IRS` package and are re-exported here so
-`from connections import parse_irs` keeps working, and config/opcode coercion
-plus config-file loading come from `tools`.
+JSON-configured TCP, UDP, Multicast and RTI Connext DDS connections: asyncio
+does the I/O, callers get a plain synchronous API. Build connections through
+`ConnectionManager`; payloads are encoded/decoded by the project's IRS package.
 
 See README.md for the full design write-up.
 """
+import logging
 
-from core.IRS.irs_parser import irs_to_bytes, parse_irs
+from core.annotations import IrsMessage, OpCode
 
-from .config import ConnectionConfig, Protocol, Side
-from .framing import (
-    HEADER_SIZE,
-    MessageHeader,
-    IRSDataError,
-    pack_message,
-    unpack_message,
-    unpack_header,
-)
-from .base import Connection, ConnectedTarget, IrsMessage, Unit, get_event_loop_thread
+from ._routes import ConnectCallback, ReceiveCallback
+from .config import ConnectionConfig, Side, TransportProtocol
+from .framing import IRSDataError
+from .base import Connection, ConnectedTarget, Unit
 from .composite import CompositeUnit
 from .handlers import UnitHandler, on_connect, route
 from .manager import ConnectionManager
@@ -34,23 +24,23 @@ from .tcp import TcpConnection
 from .udp import UdpConnection
 from .multicast import MulticastConnection
 
-ConnectionManager.register(Protocol.TCP, TcpConnection)
-ConnectionManager.register(Protocol.UDP, UdpConnection)
-ConnectionManager.register(Protocol.MULTICAST, MulticastConnection)
-# DDS requires the RTI Connext Python API.
+ConnectionManager.register(TransportProtocol.TCP, TcpConnection)
+ConnectionManager.register(TransportProtocol.UDP, UdpConnection)
+ConnectionManager.register(TransportProtocol.MULTICAST, MulticastConnection)
+# DDS requires the RTI Connext Python API; any other import error is a real bug.
 try:
     from .dds import DdsConnection
-    ConnectionManager.register(Protocol.DDS, DdsConnection)
-except ImportError:
-    print("[!]: rti.connext module is not installed, DDS connections will not work")
+    ConnectionManager.register(TransportProtocol.DDS, DdsConnection)
+except ModuleNotFoundError as exc:
+    if (exc.name or "").split(".")[0] != "rti":
+        raise
+    logging.getLogger("connmgr").warning("rti.connextdds is not installed: DDS connections are unavailable")
     DdsConnection = None
 
 __all__ = [
-    "ConnectionConfig", "Protocol", "Side",
-    "HEADER_SIZE", "MessageHeader", "IRSDataError",
-    "pack_message", "unpack_message", "unpack_header",
-    "Connection", "Unit", "get_event_loop_thread",
-    "ConnectedTarget", "IrsMessage", "irs_to_bytes", "parse_irs",
-    "CompositeUnit", "UnitHandler", "route", "on_connect", "ConnectionManager",
+    "ConnectionManager", "ConnectionConfig", "TransportProtocol", "Side",
+    "Connection", "Unit", "CompositeUnit", "ConnectedTarget",
     "TcpConnection", "UdpConnection", "MulticastConnection", "DdsConnection",
+    "UnitHandler", "route", "on_connect",
+    "IrsMessage", "OpCode", "ReceiveCallback", "ConnectCallback", "IRSDataError",
 ]

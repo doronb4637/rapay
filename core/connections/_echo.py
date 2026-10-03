@@ -56,8 +56,7 @@ class EchoHost(Protocol):
     def _echo_for(self, unit_name: UnitName) -> EchoSettings: ...
     def _track(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]: ...
     async def _do_send(self, unit_name: str, data: Any, opcode: int) -> None: ...
-    def _mark_unit_disconnected(self, unit_name: str) -> None: ...
-    async def _disconnect_unit(self, unit_name: str) -> None: ...
+    async def _disconnect_unit(self, unit_name: str, reason: str = ...) -> None: ...
 
 
 class UnitEchoSupervisor:
@@ -147,16 +146,8 @@ class UnitEchoSupervisor:
     # The two loops
     # ------------------------------------------------------------------ #
     async def _sender_loop(self, unit_name: UnitName, echo: EchoSettings) -> None:
-        """Transmit the echo opcode to `unit_name` every `EchoInterval` for as
-        long as that unit stays connected. Unconditional by design: this is the
-        only thing keeping the remote watchdog quiet, so it must not depend on
-        having received anything.
-
-        `echo` is passed in rather than looked up per tick -- it is this unit's
-        already-resolved settings and cannot change under a live connection
-        (`ConnectionConfig` is frozen), so re-resolving each interval would only
-        be work.
-        """
+        """Send the echo every `EchoInterval` while the unit stays connected --
+        unconditionally, since it is what keeps the REMOTE watchdog quiet."""
         assert echo.send_opcode is not None
         while True:
             await asyncio.sleep(echo.interval)
@@ -167,10 +158,10 @@ class UnitEchoSupervisor:
             except asyncio.CancelledError:
                 raise
             except ConnectionError as exc:
-                # The link is provably gone, so retire the unit here rather than
-                # race the read loop to it; _mark_unit_disconnected is idempotent.
-                logger.info("echo to unit %s undeliverable (%s); marking it down", unit_name, exc)
-                self._host._mark_unit_disconnected(unit_name)
+                # The link is provably gone: retire the unit fully, exactly as
+                # the watchdog would, rather than wait for it.
+                logger.info("echo to unit %s undeliverable (%s); disconnecting it", unit_name, exc)
+                await self._host._disconnect_unit(unit_name, f"echo undeliverable: {exc}")
                 return
             except Exception as exc:  # noqa: BLE001 - a failed echo must not kill the loop
                 # Not a link failure (codec/protocol): retry, and let the
@@ -178,23 +169,9 @@ class UnitEchoSupervisor:
                 logger.warning("echo send to unit %s failed: %s", unit_name, exc)
 
     async def _watchdog_loop(self, unit_name: UnitName, echo: EchoSettings) -> None:
-        """
-        Disconnect `unit_name` once ITS OWN `EchoTimeout` has passed with no
-        echo from it -- units on one connection may be watched on different
-        deadlines.
-
-        Rather than polling on a fixed tick, each pass sleeps until this unit's
-        *deadline* (`last echo + EchoTimeout`). Waking earlier only to find the
-        deadline has not passed is wasted work, and waking on a fixed
-        `EchoTimeout` tick instead would push worst-case detection out to nearly
-        2x it -- an echo landing just before a tick resets the clock, but the
-        next check is still a full timeout away. Sleeping to the deadline wakes
-        at most once per timeout period AND detects the death at the deadline
-        itself.
-
-        Each pass re-reads the clock, so an echo arriving mid-sleep simply
-        pushes the deadline out and the next pass sleeps again.
-        """
+        """Drop the unit once its EchoTimeout passes without an echo. Sleeps to
+        the deadline, not a fixed tick, so detection happens at exactly
+        EchoTimeout rather than up to 2x."""
         while True:
             last_seen = self._last_echo_at.get(unit_name)
             if last_seen is None:

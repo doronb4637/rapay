@@ -4,7 +4,7 @@ on, which unit it is in it, and the deployment settings (domain, QoS) that are
 not part of the system contract.
 
 A DDS Interface is a generated module written in `core.DDS.interface`'s
-vocabulary (reference instance: `core/DDS/idl_types/Example/example_interface.py`):
+vocabulary (reference instance: `core/DDS/Interfaces/Example/example_interface.py`):
 
     from core.DDS import DdsUnit
     from my_icd.topics import Status, Track

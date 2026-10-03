@@ -201,29 +201,20 @@ def test_drop_unit_with_an_unknown_code_is_a_no_op(table, loop):
 # --------------------------------------------------------------------------- #
 # Connection teardown
 # --------------------------------------------------------------------------- #
-def test_drop_all_callbacks_clears_both_registries(table):
-    table.register_callback(ROUTE_A, noop)
-    table.register_connect("Peer", noop)
-
-    table.drop_all_callbacks()
-
-    assert table.owner_of(ROUTE_A) is None
-    assert table.connect_callback("Peer") is None
-
-
-def test_cancel_all_subscriptions_releases_every_parked_receive(table, loop):
+def test_fail_all_subscriptions_releases_every_parked_receive(table, loop):
     first = table.claim(ROUTE_A, loop)
     second = table.claim(OTHER_UNIT_ROUTE, loop)
+    reason = ConnectionError("closed")
 
-    table.cancel_all_subscriptions()
+    table.fail_all_subscriptions(reason)
 
-    assert first.cancelled() and second.cancelled()
+    assert first.exception() is reason and second.exception() is reason
     assert table.owner_of(ROUTE_A) is None
     assert table.owner_of(OTHER_UNIT_ROUTE) is None
 
 
-def test_cancel_all_subscriptions_leaves_a_delivered_future_alone(table, loop):
+def test_fail_all_subscriptions_leaves_a_delivered_future_alone(table, loop):
     future = table.claim(ROUTE_A, loop)
     future.set_result("delivered")
-    table.cancel_all_subscriptions()
+    table.fail_all_subscriptions(ConnectionError("closed"))
     assert future.result() == "delivered"

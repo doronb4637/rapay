@@ -4,7 +4,7 @@ EchoSettings resolution. Pure logic, no I/O, no event loop.
 """
 import pytest
 
-from core.connections.config import ConnectionConfig, EchoSettings, Protocol, Side
+from core.connections.config import ConnectionConfig, EchoSettings, Side, TransportProtocol
 
 
 def _base(**overrides):
@@ -63,7 +63,7 @@ def test_own_unit_code_accepts_every_key_spelling(alias):
 
 def test_protocol_and_side_are_lowercased_and_coerced_to_enums():
     config = ConnectionConfig.from_json(_base(protocol="TCP", side="SERVER"))
-    assert config.protocol is Protocol.TCP
+    assert config.protocol is TransportProtocol.TCP
     assert config.side is Side.SERVER
 
 
@@ -140,31 +140,56 @@ def test_multiple_connections_with_distinct_codes_accepted():
         "B": {"port": 5001, "unitCode": 10},
     }))
     assert config.unit_codes == {"A": 9, "B": 10}
-    assert config.ports == [5000, 5001]
-    assert sorted(config.connected_units) == ["A", "B"]
+    assert [endpoint.port for endpoint in config.connections.values()] == [5000, 5001]
+    assert config.unit_names == ["A", "B"]
 
 
 # --------------------------------------------------------------------------- #
 # extra / lookups
 # --------------------------------------------------------------------------- #
-def test_unrecognized_keys_land_in_extra():
-    config = ConnectionConfig.from_json(_base(idl_file="x.py", ttl=3))
+def test_unrecognized_top_level_keys_land_in_extra_with_a_warning(caplog):
+    with caplog.at_level("WARNING", logger="connmgr.config"):
+        config = ConnectionConfig.from_json(_base(idl_file="x.py"))
     assert config.extra["idl_file"] == "x.py"
-    assert config.extra["ttl"] == 3
+    assert "idl_file" in caplog.text
 
 
-def test_endpoint_for_unknown_unit_raises():
-    config = ConnectionConfig.from_json(_base())
-    with pytest.raises(ValueError, match="Peer"):
-        config.endpoint_for("Ghost")
+def test_unknown_unit_keys_are_refused():
+    with pytest.raises(ValueError, match="Structure"):
+        ConnectionConfig.from_json(_base(connections={
+            "Peer": {"port": 5000, "unitCode": 7, "Structure": ["x"]}}))
 
 
-def test_unit_from_port_and_port_for_unit_round_trip():
-    config = ConnectionConfig.from_json(_base())
-    assert config.unit_from_port(5000) == "Peer"
-    assert config.unit_from_port(9999) is None
-    assert config.port_for_unit("Peer") == 5000
-    assert config.port_for_unit("Ghost") is None
+def test_a_port_shared_by_two_units_is_refused():
+    with pytest.raises(ValueError, match="both use port"):
+        ConnectionConfig.from_json(_base(connections={
+            "A": {"port": 5000, "unitCode": 7}, "B": {"port": 5000, "unitCode": 8}}))
+
+
+@pytest.mark.parametrize("bad", [True, 5000.5, None])
+def test_a_non_integer_port_is_refused(bad):
+    with pytest.raises(ValueError, match="port"):
+        ConnectionConfig.from_json(_base(connections={"Peer": {"port": bad, "unitCode": 7}}))
+
+
+@pytest.mark.parametrize("missing", ["side", "ip", "protocol"])
+def test_a_missing_required_key_is_a_value_error(missing):
+    data = _base()
+    del data[missing]
+    with pytest.raises(ValueError, match=missing):
+        ConnectionConfig.from_json(data)
+
+
+def test_a_side_the_protocol_does_not_have_is_refused():
+    with pytest.raises(ValueError, match="not a udp side"):
+        ConnectionConfig.from_json(_base(protocol="udp", side="receiver"))
+
+
+def test_a_null_echo_opcode_opts_out_whatever_the_global_spelling():
+    config = ConnectionConfig.from_json(_base(
+        RecvEchoOpcode=99, SendEchoOpcode=100,
+        connections={"Peer": {"port": 5000, "unitCode": 7, "echo_opcode": None}}))
+    assert not config.connections["Peer"].echo.enabled
 
 
 def test_config_is_frozen():
@@ -274,8 +299,8 @@ def test_from_json_resolves_echo_per_connection():
         },
         echo_opcode=99, EchoInterval=1.0, EchoTimeout=5.0,
     ))
-    assert config.echo_for("A").recv_opcode == 10
-    assert config.echo_for("B").recv_opcode == 99
+    assert config.connections["A"].echo.recv_opcode == 10
+    assert config.connections["B"].echo.recv_opcode == 99
     assert config.echo.recv_opcode == 99  # connection-level default itself
 
 
@@ -302,8 +327,8 @@ def test_from_json_resolves_structures_per_unit():
         "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
         "B": {"port": 5001, "unitCode": 10, "Structures": [TIFUL_MESSAGES]},
     }))
-    assert config.structures_for("A") == (TEST_MESSAGES,)
-    assert config.structures_for("B") == (TIFUL_MESSAGES,)
+    assert config.connections["A"].structures == (TEST_MESSAGES,)
+    assert config.connections["B"].structures == (TIFUL_MESSAGES,)
     assert config.unit_structures == {"A": (TEST_MESSAGES,), "B": (TIFUL_MESSAGES,)}
     # The raw spelling survives too -- a path cannot be recovered from a namespace.
     assert config.connections["A"].structures_raw == (TEST_MESSAGES,)
@@ -323,7 +348,7 @@ def test_all_structures_raw_is_the_deduplicated_union():
 def test_connection_level_structures_is_legal_for_a_single_unit():
     config = ConnectionConfig.from_json(_base(Structures=[TEST_MESSAGES]))
     assert config.structures == (TEST_MESSAGES,)
-    assert config.structures_for("Peer") == (TEST_MESSAGES,)
+    assert config.connections["Peer"].structures == (TEST_MESSAGES,)
 
 
 def test_connection_level_structures_with_several_units_is_rejected():
@@ -348,7 +373,7 @@ def test_multicast_may_share_one_structures_list_across_receivers():
             "B": {"port": 5001, "unitCode": 10},
         },
     ))
-    assert config.structures_for("A") == config.structures_for("B") == (TEST_MESSAGES,)
+    assert config.connections["A"].structures == config.connections["B"].structures == (TEST_MESSAGES,)
 
 
 def test_unit_structures_replace_the_connection_level_list_as_a_group():
@@ -359,7 +384,7 @@ def test_unit_structures_replace_the_connection_level_list_as_a_group():
         connections={"Peer": {"port": 5000, "unitCode": 2,
                               "Structures": [TIFUL_MESSAGES]}},
     ))
-    assert config.structures_for("Peer") == (TIFUL_MESSAGES,)
+    assert config.connections["Peer"].structures == (TIFUL_MESSAGES,)
 
 
 def test_no_structures_anywhere_stays_unscoped():
@@ -367,7 +392,7 @@ def test_no_structures_anywhere_stays_unscoped():
     means "search every module", not "no layouts"."""
     config = ConnectionConfig.from_json(_base())
     assert config.structures == ()
-    assert config.structures_for("Peer") == ()
+    assert config.connections["Peer"].structures == ()
     assert config.all_structures_raw == ()
 
 
@@ -378,13 +403,13 @@ def test_a_unit_may_declare_no_structures_on_a_multi_unit_connection():
         "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
         "B": {"port": 5001, "unitCode": 10},
     }))
-    assert config.structures_for("A") == (TEST_MESSAGES,)
-    assert config.structures_for("B") == ()
+    assert config.connections["A"].structures == (TEST_MESSAGES,)
+    assert config.connections["B"].structures == ()
 
 
 def test_structures_accepts_a_bare_string():
     config = ConnectionConfig.from_json(_base(Structures=TEST_MESSAGES))
-    assert config.structures_for("Peer") == (TEST_MESSAGES,)
+    assert config.connections["Peer"].structures == (TEST_MESSAGES,)
 
 
 def test_structures_rejects_a_non_list():

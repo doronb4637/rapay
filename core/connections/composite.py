@@ -1,16 +1,9 @@
 """
-CompositeUnit -- combines several direction-limited connections into one
-cohesive logical Unit.
+CompositeUnit -- several direction-limited connections presented as one Unit.
 
-This is composition, not function-injection: `CompositeUnit` holds a list
-of member `Connection` instances, inspects each member's `can_send` /
-`can_receive` capability flags (set naturally by the protocol classes
-themselves -- e.g. MulticastConnection flips these based on config.side)
-to decide which member handles which direction, and exposes the exact same
-public surface as a plain `Connection` (start/stop/send_message/
-receive_message). Nothing is monkey-patched onto anything; each member
-connection stays a fully independent, correctly-typed object with its own
-sockets, its own read loop, and its own lifecycle.
+Each member keeps its own sockets and lifecycle; the composite only picks, from
+the members' `can_send` / `can_receive` flags, which one handles each direction,
+and exposes the same public surface as a `Connection`.
 """
 from __future__ import annotations
 
@@ -49,35 +42,43 @@ class CompositeUnit:
 
     @property
     def receiver(self) -> Connection | None:
-        """The member owning this composite's INBOUND direction, or None if it
-        has no receive-capable member.
+        """The member owning the inbound direction -- where every on-receive and
+        on-connect registration lands, and whose config `install_handler`
+        resolves a handler's `unitCode` against."""
+        return self._receiver
 
-        Public because it is canonical outside this class too:
-        `handlers.install_handler` resolves a `UnitHandler`'s `unitCode` against
-        this member's config, and it is the member every on-receive and
-        on-connect registration lands on -- so the two cannot be allowed to
-        disagree about which member that is.
-        """
+    def _require_sender(self) -> Connection:
+        if self._sender is None:
+            raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
+        return self._sender
+
+    def _require_receiver(self) -> Connection:
+        if self._receiver is None:
+            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         return self._receiver
 
     # ------------------------------------------------------------------ #
-    # Lifecycle -- fans out to every member, still an ABSOLUTE teardown.
+    # Lifecycle -- fans out to every member.
     # ------------------------------------------------------------------ #
     def start(self, retry: bool = False) -> None:
-        """Start every member. Each registers its own atexit teardown when it
-        is constructed, so there is nothing to add here."""
-        for member in self._members:
-            member.start(retry)
+        """Start every member; if one fails, close the ones already started."""
+        started: list[Connection] = []
+        try:
+            for member in self._members:
+                member.start(retry)
+                started.append(member)
+        except BaseException:
+            for member in reversed(started):
+                member.close()
+            raise
 
     def close(self, timeout: float | int | None = 5.0) -> None:
-        """Stops every member even if one of them raises, then re-raises so
-        the caller still finds out something went wrong -- a partial
-        teardown never passes silently."""
+        """Close every member even if one raises, then raise naming the failures."""
         errors: list[Exception] = []
         for member in self._members:
             try:
                 member.close(timeout=timeout)
-            except Exception as exc:  # noqa: BLE001 - deliberately broad: collect & continue
+            except Exception as exc:  # noqa: BLE001 - collect, keep closing the rest
                 errors.append(exc)
         if errors:
             raise RuntimeError(
@@ -86,32 +87,47 @@ class CompositeUnit:
             )
 
     # ------------------------------------------------------------------ #
-    # Public API -- identical shape to Connection.send_message/receive_message
+    # Public API -- same shape as Connection
     # ------------------------------------------------------------------ #
     def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None,
                      unit_name: str | None = None) -> None:
-        if self._sender is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
-        self._sender.send_message(data, opcode, unit_name)
+        self._require_sender().send_message(data, opcode, unit_name)
 
     @property
     def active_units(self) -> set[str]:
-        """Units connected on ANY member: a composite's Unit is reachable if
-        either half of it is."""
+        """Units connected on ANY member."""
         return set().union(*(member.active_units for member in self._members))
 
     def wait_for_connected_units(
         self, target: ConnectedTarget, timeout: float | int | None = None
     ) -> bool:
-        """Wait for every member in turn, so the composite is only "connected"
-        once both directions are. `timeout` is the budget for the whole call,
-        not per member."""
+        """Wait until `target` is connected on every member that configures it,
+        so a composite counts as connected only once both directions are.
+        `timeout` covers the whole call, not each member."""
         deadline = None if timeout is None else time.monotonic() + float(timeout)
-        for member in self._members:
+        for member, member_target in self._member_targets(target):
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            if not member.wait_for_connected_units(target, remaining):
+            if not member.wait_for_connected_units(member_target, remaining):
                 return False
         return True
+
+    def _member_targets(self, target: ConnectedTarget) -> list[tuple[Connection, ConnectedTarget]]:
+        """Split `target` per member: a count applies to each, names only to the
+        members that configure them."""
+        if isinstance(target, int):
+            return [(member, target) for member in self._members]
+        names = {target} if isinstance(target, str) else set(target)
+        pairs: list[tuple[Connection, ConnectedTarget]] = []
+        covered: set[str] = set()
+        for member in self._members:
+            mine = names & set(member.config.connections)
+            if mine:
+                pairs.append((member, sorted(mine)))
+                covered |= mine
+        unknown = names - covered
+        if unknown:
+            raise ValueError(f"CompositeUnit {self.name!r}: no member configures unit(s) {sorted(unknown)}")
+        return pairs
 
     def receive_message(
         self,
@@ -120,9 +136,7 @@ class CompositeUnit:
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
     ) -> IrsMessage:
-        if self._receiver is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
-        return self._receiver.receive_message(opcode, unit_name, timeout, trigger_function)
+        return self._require_receiver().receive_message(opcode, unit_name, timeout, trigger_function)
 
     def handle_on_receive(
         self,
@@ -130,32 +144,18 @@ class CompositeUnit:
         callback_func: ReceiveCallback,
         unit_name: str | None = None,
     ) -> None:
-        """Standing on-receive handler, registered on the member that owns
-        this composite's inbound direction."""
-        if self._receiver is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
-        self._receiver.handle_on_receive(opcode, callback_func, unit_name)
+        self._require_receiver().handle_on_receive(opcode, callback_func, unit_name)
 
     def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool:
-        if self._receiver is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
-        return self._receiver.stop_on_receive(opcode, unit_name)
+        return self._require_receiver().stop_on_receive(opcode, unit_name)
 
     def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None:
-        """Standing on-connect handler, registered on the same member
-        `handle_on_receive` uses -- the receive-capable one. Not a coin
-        flip: `install_handler` (`handlers.py`) already treats that member's
-        `config.unit_codes` as canonical for resolving a `UnitHandler`'s
-        `unitCode` on a composite, so a connect handler installed the same
-        way fires on the same member it was resolved against."""
-        if self._receiver is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
-        self._receiver.handle_on_connect(callback_func, unit_name)
+        """Registered on the receive-capable member -- the one `install_handler`
+        resolves unit codes against."""
+        self._require_receiver().handle_on_connect(callback_func, unit_name)
 
     def stop_on_connect(self, unit_name: str | None = None) -> bool:
-        if self._receiver is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
-        return self._receiver.stop_on_connect(unit_name)
+        return self._require_receiver().stop_on_connect(unit_name)
 
     def periodic_sending(
         self,
@@ -164,14 +164,7 @@ class CompositeUnit:
         opcode: OpCode | None = None,
         unit_name: str | None = None,
     ) -> None:
-        """Repeating send, routed to the same member that handles
-        send_message -- a composite's outbound direction is its send-capable
-        member, periodic or not."""
-        if self._sender is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
-        self._sender.periodic_sending(data, interval, opcode, unit_name)
+        self._require_sender().periodic_sending(data, interval, opcode, unit_name)
 
     def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
-        if self._sender is None:
-            raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
-        return self._sender.stop_periodic(opcode, unit_name)
+        return self._require_sender().stop_periodic(opcode, unit_name)

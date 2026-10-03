@@ -143,7 +143,7 @@ def test_own_unit_code_is_stamped_in_the_header_not_the_peers(manager, free_port
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": 21}},
     })
-    header = unpack_header(connection._frame("Peer", b"payload", opcode=5))
+    header = unpack_header(connection._frame(b"payload", opcode=5))
     assert header.unit_code == 77
     assert header.opcode == 5
     assert header.data_length == 7

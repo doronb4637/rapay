@@ -33,7 +33,7 @@ pytest.importorskip("rti.connextdds", reason="RTI Connext Python API not install
 import rti.connextdds as dds  # noqa: E402
 
 import core.connections.dds as dds_module  # noqa: E402
-from core.connections.config import ConnectionConfig, Protocol  # noqa: E402
+from core.connections.config import ConnectionConfig, TransportProtocol  # noqa: E402
 from core.connections.dds import DdsConnection  # noqa: E402
 from core.connections.dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE,  # noqa: E402
                                          TopicDirection, load_dds_interface, resolve_unit)
@@ -347,7 +347,7 @@ def test_publishing_and_subscribing_one_topic_is_both(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_a_dds_config_is_one_unit_of_an_interface():
     config = ConnectionConfig.from_json(dds_config())
-    assert config.protocol is Protocol.DDS
+    assert config.protocol is TransportProtocol.DDS
     assert (config.side, config.ip, config.local_ip) == (None, None, None)
     assert config.unitCode == SENSOR_CODE
     assert list(config.connections) == [CONTROL]
@@ -402,7 +402,8 @@ def test_domain_and_qos_file_can_still_be_overridden():
                                                    qos_profile="MyLib::Reliable"))
     assert (config.dds.domain_id, config.dds.qos_profile) == (TEST_DOMAIN, "MyLib::Reliable")
     assert config.dds.qos_file == Path(QOS_FILE).resolve()
-    assert config.ports == [TEST_DOMAIN], "a DDS endpoint's port is its domain"
+    assert {endpoint.port for endpoint in config.connections.values()} == {TEST_DOMAIN}, \
+        "a DDS endpoint's port is its domain"
 
 
 @pytest.mark.parametrize("bad", [-1, "7", True, 1.5])
@@ -512,6 +513,11 @@ def test_the_sender_comes_from_the_header():
 
 def test_a_headerless_sample_falls_back_to_the_sole_publisher():
     control = build(CONTROL, header={"field": "no_such_header"})
+    assert control._sending_unit(Track(), spec_of(control, "Track")) == SENSOR
+
+
+def test_an_unstamped_header_falls_back_to_the_sole_publisher():
+    control = build(CONTROL)
     assert control._sending_unit(Track(), spec_of(control, "Track")) == SENSOR
 
 
@@ -673,6 +679,35 @@ def test_periodic_sending_is_keyed_by_topic():
         deadline.wait(0.02)
     assert sensor.stop_periodic(Track) is True, "stop_periodic(Track) must find the schedule"
     assert len(writer.written) >= 2
+
+
+def test_a_named_destination_is_checked_and_stamped():
+    sensor = build(SENSOR)
+    sensor._writers["Track"] = RecordingWriter()
+    sample = Track()
+    sensor.send_message(sample, unit_name=CONTROL)
+    assert sample.header.destination_unit == CONTROL_CODE
+    with pytest.raises(ValueError, match="does not subscribe"):
+        sensor.send_message(Track(), unit_name="NoSuchUnit")
+
+
+def test_a_selector_naming_another_topic_is_refused():
+    sensor = build(SENSOR)
+    sensor._writers["Track"] = RecordingWriter()
+    with pytest.raises(ValueError, match="names topic 'Status'"):
+        sensor.send_message(Track(), Status)
+
+
+def test_an_int_opcode_is_refused_on_dds():
+    with pytest.raises(TypeError, match="no opcodes"):
+        build(SENSOR).send_message(Track(), 5)
+
+
+def test_unknown_dds_config_keys_are_refused():
+    with pytest.raises(ValueError, match="no setting"):
+        ConnectionConfig.from_json(dds_config(domainID=3))
+    with pytest.raises(ValueError, match="sorce_unit"):
+        ConnectionConfig.from_json(dds_config(header={"sorce_unit": "src"}))
 
 
 # --------------------------------------------------------------------------- #

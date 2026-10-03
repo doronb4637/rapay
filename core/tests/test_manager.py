@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from core.connections.config import Protocol
+from core.connections.config import TransportProtocol
 from core.connections.manager import ConnectionManager
 from core.connections.udp import UdpConnection
 from core.tests._messages import TEXT_UNIT_CODE
@@ -37,7 +37,7 @@ def test_create_rejects_config_of_wrong_type(manager):
 
 def test_create_rejects_unregistered_protocol(manager, free_port):
     cfg = _udp_config(free_port, protocol="dds")
-    if ConnectionManager._registry.get(Protocol.DDS) is not None:
+    if ConnectionManager._registry.get(TransportProtocol.DDS) is not None:
         pytest.skip("DDS is registered in this environment (RTI installed)")
     with pytest.raises(ValueError, match="protocol"):
         manager.create("c", cfg)
@@ -93,7 +93,7 @@ def test_context_manager_shuts_down_on_exception():
 # --------------------------------------------------------------------------- #
 # create_composite()
 # --------------------------------------------------------------------------- #
-def test_create_composite_names_members_with_a_prefix(manager, free_ports):
+def test_create_composite_registers_only_the_composite(manager, free_ports):
     port_send, port_recv = free_ports(2)
     composite = manager.create_composite("beacon", {
         "transport": {
@@ -108,8 +108,26 @@ def test_create_composite_names_members_with_a_prefix(manager, free_ports):
         },
     })
     assert manager.get("beacon") is composite
-    assert manager.get("beacon.transport") is not None
-    assert manager.get("beacon.receive") is not None
+    assert list(manager._connections) == ["beacon"], "members belong to the composite"
+
+
+def test_create_refuses_a_taken_name(manager, free_ports):
+    port_a, port_b = free_ports(2)
+    manager.create("c", _udp_config(port_a))
+    with pytest.raises(ValueError, match="already registered"):
+        manager.create("c", _udp_config(port_b))
+
+
+def test_a_failed_create_composite_registers_nothing(manager, free_ports):
+    port_a, port_b = free_ports(2)
+    duplex = {"protocol": "udp", "unitCode": 100, "side": "server", "ip": "127.0.0.1",
+              "local_ip": "127.0.0.1"}
+    with pytest.raises(ValueError, match="more than one send-capable"):
+        manager.create_composite("beacon", {
+            "a": {**duplex, "connections": {"Peer": {"port": port_a, "unitCode": TEXT_UNIT_CODE}}},
+            "b": {**duplex, "connections": {"Peer": {"port": port_b, "unitCode": TEXT_UNIT_CODE}}},
+        })
+    assert manager._connections == {}
 
 
 # --------------------------------------------------------------------------- #

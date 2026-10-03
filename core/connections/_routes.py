@@ -12,10 +12,8 @@ over a live subscription, registering a callback over a subscription,
 registering one over a callback) are all refused HERE rather than in four
 separate methods on `Connection`, each with its own nearly-identical message.
 
-Connect callbacks live here too. They are keyed by unit name alone -- a connect
-event has no opcode -- but they share this object because they share its
-lifecycle: `drop_unit()` and the teardown helpers have to reach every table at
-once, or a retired unit keeps a live registration.
+Connect callbacks live here too: keyed by unit name alone (a connect event has
+no opcode), but `drop_unit()` must reach every table at once.
 
 Everything here runs ON the shared event-loop thread and is deliberately not
 thread-safe: `Connection`'s public API already marshals every mutation onto that
@@ -186,23 +184,11 @@ class RouteTable:
         for route in [key for key in self._callbacks if key[0] == unit_code]:
             del self._callbacks[route]
 
-    def drop_all_callbacks(self) -> None:
-        """Forget every standing registration, on-receive and on-connect.
-
-        Called BEFORE a connection's background tasks are cancelled, so no
-        in-flight dispatch can find a callback to invoke on the way down.
-        """
-        self._callbacks.clear()
-        self._connect_callbacks.clear()
-
-    def cancel_all_subscriptions(self) -> None:
-        """Release every parked `receive_message()` by cancelling its future.
-
-        Called LAST during teardown, once the sockets and tasks are already
-        gone, so a caller is woken to a connection that is fully down rather
-        than one mid-collapse.
-        """
+    def fail_all_subscriptions(self, reason: BaseException) -> None:
+        """Fail every parked `receive_message()` with `reason` (connection
+        teardown). Called last, once sockets and tasks are gone, so the caller
+        wakes to a connection that is fully down."""
         for future in self._subscriptions.values():
             if not future.done():
-                future.cancel()
+                future.set_exception(reason)
         self._subscriptions.clear()

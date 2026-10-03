@@ -332,7 +332,7 @@ def validated_unitcode(unitCode: UnitCode | str) -> UnitCode:
 
 
 def extract_opcode(opcode: int | str | IrsMessage) -> int:
-    valid = getattr(opcode, "_opCode", False)
-    if valid:
-        return valid
+    message_opcode = getattr(opcode, "_opCode", None)
+    if message_opcode is not None:  # not truthiness: opcode 0 is valid
+        return message_opcode
     return validated_opcode(opcode)

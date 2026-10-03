@@ -1,13 +1,11 @@
 """
 Multicast connection: UDP datagrams plus IP_ADD_MEMBERSHIP group joins.
 
-Direction (send-only vs receive-only vs duplex) is derived ENTIRELY from
-`config.side` -- there is no separate "mode"/"duplex" flag in config.extra
-for this class:
+Direction comes entirely from `config.side`:
 
-    Side.SENDER   -> send-only
-    Side.RECEIVER -> receive-only
-    anything else (CLIENT/SERVER/PUBLISHER/SUBSCRIBER) -> duplex
+    Side.SENDER          -> send-only
+    Side.RECEIVER        -> receive-only
+    Side.CLIENT/SERVER   -> duplex
 """
 from __future__ import annotations
 
@@ -15,6 +13,7 @@ import asyncio
 import logging
 import socket
 import struct
+import sys
 
 from core.IRS.irs_parser import IRSDataError
 
@@ -25,6 +24,7 @@ from .framing import unpack_message
 logger = logging.getLogger("connmgr.multicast")
 
 MCAST_GROUP_REQ = struct.Struct("4s4s")
+
 
 class _MulticastProtocol(asyncio.DatagramProtocol):
     def __init__(self, owner: MulticastConnection, unit_name: str) -> None:
@@ -37,6 +37,10 @@ class _MulticastProtocol(asyncio.DatagramProtocol):
         except IRSDataError:
             logger.warning("dropping malformed multicast datagram from %s (unit=%s)", addr, self._unit_name)
             return
+        if self._owner._is_own(header.unit_code):
+            return
+        # Re-arms a unit the echo watchdog marked down.
+        self._owner._mark_unit_connected(self._unit_name)
         self._owner._dispatch_incoming(self._unit_name, header.opcode, payload)
 
     def error_received(self, exc: Exception) -> None:
@@ -45,54 +49,63 @@ class _MulticastProtocol(asyncio.DatagramProtocol):
 
 class MulticastConnection(FramedConnection):
     """
-    config.extra recognizes only:
-      "ttl": int, send-side TTL (default 1 -- stays on the local subnet)
-
-    Direction comes entirely from config.side -- see module docstring.
+    `ip` is the multicast group. config.extra recognizes only `"ttl"`: the
+    send-side hop limit, 0-255 (default 1 -- stays on the local subnet).
     """
 
-    def __init__(self, config: ConnectionConfig):
+    def __init__(self, config: ConnectionConfig) -> None:
         super().__init__(config)
-        if config.side == Side.SENDER:
-            self.can_send, self.can_receive = True, False
-        elif config.side == Side.RECEIVER:
-            self.can_send, self.can_receive = False, True
-        else:
-            self.can_send, self.can_receive = True, True
+        self.can_send = config.side != Side.RECEIVER
+        self.can_receive = config.side != Side.SENDER
+        ttl = config.extra.get("ttl", 1)
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or not 0 <= ttl <= 255:
+            raise ValueError(f"config['ttl'] must be an integer 0-255, got {ttl!r}")
+        self._ttl = ttl
         self._transports: dict[str, asyncio.DatagramTransport] = {}
-        self.multicast_ip = self.config.ip
 
-    async def _do_start(self) -> None:
-        loop = asyncio.get_running_loop()
+    def _is_own(self, sender_code: int) -> bool:
+        """A duplex member hears its own sends through multicast loopback."""
+        return self.can_send and self.can_receive and sender_code == self._own_unit_code
 
-        for unit_name, endpoint in self.config.connections.items():
-            port = endpoint.port
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    def _open_socket(self, unit_name: str, port: int) -> socket.socket:
+        group = self.config.ip
+        local_ip = self.config.local_ip
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if hasattr(socket, "SO_REUSEPORT"):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-
             if self.can_receive:
-                sock.bind((self.config.local_ip, port))
-                mreq = MCAST_GROUP_REQ.pack(
-                    self.multicast_ip,
-                    socket.inet_aton(self.config.local_ip),
-                )
+                # Windows receives group traffic on a socket bound to the
+                # interface; elsewhere that filters it out, so bind to any.
+                sock.bind((local_ip if sys.platform == "win32" else "", port))
+                mreq = MCAST_GROUP_REQ.pack(socket.inet_aton(group), socket.inet_aton(local_ip))
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                logger.info("multicast unit %s joined group %s on %s", unit_name, self.multicast_ip, port)
+                logger.info("multicast unit %s joined group %s:%s", unit_name, group, port)
             else:
-                sock.bind((self.config.local_ip, 0))
-                ttl = self.config.extra.get("ttl", 1)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-                # TODO
-                # Direct outgoing multicast packets through the intended physical NIC
-                # sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.config.local_ip))
-                # TODO Until here
-                logger.info("multicast unit %s ready to send to group %s:%s", unit_name, self.config.ip, port)
+                sock.bind((local_ip, 0))
+            if self.can_send:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self._ttl)
+                if local_ip != "0.0.0.0":
+                    # Send through the configured NIC, not the default route's.
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip))
+                logger.info("multicast unit %s ready to send to group %s:%s", unit_name, group, port)
+        except BaseException:
+            sock.close()
+            raise
+        return sock
 
-            transport, _protocol = await loop.create_datagram_endpoint(
-                lambda unit=unit_name: _MulticastProtocol(self, unit), sock=sock
-            )
+    async def _do_start(self) -> None:
+        loop = asyncio.get_running_loop()
+        for unit_name, endpoint in self.config.connections.items():
+            sock = self._open_socket(unit_name, endpoint.port)
+            try:
+                transport, _protocol = await loop.create_datagram_endpoint(
+                    lambda unit=unit_name: _MulticastProtocol(self, unit), sock=sock
+                )
+            except BaseException:
+                sock.close()
+                raise
             self._transports[unit_name] = transport
             self._mark_unit_connected(unit_name)
 
@@ -102,21 +115,13 @@ class MulticastConnection(FramedConnection):
         transport = self._transports.get(unit_name)
         if transport is None:
             raise ConnectionError(f"multicast connection for unit {unit_name!r} not started")
-        port = self.config.port_for_unit(unit_name)
-        if port is None:
-            raise ValueError(f"no configured port for unit {unit_name!r}")
-        frame = self._frame(unit_name, data, opcode)
-        transport.sendto(frame, (self.multicast_ip, port))
+        port = self.config.connections[unit_name].port
+        transport.sendto(self._frame(data, opcode), (self.config.ip, port))
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:
-        """Close this unit's socket -- which also drops its multicast group
-        membership -- after an echo timeout, leaving other units joined."""
-        transport = self._transports.pop(unit_name, None)
-        if transport is None:
-            return
-        logger.warning("multicast unit %s: leaving group after echo timeout", unit_name)
-        transport.close()
-        self._mark_unit_disconnected(unit_name)
+        """Keep the socket and the group membership: the next datagram from the
+        unit marks it connected again."""
+        logger.warning("multicast unit %s: marked down; waiting for it to send again", unit_name)
 
     async def _do_stop(self) -> None:
         for transport in self._transports.values():

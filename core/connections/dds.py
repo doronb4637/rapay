@@ -62,7 +62,7 @@ import rti.asyncio as rti_asyncio  # type: ignore
 from ._routes import MessageKey, RouteKey, UnitName
 from .base import Connection, OpCode
 from .config import ConnectionConfig
-from .dds_config import DdsUnitConfig, TopicDirection, TopicSpec, second_copy_message
+from .dds_config import DdsUnitConfig, TopicDirection, TopicSpec
 
 logger = logging.getLogger("connmgr.dds")
 
@@ -136,11 +136,6 @@ class DdsConnection(Connection):
             [spec.name for spec in self._dds.topics if spec.subscribes],
             [name for name, _code in self._dds.peers], self._dds.domain_id,
             self._dds.qos_file.name, self._dds.qos_profile or "default profile")
-
-    @property
-    def domain_id(self) -> int:
-        """The DDS domain this unit's participant joins."""
-        return self._dds.domain_id
 
     # ------------------------------------------------------------------ #
     # QoS
@@ -251,25 +246,28 @@ class DdsConnection(Connection):
                     f"the senders apart. Add the header to the type, or point config['header'] "
                     f"at the fields it does carry.")
 
-    def _stamp_outgoing(self, sample: Any) -> None:
+    def _stamp_outgoing(self, sample: Any, unit_name: UnitName | None) -> None:
         """
-        Fill in `source_unit` on an outgoing sample.
-
-        The peer identifies the sender by it, so leaving it at zero is an easy
-        and completely invisible mistake -- the sample goes out fine and is
-        discarded at the far end. A value the caller set explicitly is never
-        overwritten; only a field still at its zero default is filled.
+        Fill in `source_unit` (and `destination_unit`, when the send named one)
+        on an outgoing sample. The far end identifies the sender by the source,
+        so leaving it at zero silently gets the sample dropped there. Only
+        fields still at their zero default are filled; caller-set values stay.
         """
         if not self._stamp_header:
             return
         header = self._header_of(sample)
         if header is None:
             return
-        if not getattr(header, self._source_field, None):
+        stamps = [(self._source_field, self._own_unit_code)]
+        if unit_name is not None:
+            stamps.append((self._destination_field, self._unit_code_for(unit_name)))
+        for field, code in stamps:
+            if getattr(header, field, None):
+                continue
             try:
-                setattr(header, self._source_field, self._own_unit_code)
+                setattr(header, field, code)
             except Exception as exc:  # noqa: BLE001 - a read-only/absent field is not fatal
-                logger.debug("could not stamp %r: %s", self._source_field, exc)
+                logger.debug("could not stamp %r: %s", field, exc)
 
     def _warn_once(self, cause: tuple[Any, ...], message: str, *args: Any) -> None:
         if cause not in self._warned:
@@ -286,20 +284,22 @@ class DdsConnection(Connection):
         once, and dropped.
         """
         source = self._header_value(sample, self._source_field)
-        if source is None:
+        code = None if source is None else int(source)
+        if code is not None and code == self._own_unit_code:
+            # Our own write, heard back by our own reader. Preferred to
+            # `ignore_participant`, which would also block a legitimate second
+            # process of ours on the same host.
+            return None
+        if code == 0 and self.config.unit_for_code(0) is None:
+            code = None  # a header the sender never stamped
+        if code is None:
             if len(spec.publishers) == 1:
                 return spec.publishers[0]
             self._warn_once(
                 ("no-header", spec.name),
-                "topic %r: samples carry no %r field and the DDS Interface lists %d publishers "
+                "topic %r: samples carry no stamped %r and the DDS Interface lists %d publishers "
                 "of it %s, so the sender cannot be identified -- dropping",
                 spec.name, self._source_path, len(spec.publishers), list(spec.publishers))
-            return None
-        code = int(source)
-        if code == self._own_unit_code:
-            # Our own write, heard back by our own reader. Preferred to
-            # `ignore_participant`, which would also block a legitimate second
-            # process of ours on the same host.
             return None
         unit_name = self.config.unit_for_code(code)
         if unit_name is None:
@@ -324,37 +324,40 @@ class DdsConnection(Connection):
         """A topic class, a sample of it, or its name -> the topic name."""
         return self._dds.topic_for(topic_id).name
 
-    def send_message(self, data: Any, opcode: OpCode | None = None,
-                     unit_name: str | None = None) -> None:
+    def _send_key(self, data: Any, opCode: OpCode | None) -> MessageKey:
         """
-        Publish `data` on the topic its own class carries.
-
-        A sample is the whole message: DDS puts the topic, not an opcode, on the
-        wire and delivers to every subscriber, so there is no key to compute
-        and no destination to resolve. `opcode` and `unit_name` exist only to
-        keep the `Unit` signature and are ignored.
+        A sample names its own topic, so `opCode` is optional on a send; given,
+        it must name the same topic. With no sample (`stop_periodic`) the
+        selector alone names it.
         """
-        self._loop_thread.await_coroutine(self._do_send(data))
+        if data is None:
+            return self._message_key(opCode)
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"DDS publishes typed samples, not bytes: build an instance of one of "
+                f"{self._dds.topic_names}")
+        spec = self._dds.topic_for(data)
+        if opCode is not None and self._message_key(opCode) != spec.name:
+            raise ValueError(
+                f"the sample is topic {spec.name!r}, but the call names topic {self._message_key(opCode)!r}")
+        if not spec.publishes:
+            raise ValueError(
+                f"{self._dds.unit} does not publish {spec.name!r} in the DDS Interface (it only "
+                f"subscribes it)")
+        return spec.name
 
-    def periodic_sending(self, data: Any, interval: int | float, opcode: OpCode | None = None,
-                         unit_name: str | None = None) -> None:
-        """`send_message` on a schedule, filed under the sample's topic. `opcode` is ignored."""
-        key = self._message_key(data)
-        interval_seconds = float(interval)
-        if interval_seconds <= 0:
-            raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
-        unit, route_key = self._resolve_route(unit_name, key)
-        self._loop_thread.await_coroutine(self._start_periodic(unit, route_key, data, key, interval_seconds))
-
-    async def _periodic_send_loop(self, unit_name: str, data: Any, key: MessageKey, interval: float) -> None:
-        while True:
-            try:
-                await self._do_send(data)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("periodic send (topic=%s) failed: %s", key, exc)
-            await asyncio.sleep(interval)
+    def _send_unit(self, unit_name: str | None, key: MessageKey) -> UnitName | None:
+        """None -- every subscriber of the topic -- unless the caller names one,
+        which must then subscribe it. A named destination is stamped into the
+        header; DDS still delivers to every subscriber."""
+        if unit_name is None:
+            return None
+        spec = self._dds.topic_for(key)
+        if unit_name not in spec.subscribers:
+            raise ValueError(
+                f"{unit_name!r} does not subscribe {spec.name!r} in the DDS Interface; its "
+                f"subscribers are {list(spec.subscribers)}")
+        return unit_name
 
     @staticmethod
     def _speakers(spec: TopicSpec) -> tuple[str, ...]:
@@ -407,22 +410,19 @@ class DdsConnection(Connection):
     # ------------------------------------------------------------------ #
     async def _do_start(self) -> None:
         global _live_connections
-        try:
-            # The participant is the unit of discovery and owns everything below
-            # it; its QoS (transports, discovery peers) can only be set here.
-            self._participant = dds.DomainParticipant(self._dds.domain_id, self._participant_qos())
-            for spec in self._dds.topics:
-                self._create_entities(self._participant, spec)
-        except BaseException:
-            await self._close_entities()
-            raise
+        # The participant is the unit of discovery and owns everything below
+        # it; its QoS (transports, discovery peers) can only be set here. A
+        # failure part-way is undone by `Connection._abort_start` -> `_do_stop`.
+        self._participant = dds.DomainParticipant(self._dds.domain_id, self._participant_qos())
+        for spec in self._dds.topics:
+            self._create_entities(self._participant, spec)
         _live_connections += 1
         self._counted_live = True
         logger.info(
             "DDS unit %s joined domain %d: %d writer(s) %s, %d reader(s) %s",
             self._dds.unit, self._dds.domain_id, len(self._writers), list(self._writers),
             len(self._readers), list(self._readers))
-        for unit in self.config.connected_units:
+        for unit in self.config.unit_names:
             self._mark_unit_connected(unit)
 
     def _create_entities(self, participant: dds.DomainParticipant, spec: TopicSpec) -> None:
@@ -455,29 +455,24 @@ class DdsConnection(Connection):
         """
         try:
             async for sample in reader.take_data_async():
-                unit_name = self._sending_unit(sample, spec)
-                if unit_name is not None:
-                    self._dispatch_incoming(unit_name, spec.name, sample)
+                try:
+                    unit_name = self._sending_unit(sample, spec)
+                    if unit_name is not None:
+                        self._dispatch_incoming(unit_name, spec.name, sample)
+                except Exception:
+                    # One bad sample must not stop the topic.
+                    logger.exception("DDS topic %s: dropping a sample that could not be routed", spec.name)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("DDS read loop failed for topic %s", spec.name)
 
-    async def _do_send(self, sample: Any) -> None:  # type: ignore[override]
-        """Publish one sample on its class's topic, to every subscriber."""
-        if isinstance(sample, (bytes, bytearray, memoryview)):
-            raise TypeError(
-                f"DDS publishes typed samples, not bytes: build an instance of one of "
-                f"{self._dds.topic_names}")
-        spec = self._dds.topic_for(sample)
-        if not spec.publishes:
-            raise ValueError(
-                f"{self._dds.unit} does not publish {spec.name!r} in the DDS Interface (it only "
-                f"subscribes it)")
-        writer = self._writers.get(spec.name)
+    async def _do_send(self, unit_name: UnitName | None, sample: Any, opcode: MessageKey) -> None:
+        """Publish one sample on topic `opcode`, to every subscriber."""
+        writer = self._writers.get(opcode)
         if writer is None:
-            raise ConnectionError(f"topic {spec.name!r} has no DataWriter yet: start() the connection first")
-        self._stamp_outgoing(sample)
+            raise ConnectionError(f"topic {opcode!r} has no DataWriter yet: start() the connection first")
+        self._stamp_outgoing(sample, unit_name)
         writer.write(sample)
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:
@@ -485,10 +480,8 @@ class DdsConnection(Connection):
         Nothing to close for one unit.
 
         A DDS reader/writer belongs to a TOPIC and serves every unit speaking
-        it, so closing entities here would cut off the other units too. There is
-        also nothing that triggers this in practice: echo is refused on DDS
-        configs, so the watchdog that calls it never arms. The base class has
-        already marked the unit disconnected by the time this runs.
+        it, so closing entities here would cut off the other units too. Echo is
+        refused on DDS configs, so nothing triggers this in practice.
         """
         logger.debug(
             "DDS unit %s marked disconnected; topic entities are shared and stay open", unit_name)

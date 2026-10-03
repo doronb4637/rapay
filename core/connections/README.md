@@ -27,15 +27,13 @@ Transports, routing and lifecycle live here. The payload codec and the
 project's generic helpers do not, and are imported from their own packages:
 
 - **`IRS`** -- `irs_to_bytes` / `parse_irs`, used by `base.Connection._encode`
-  and `._decode`. There is no local `irs_parser.py` any more; the package
-  re-exports both names, so `from connections import parse_irs` still resolves
-  to exactly the same functions.
-- **`tools.general`** -- `validated_opCode` normalises every opcode entering
-  the framework (`send_message`, `periodic_sending`, `stop_periodic`, and
-  `config._as_opcode`); `validated_unitCode` does the same for both kinds of
+  and `._decode`.
+- **`tools.general`** -- `extract_opcode` / `validated_opcode` normalise every
+  opcode entering the framework (`Connection._message_key`, and
+  `config._as_opcode`); `validated_unitcode` does the same for both kinds of
   unit code in `config._as_unit_code`; `import_modules` loads a config's
-  `Structures` message libraries in `ConnectionManager`, which is what
-  populates `IRS.REGISTRY` before any connection exists to use it, and
+  `Structures` message libraries in `Connection.__init__`, which is what
+  populates `IRS.REGISTRY` however the connection was built, and
   `resolve_module_name` names the namespace each one registers under.
 - **`tools.file_functions.read_unit_config`** -- turns a unit configuration
   *name* into its JSON, so `mgr.create("radar", "TcpServer")` reads
@@ -144,11 +142,11 @@ header, so a mislabelled header cannot misroute anything.
 
 It is **required** -- `ConnectionConfig.from_json` raises `ValueError` if it's
 missing or empty, and there is no "default"/anonymous-unit fallback. There is
-no separate port list to keep in sync with it; `config.ports` is derived.
-`unitCode` is optional (defaulting to the low byte of the port) but is always
-range-checked and collision-checked, because two units sharing a code would
-collapse into one routing slot. Lookups: `endpoint_for(name)`,
-`unit_code_for(name)`, `unit_from_port(port)`, `port_for_unit(name)`.
+no separate port list to keep in sync with it. Each unit's `unitCode` is
+required and always range-checked and collision-checked, because two units
+sharing a code would collapse into one routing slot; ports must be unique for
+the same reason. Lookups: `config.connections[name]` (the `UnitEndpoint`),
+`unit_names`, `unit_codes`, `unit_for_code(code)`.
 
 `ConnectionConfig` is a `frozen=True, slots=True` dataclass: a live
 `Connection` caches state derived from it (unit codes, echo settings) and
@@ -206,22 +204,18 @@ the whole registry.
 Every message now carries an `opcode`, and the API is:
 
 ```python
-connection.send_message(data: bytes, opcode: int | None = None, unit_name: str | None = None) -> None
+connection.send_message(data: IrsMessage | bytes, opcode: int | None = None, unit_name: str | None = None) -> None
 connection.receive_message(opcode: int, unit_name: str | None = None,
                             timeout: float | int | None = None,
-                            trigger_function: Callable[[], Any] | None = None) -> tuple[str, bytes]
+                            trigger_function: Callable[[], Any] | None = None) -> IrsMessage
 connection.handle_on_receive(opcode: int, callback_func: Callable[[bytes], Any],
                              unit_name: str | None = None) -> None
 connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-Every message declares what kind of message it is. `opcode` may be omitted
-(or passed as `None`) on `send_message` only when `data` is an IRS message
-object with its own `_opCode` -- it is auto-detected from there; a raw
-`bytes` payload has no such attribute, so `opcode` is effectively mandatory
-for it. Everywhere else (`receive_message`, `handle_on_receive`,
-`stop_on_receive`) `opcode` stays required -- those are subscribing to a
-route, and there is no message object to read one from. `unit_name` stays
+Every message declares what kind of message it is: on a framed link `opcode`
+is required everywhere, and omitting it is a `TypeError`. It may be an int, a
+`"0x.."` string, or an IRS message class/object carrying `_opCode`. `unit_name` stays
 optional wherever exactly one unit is connected (auto-resolved from
 `config.connections`); otherwise it's required and validated, with strict
 unit filtering: a `receive_message()` call only ever returns a message
@@ -308,7 +302,7 @@ background thread and gives it a moment to register before the sender fires.
 
 `Connection` tracks which units currently have a *live peer* in
 `self._active_units`. This is deliberately not the same thing as
-`config.connected_units`, which only says what was configured; a unit is
+`config.unit_names`, which only says what was configured; a unit is
 "connected" here when the protocol layer says it has somewhere real to send.
 Each protocol reports that transition at the only moment it can actually know
 it:
@@ -540,8 +534,9 @@ itself when the peer returns -- with no reconnection special case anywhere:
    unit is disconnected: its periodic senders are cancelled, any parked
    `receive_message()` for it fails with `ConnectionError` instead of sitting
    out its full timeout, its standing callbacks are dropped, and
-   `_do_disconnect_unit()` closes just that unit's socket. Other units on the
-   same connection are untouched. Only started on connections that
+   `_do_disconnect_unit()` retires its transport: TCP closes the peer socket,
+   UDP and Multicast keep theirs open so the unit's next datagram brings it
+   back. Other units on the same connection are untouched. Only started on connections that
    `can_receive`.
 
 A unit that goes down has its echo tasks cancelled and its liveness entry
@@ -551,11 +546,9 @@ against a clock that had been running since before it existed.
 
 An echo send that raises `ConnectionError` retires the unit immediately instead
 of logging a warning and trying again next tick: that error means the link is
-provably gone, so there is nothing to retry. Both the failed send and the read
-loop noticing the same disconnect end at `_mark_unit_disconnected`, which is
-idempotent -- whichever observes it first wins and the other becomes a no-op,
-which is what removes the "echo send failed: Connection lost" window during an
-ordinary disconnect. Any *other* exception keeps the original behaviour: log
+provably gone, so there is nothing to retry. It goes through the same
+`_disconnect_unit` as the watchdog, so parked receives and periodic senders
+for the unit are released too. Any *other* exception keeps the original behaviour: log
 it, keep trying, and let the watchdog be the thing that gives up.
 
 The watchdog sleeps until each unit's *deadline* (`last echo + EchoTimeout`)
@@ -636,9 +629,11 @@ beacon.close()
 ## 8. Lifecycle: absolute teardown
 
 `Connection.close()` closes every socket/transport (`_do_stop()`), then
-cancels and `await`s every tracked background task, and finally cancels any
-`receive_message()` calls still parked on a subscription so they don't hang
-forever. Every async task the framework starts -- read loops, in-flight echo
+cancels and `await`s every tracked background task, and finally fails any
+`receive_message()` still parked with `ConnectionError`; a
+`wait_for_connected_units()` parked across it returns False. Standing
+on-receive/on-connect registrations are kept, so a restarted connection keeps
+its handlers. A `start()` that fails part-way closes whatever it had opened. Every async task the framework starts -- read loops, in-flight echo
 replies, periodic echo senders, echo watchdogs, and `periodic_sending`
 schedules -- goes through `self._track()`, so a single sweep over
 `self._tasks` covers all of them; `_periodic_tasks` and `_echo_tasks` hold

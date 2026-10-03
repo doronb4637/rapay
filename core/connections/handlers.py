@@ -1,26 +1,12 @@
 """
-Class-based message-handler sugar over `Connection.handle_on_receive` and
-`Connection.handle_on_connect`.
+Class-based handlers: sugar over `handle_on_receive` / `handle_on_connect`.
 
-`route(opCode)` tags a plain method with the opcode it answers -- or, on DDS,
-the topic: `@route(Status)` -- and every `BaseUnitHandler` subclass collects
-its tagged methods into a class-level selector -> method-name map at
-class-definition time. The selector is stored as given and only resolved by
-`handle_on_receive`, which is what lets one decorator serve both kinds of link. Installing a handler on
-a unit (`ConnectionManager.create(..., handler_class=...)`) does nothing more
-than call `unit.handle_on_receive(opcode, bound_method, unit_name=...)` once
-per route -- every existing dispatch behaviour (mutual exclusion with a live
-`receive_message()` on the same route, executor-thread execution, eager
-`validate_irs`, exception swallowing) applies unchanged, because this installs
-an ORDINARY entry in `Connection._callbacks`. No new dispatch tier is added to
-base.py, and none is needed.
-
-`on_connect` is the same idea for the connect event: tags one method to run
-the moment this handler's unit gains a peer. It takes no opcode -- a handler
-already answers for exactly one peer (`unitCode`), so there is only one
-connect event to tag, not one per route -- and installing it is likewise
-nothing more than `unit.handle_on_connect(bound_method, unit_name=...)`, an
-ordinary entry in `Connection._connect_callbacks`.
+`@route(opCode)` -- or `@route(Topic)` on DDS -- tags a method;
+`UnitHandler.__init_subclass__` collects the tags at class-definition time.
+`install_handler` then makes one ordinary `handle_on_receive` call per route
+(and one `handle_on_connect` for an `@on_connect` method), so every existing
+rule -- route exclusivity, executor-thread execution, eager validation,
+exceptions logged -- applies unchanged. There is no separate dispatch tier.
 """
 from __future__ import annotations
 
@@ -35,10 +21,8 @@ _ON_CONNECT_ATTR = "_is_connect_handler"
 
 
 def route(opCode: OpCode) -> Callable[[_F], _F]:
-    """Tags a `BaseUnitHandler` method with '_ROUTE_ATTR'.
-    than returns the function unchanged
-    `BaseUnitHandler.__init_subclass__` is what turns it into a
-    registration;"""
+    """Tag a `UnitHandler` method with the opcode (or DDS topic) it handles;
+    `UnitHandler.__init_subclass__` turns the tags into registrations."""
     def _tag(func: _F) -> _F:
         setattr(func, _ROUTE_ATTR, opCode)
         return func
@@ -46,13 +30,8 @@ def route(opCode: OpCode) -> Callable[[_F], _F]:
 
 
 def on_connect(func: _F) -> _F:
-    """Tags a `UnitHandler` method to run the moment this handler's unit
-    connects. The connect-time counterpart to `@route`, minus the opcode --
-    `UnitHandler.__init_subclass__` collects at most one tagged method per
-    class, since a handler already answers for exactly one peer.
-
-    The tagged method receives the connected unit's name, same as
-    `Connection.handle_on_connect`'s raw callback:
+    """Tag the one `UnitHandler` method to run each time the handler's unit
+    connects. It receives the unit's name:
 
         class TestHandler(UnitHandler):
             unitCode = 0x01
@@ -67,14 +46,9 @@ def on_connect(func: _F) -> _F:
 
 class UnitHandler:
     """
-    Base class for a class-based message handler bound to one configured
-    unit.
-
-    Subclass, set `unitCode` to the CONFIGURED PEER's code this handler
-    answers for (NOT this unit own `unitCode`)
-
-    Route methods are plain `def`, never `async def`,
-    `unitCode` is REQUIRED on every concrete subclass
+    A handler bound to one configured unit. Subclasses must set `unitCode` to
+    the PEER's code (not this process's own) and tag plain, synchronous
+    methods with `@route` / `@on_connect`.
     """
     unitCode: int
     #: selector (opcode, or DDS topic class) -> method name, built once per subclass.
@@ -152,9 +126,8 @@ def install_handler(unit: Connection | CompositeUnit, handler_class: type[UnitHa
     `handle_on_connect` callback, on whichever configured unit's code matches
     `handler_class.unitCode`.
 
-    * Raises: ValueError if no configured unit on `unit` carries that unitCode.
-    * Raises: IRSNotFoundError or RuntimeErrorwhatever as part of what `handle_on_receive'
-    itself raises
+    Raises `ValueError` if no configured unit carries that unitCode, and
+    whatever `handle_on_receive` raises (`IRSNotFoundError`, `RuntimeError`).
     """
     unit_codes = _config_unit_codes(unit)
     unit_name = next((n for n, c in unit_codes.items() if c == handler_class.unitCode), None)

@@ -70,6 +70,7 @@ None. See `_from_dds_json` for the optional keys and the ones it refuses.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -78,10 +79,9 @@ from typing import Any, Mapping
 from core.tools.general import resolve_module_name, validated_opcode, validated_unitcode
 from core.annotations import Namespace, OpCode, UnitCode
 
-# Re-exported: TopicDirection/TopicSpec used to live here, and are still part of
-# what a DDS ConnectionConfig hands out (`config.dds.topics`).
-from .dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE, DdsUnitConfig, TopicDirection,
-                         TopicSpec, resolve_unit)
+from .dds_config import DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE, DdsUnitConfig, resolve_unit
+
+logger = logging.getLogger("connmgr.config")
 
 DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0
@@ -128,12 +128,20 @@ DDS_INTERFACE_KEYS = ("dds_interface", "DdsInterface", "ddsInterface")
 DDS_DOMAIN_ID_KEYS = ("domain_id", "DomainId", "domainId")
 DDS_QOS_FILE_KEYS = ("qos_file", "QosFile", "qosFile")
 DDS_QOS_PROFILE_KEYS = ("qos_profile", "QosProfile", "qosProfile")
+DDS_HEADER_KEY = "header"
+#: The keys of a DDS config's `header` block (see `dds.DdsConnection`).
+DDS_HEADER_SUBKEYS = frozenset({"field", "source_unit", "destination_unit", "stamp"})
 #: The hand-written topic list DDS configs used to carry. Refused everywhere
 #: now: DDS topics are the classes in the Interface, and no other protocol has any.
 TOPICS_KEY = "topics"
+#: The JSON-schema pointer an editor may add; never a setting.
+SCHEMA_KEY = "$schema"
+
+#: Every key a unit's entry in `connections` may carry.
+UNIT_KEYS: frozenset[str] = frozenset({PORT_KEY, *UNIT_CODE_KEYS, *STRUCTURES_KEYS, *ECHO_KEYS})
 
 
-class Protocol(str, Enum):
+class TransportProtocol(str, Enum):
     TCP = "tcp"
     UDP = "udp"
     MULTICAST = "multicast"
@@ -144,21 +152,34 @@ class Side(str, Enum):
     """Which end of a socket this connection is. DDS has none: what a DDS unit
     publishes and subscribes is per topic, from its DDS Interface, and its
     `ConnectionConfig.side` is always None."""
-    # TCP
+    # TCP / UDP (and a duplex multicast member)
     CLIENT = "client"
     SERVER = "server"
-    # UDP / MULTICAST
+    # MULTICAST: send-only / receive-only
     SENDER = "sender"
     RECEIVER = "receiver"
+
+
+#: The sides each socket protocol accepts.
+_SIDES: dict[TransportProtocol, frozenset[Side]] = {
+    TransportProtocol.TCP: frozenset({Side.CLIENT, Side.SERVER}),
+    TransportProtocol.UDP: frozenset({Side.CLIENT, Side.SERVER}),
+    TransportProtocol.MULTICAST: frozenset(Side),
+}
+#: Top-level keys only one socket protocol reads.
+_PROTOCOL_KEYS: dict[TransportProtocol, frozenset[str]] = {
+    TransportProtocol.TCP: frozenset(),
+    TransportProtocol.UDP: frozenset({"mode"}),
+    TransportProtocol.MULTICAST: frozenset({"ttl"}),
+}
 
 
 # --------------------------------------------------------------------------- #
 # Typed coercion helpers for raw JSON. Coercing once, here, lets the rest of
 # the codebase assume real int/float/bytes values and never re-check.
 # --------------------------------------------------------------------------- #
-def _lookup(source: dict[str, Any], *names: str) -> Any | None:
-    """Returns first present. Keys are accepted in both
-    the snake_case, camelCase and PascalCase"""
+def _lookup(source: Mapping[str, Any], *names: str) -> Any | None:
+    """The first non-null value among the accepted spellings of one key."""
     for name in names:
         value = source.get(name)
         if value is not None:
@@ -167,9 +188,8 @@ def _lookup(source: dict[str, Any], *names: str) -> Any | None:
 
 
 def _as_opcode(value: Any, field_name: str) -> OpCode:
-    """Checks opCode, extracted form config.
-    uses 'tools.general.validated_opCode' for allowing both HEX and DEC integers
-    also validate UInt16 size."""
+    """Coerce via `tools.general.validated_opcode` (int or "0x.." string) and
+    check it fits the uint16 header field."""
     try:
         opcode = validated_opcode(value)
     except (TypeError, ValueError) as exc:
@@ -180,9 +200,8 @@ def _as_opcode(value: Any, field_name: str) -> OpCode:
 
 
 def _as_unit_code(value: Any, field_name: str) -> UnitCode:
-    """Checks unitCode, extracted form config.
-    uses 'tools.general.validated_opCode' for allowing both HEX and DEC integers
-    also validate UInt8 size."""
+    """Coerce via `tools.general.validated_unitcode` (int or "0x.." string) and
+    check it fits the uint8 header field."""
     try:
         code = validated_unitcode(value)
     except (TypeError, ValueError) as exc:
@@ -207,7 +226,6 @@ def _as_positive_float(value: Any, field_name: str, default: float) -> float:
 @dataclass(frozen=True, slots=True)
 class EchoSettings:
     """
-    *Immutable class*
     Everything the echo lifecycle needs, parsed and validated once.
 
     Two ways to configure the opcodes:
@@ -286,10 +304,12 @@ class EchoSettings:
             overriding just its timeout still wants the shared interval, and
             the `timeout > interval` check runs on whatever the merge produced.
 
-        To configure a unit to not have echo just define it's echo as 'null' value in the json config.
+        A unit opts out of a connection-level heartbeat with an explicit `null`
+        on any opcode key: present-but-null still names the group, so the
+        connection-level opcodes drop out whatever spelling they used.
         """
         merged = {key: value for key, value in global_extra.items() if key in ECHO_KEYS}
-        if any(unit_spec.get(key) is not None for key in ALL_ECHO_OPCODE_KEYS):
+        if any(key in unit_spec for key in ALL_ECHO_OPCODE_KEYS):
             for key in ALL_ECHO_OPCODE_KEYS:
                 merged.pop(key, None)
         merged.update({k: v for k, v in unit_spec.items() if k in ECHO_KEYS})
@@ -340,16 +360,12 @@ def resolve_structures(unit_spec: Mapping[str, Any],
 @dataclass(frozen=True, slots=True)
 class UnitEndpoint:
     """
-    *Immutable class*
     Where one logical unit lives, how it identifies itself on the wire, and
     how it heartbeats.
 
     `port` is the transport port the unit is reached on (for DDS, the domain
-    id). -- names are a configuration-level convenience,
-    the UnitCode is what the protocol itself actually uses.
-
-    `echo` is this unit's OWN settings, already merged against the
-    connection-level block by `EchoSettings.resolve` resolves at load time.
+    id). `echo` is this unit's settings, already merged with the
+    connection-level block by `EchoSettings.resolve`.
 
     `structures` is this LINK's IRS layouts, resolved to module namespaces --
     what scopes every encode/decode/validate for this unit. Empty means
@@ -380,6 +396,38 @@ def _parse_own_unit_code(data: Mapping[str, Any]) -> UnitCode:
     return _as_unit_code(raw, "unitCode")
 
 
+def _require(data: Mapping[str, Any], key: str, meaning: str) -> Any:
+    """A required top-level key, as a load-time ValueError rather than a KeyError."""
+    value = data.get(key)
+    if value is None:
+        raise ValueError(f"config[{key!r}] is required: {meaning}")
+    return value
+
+
+def _parse_side(data: Mapping[str, Any], protocol: TransportProtocol) -> Side:
+    raw = _require(data, SIDE_KEY, f"which end of the {protocol.value} link this is")
+    try:
+        side = Side(str(raw).lower())
+    except ValueError:
+        side = None
+    allowed = _SIDES[protocol]
+    if side not in allowed:
+        raise ValueError(
+            f"config[{SIDE_KEY!r}] = {raw!r} is not a {protocol.value} side; "
+            f"expected one of {sorted(s.value for s in allowed)}")
+    return side
+
+
+def _warn_unknown_keys(data: Mapping[str, Any], protocol: TransportProtocol) -> None:
+    """Top-level `extra` stays open (see connection.schema.json), but a key
+    nothing reads is almost always a typo, so say so."""
+    known = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY, *UNIT_CODE_KEYS,
+             *STRUCTURES_KEYS, *ECHO_KEYS, SCHEMA_KEY, *_PROTOCOL_KEYS[protocol]}
+    unknown = sorted(key for key in data if key not in known)
+    if unknown:
+        logger.warning("%s config: ignoring unknown key(s) %s", protocol.value, unknown)
+
+
 def _require_connections(data: Mapping[str, Any]) -> dict[str, Any]:
     """`connections` is the single source of truth for unit routing -- required,
     with no implicit "default" unit and no separate port list to keep in sync."""
@@ -399,7 +447,7 @@ def _split_extra(data: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key not in fixed_keys}
 
 
-def _reject_topics(data: Mapping[str, Any], protocol: Protocol) -> None:
+def _reject_topics(data: Mapping[str, Any], protocol: TransportProtocol) -> None:
     """A socket protocol has no topics; the key can only be a mistake, and
     ignoring it silently would hide the real misconfiguration."""
     if TOPICS_KEY in data:
@@ -428,6 +476,10 @@ _DDS_REFUSED_KEYS: dict[tuple[str, ...], str] = {
                               "-- use LIVELINESS QoS in the QoS profile instead",
 }
 
+#: Every key a DDS config may carry.
+_DDS_KEYS = frozenset({PROTOCOL_KEY, SCHEMA_KEY, DDS_HEADER_KEY, *DDS_UNIT_KEYS, *DDS_INTERFACE_KEYS,
+                       *DDS_DOMAIN_ID_KEYS, *DDS_QOS_FILE_KEYS, *DDS_QOS_PROFILE_KEYS})
+
 
 def _refuse_non_dds_keys(data: Mapping[str, Any]) -> None:
     found = [(key, reason) for keys, reason in _DDS_REFUSED_KEYS.items() for key in keys if key in data]
@@ -435,6 +487,21 @@ def _refuse_non_dds_keys(data: Mapping[str, Any]) -> None:
         reasons = "\n".join(f"[*] {key!r}: {reason}" for key, reason in found)
         raise ValueError(
             f"protocol 'dds' does not accept {[key for key, _ in found]}:\n{reasons}")
+    unknown = sorted(key for key in data if key not in _DDS_KEYS)
+    if unknown:
+        raise ValueError(f"protocol 'dds' has no setting(s) {unknown}; accepted: {sorted(_DDS_KEYS)}")
+
+
+def _check_dds_header(data: Mapping[str, Any]) -> None:
+    header = data.get(DDS_HEADER_KEY)
+    if header is None:
+        return
+    if not isinstance(header, dict):
+        raise ValueError(f"config[{DDS_HEADER_KEY!r}] must be an object, got {header!r}")
+    unknown = sorted(set(header) - DDS_HEADER_SUBKEYS)
+    if unknown:
+        raise ValueError(
+            f"config[{DDS_HEADER_KEY!r}] has no setting(s) {unknown}; accepted: {sorted(DDS_HEADER_SUBKEYS)}")
 
 
 def _parse_dds_domain_id(data: Mapping[str, Any]) -> int:
@@ -468,12 +535,15 @@ def _parse_dds_qos_profile(data: Mapping[str, Any]) -> str | None:
 
 
 def _parse_port(unit_name: str, spec: Mapping[str, Any]) -> int:
-    """The transport port this unit is reached on -- for DDS, the domain id."""
+    """The transport port this unit is reached on: an int, or a string of one."""
+    raw = spec[PORT_KEY]
     try:
-        port = int(spec[PORT_KEY])
+        if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+            raise TypeError
+        port = int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"config['connections'][{unit_name!r}][{PORT_KEY!r}] must be an integer, got {spec[PORT_KEY]!r}") from exc
+            f"config['connections'][{unit_name!r}][{PORT_KEY!r}] must be an integer, got {raw!r}") from exc
     if not 0 <= port <= 0xFFFF:
         raise ValueError(
             f"config['connections'][{unit_name!r}][{PORT_KEY!r}] = {port} is not a valid port\n[*] Has to be between 0 - 65,535.")
@@ -493,7 +563,12 @@ def _parse_unit_endpoint(unit_name: str, spec: Any, global_extra: Mapping[str, A
     if (not isinstance(spec, dict) or PORT_KEY not in spec
             or all(unitCode_key not in spec for unitCode_key in UNIT_CODE_KEYS)):
         raise ValueError(
-            f"config['connections'][{unit_name!r}] must be an object with at least a {PORT_KEY!r} key, got {spec!r}")
+            f"config['connections'][{unit_name!r}] must be an object with {PORT_KEY!r} and "
+            f"'unitCode' keys, got {spec!r}")
+    unknown = sorted(key for key in spec if key not in UNIT_KEYS)
+    if unknown:
+        raise ValueError(
+            f"config['connections'][{unit_name!r}] has no setting(s) {unknown}; accepted: {sorted(UNIT_KEYS)}")
     port = _parse_port(unit_name, spec)
     unitCode = _as_unit_code(_lookup(spec, *UNIT_CODE_KEYS), f"connections[{unit_name!r}]['unitCode']")
     if unitCode in code_owner:
@@ -512,18 +587,25 @@ def _parse_unit_endpoint(unit_name: str, spec: Any, global_extra: Mapping[str, A
 
 def _parse_unit_endpoints(connections_raw: Mapping[str, Any],
                           global_extra: Mapping[str, Any]) -> dict[str, UnitEndpoint]:
-    """Every configured unit, in declaration order, with unit codes checked for
-    uniqueness across the whole connection."""
+    """Every configured unit, in declaration order, with unit codes and ports
+    checked for uniqueness across the whole connection."""
     code_owner: dict[UnitCode, str] = {}
-    return {
+    endpoints = {
         unit_name: _parse_unit_endpoint(unit_name, spec, global_extra, code_owner)
         for unit_name, spec in connections_raw.items()
     }
+    port_owner: dict[int, str] = {}
+    for unit_name, endpoint in endpoints.items():
+        if endpoint.port in port_owner:
+            raise ValueError(f"connections {port_owner[endpoint.port]!r} and {unit_name!r} both use port "
+                             f"{endpoint.port}; a port identifies one unit")
+        port_owner[endpoint.port] = unit_name
+    return endpoints
 
 
 def _check_connection_structures_scope(connection_structures: tuple[str, ...] | None,
                                        connections: Mapping[str, UnitEndpoint],
-                                       protocol: Protocol) -> None:
+                                       protocol: TransportProtocol) -> None:
     """
     A structures file defines ONE link, so a connection-level list is only
     meaningful when there is one link. With several units it would scope every
@@ -531,7 +613,7 @@ def _check_connection_structures_scope(connection_structures: tuple[str, ...] | 
     share an opcode used to erase each other. Multicast is the sole exception:
     one sender fans out to many receivers over one IRS.
     """
-    if not connection_structures or len(connections) <= 1 or protocol is Protocol.MULTICAST:
+    if not connection_structures or len(connections) <= 1 or protocol is TransportProtocol.MULTICAST:
         return
     raise ValueError(
         f"config['Structures'] is a connection-level default and is only legal when the "
@@ -545,14 +627,8 @@ def _check_connection_structures_scope(connection_structures: tuple[str, ...] | 
 
 @dataclass(frozen=True, slots=True)
 class ConnectionConfig:
-    """
-    *Immutable class*
-    One unit fill connection's configuration.
-
-    Build these with `from_json()` rather than by hand -- that is where the
-    JSON is validated and coerced into real types.
-    """
-    protocol: Protocol
+    """One connection's validated configuration. Build it with `from_json()`."""
+    protocol: TransportProtocol
     #: None on DDS, which has no side.
     side: Side | None
     #: Both None on DDS, which has no endpoint address.
@@ -561,7 +637,8 @@ class ConnectionConfig:
     #: Our unitCode
     unitCode: int
     connections: dict[str, UnitEndpoint]
-    #: (Echo-Opcodes, Echo-Timeout, Echo-Intervals, Mode('send_only'/'receive_only'), local_ip, ...)
+    #: Every key outside the fixed set: echo, Structures, and protocol-specific
+    #: keys (`mode`, `ttl`, DDS `header`, ...).
     extra: dict[str, Any] = field(default_factory=dict)
     #: DDS only: this unit as its DDS Interface defines it -- its topics, peers,
     #: domain and QoS. None everywhere else.
@@ -577,15 +654,22 @@ class ConnectionConfig:
         the message that explains it.
         """
         # Protocol first: a DDS config is a different shape altogether.
-        protocol = Protocol(str(data[PROTOCOL_KEY]).lower())
-        if protocol is Protocol.DDS:
+        raw_protocol = _require(data, PROTOCOL_KEY, f"one of {[p.value for p in TransportProtocol]}")
+        try:
+            protocol = TransportProtocol(str(raw_protocol).lower())
+        except ValueError:
+            raise ValueError(f"config[{PROTOCOL_KEY!r}] = {raw_protocol!r} is not one of "
+                             f"{[p.value for p in TransportProtocol]}") from None
+        if protocol is TransportProtocol.DDS:
             return cls._from_dds_json(data)
 
         own_unit_code = _parse_own_unit_code(data)
         connections_raw = _require_connections(data)
         extra = _split_extra(data)
-        side = Side(str(data[SIDE_KEY]).lower())
+        side = _parse_side(data, protocol)
+        ip = _require(data, IP_KEY, "the peer's (or multicast group's) address")
         _reject_topics(data, protocol)
+        _warn_unknown_keys(data, protocol)
 
         connection_structures = _structures_from(extra, "Structures")
         connections = _parse_unit_endpoints(connections_raw, extra)
@@ -594,17 +678,15 @@ class ConnectionConfig:
         config = cls(
             protocol=protocol,
             side=side,
-            ip=data[IP_KEY],
+            ip=ip,
             local_ip=_lookup(data, *LOCAL_IP_KEYS) or "0.0.0.0",
             unitCode=own_unit_code,
             connections=connections,
             extra=extra,
         )
-        # Touch the CONNECTION-level echo and structures blocks too, so a
-        # malformed key there is a load failure rather than a link that
-        # silently misbehaves later.
+        # Parse the connection-level echo block even when every unit overrides
+        # it, so a malformed key there still fails the load.
         config.echo
-        config.structures
         return config
 
     @classmethod
@@ -620,6 +702,7 @@ class ConnectionConfig:
         endpoint's port is its domain" true for anything reading `ports`.
         """
         _refuse_non_dds_keys(data)
+        _check_dds_header(data)
         unit = _lookup(data, *DDS_UNIT_KEYS)
         interface = _lookup(data, *DDS_INTERFACE_KEYS)
         if not unit or not interface:
@@ -634,7 +717,7 @@ class ConnectionConfig:
             qos_profile=_parse_dds_qos_profile(data),
         )
         return cls(
-            protocol=Protocol.DDS,
+            protocol=TransportProtocol.DDS,
             side=None,
             ip=None,
             local_ip=None,
@@ -647,102 +730,53 @@ class ConnectionConfig:
     # ------------------------------------------------------------------ #
     # Unit lookups
     # ------------------------------------------------------------------ #
-    def endpoint_for(self, unit_name: str) -> UnitEndpoint:
-        """The endpoint for `unit_name`, or `ValueError` naming what is
-        configured -- used wherever a missing unit is a caller error rather
-        than an expected miss."""
-        endpoint = self.connections.get(unit_name)
-        if endpoint is None:
-            raise ValueError(
-                f"Unknown unit {unit_name!r}; known units: {list(self.connections)}"
-            )
-        return endpoint
-
-    def unit_from_port(self, port: int) -> str | None:
-        """Reverse lookup: which unit listens on `port`, or None."""
-        for name, endpoint in self.connections.items():
-            if endpoint.port == port:
-                return name
-        return None
-
-    def port_for_unit(self, unit_name: str) -> int | None:
-        endpoint = self.connections.get(unit_name)
-        return None if endpoint is None else endpoint.port
-
-    def unit_code_for(self, unit_name: str) -> int:
-        """The wire-level unit code for `unit_name`.
-         Raises ValueError if unknown."""
-        return self.endpoint_for(unit_name).unitCode
-
-    def echo_for(self, unit_name: str) -> EchoSettings:
-        """The echo settings for `unit_name`."""
-        return self.endpoint_for(unit_name).echo
-
     def unit_for_code(self, unit_code: UnitCode) -> str | None:
-        """Reverse lookup: which unit carries `unit_code`, or None.
-
-        DDS needs this where the framed protocols don't: there, inbound routing
-        comes from the transport (which socket a message arrived on), but a DDS
-        reader serves every publisher on its topic at once, so the sending unit
-        can only be identified from the sample itself."""
+        """Which unit carries `unit_code`, or None. DDS needs it: a reader serves
+        every publisher of its topic, so only the sample can name the sender."""
         for name, endpoint in self.connections.items():
             if endpoint.unitCode == unit_code:
                 return name
         return None
 
-    def structures_for(self, unit_name: str) -> tuple[Namespace, ...]:
-        """The IRS structures namespaces scoping this link. Empty == unscoped."""
-        return self.endpoint_for(unit_name).structures
-
     @property
     def unit_codes(self) -> dict[str, int]:
-        """returns {unit name: unit code}, for callers that want the whole mapping."""
+        """{unit name: unit code}."""
         return {name: endpoint.unitCode for name, endpoint in self.connections.items()}
 
     @property
-    def connected_units(self) -> list[str]:
-        """All logical unit names reachable through this connection instance"""
+    def unit_names(self) -> list[str]:
+        """Every configured unit name, in declaration order -- configured, not
+        necessarily connected (see `Connection.active_units`)."""
         return list(self.connections)
 
     @property
-    def ports(self) -> list[int]:
-        """Every port this connection binds or dials, in declaration order."""
-        return [endpoint.port for endpoint in self.connections.values()]
-
-    @property
     def echo(self) -> EchoSettings:
-        """This connection's echo block -- the shared default every unit falls
-        back to, parsed straight out of `extra`.
-        Recomputed per access rather than cached: `slots=True` leaves no
-        instance `__dict__` for a `cached_property` to write into.
-        """
+        """The connection-level echo block every unit falls back to. Recomputed
+        per access: `slots=True` leaves no `__dict__` for `cached_property`."""
         return EchoSettings.from_extra(self.extra)
 
     @property
     def unit_echoes(self) -> dict[str, EchoSettings]:
-        """unit name -> resolved echo settings, for callers that want the
-        whole mapping (`base.Connection` caches exactly this at construction)."""
+        """{unit name: resolved echo settings}."""
         return {name: endpoint.echo for name, endpoint in self.connections.items()}
 
     @property
     def structures(self) -> tuple[Namespace, ...]:
-        """This connection's own `Structures` block, resolved -- the fallback
-        for a unit the config never gave one. Recomputed per access rather than
-        cached, same as `echo`: `slots=True` leaves no instance `__dict__`."""
+        """The connection-level `Structures` block, resolved. Recomputed per
+        access, like `echo`."""
         raw = _structures_from(self.extra, "Structures") or ()
         return tuple(resolve_module_name(entry) for entry in raw)
 
     @property
     def unit_structures(self) -> dict[str, tuple[Namespace, ...]]:
-        """unit name -> resolved structures namespaces (`base.Connection`
-        caches exactly this at construction)."""
+        """{unit name: resolved structures namespaces}."""
         return {name: endpoint.structures for name, endpoint in self.connections.items()}
 
     @property
     def all_structures_raw(self) -> tuple[str, ...]:
         """Every structures spelling this config references -- connection-level
         plus every per-unit list -- de-duplicated in declaration order. This is
-        what `ConnectionManager` imports, so a per-unit list is never missed."""
+        what `Connection` imports, so a per-unit list is never missed."""
         seen: dict[str, None] = {}
         for entry in _structures_from(self.extra, "Structures") or ():
             seen[entry] = None

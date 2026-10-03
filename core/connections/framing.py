@@ -13,6 +13,7 @@ import struct
 from dataclasses import dataclass
 
 from core.IRS.irs_parser import IRSDataError
+
 # "<" = little-endian, no padding. B = uint8, H = uint16, H = uint16.
 _HEADER_STRUCT = struct.Struct("<BHH")
 
@@ -47,11 +48,12 @@ def unpack_header(raw: bytes) -> MessageHeader:
 
 
 def unpack_message(raw: bytes) -> tuple[MessageHeader, bytes]:
-    """Parse header + payload from a single complete datagram (UDP/Multicast)."""
+    """Parse one complete datagram (UDP/Multicast). Its size must match the
+    header exactly: short or long, the frame is corrupt."""
     header = unpack_header(raw)
-    payload = raw[HEADER_SIZE:HEADER_SIZE + header.data_length]
+    payload = raw[HEADER_SIZE:]
     if len(payload) != header.data_length:
         raise IRSDataError(
-            f"declared length {header.data_length} but only {len(payload)} bytes available"
+            f"declared length {header.data_length} but the datagram carries {len(payload)} bytes"
         )
     return header, payload

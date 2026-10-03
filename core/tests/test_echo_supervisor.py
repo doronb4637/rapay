@@ -36,7 +36,6 @@ class StubHost:
         self.can_receive = can_receive
         self._active: set[str] = set()
         self.sent: list[tuple[str, bytes, int]] = []
-        self.marked_down: list[str] = []
         self.disconnected: list[str] = []
         self.tracked: list[asyncio.Task] = []
         #: Set to an exception to make the next _do_send raise it.
@@ -62,11 +61,7 @@ class StubHost:
             raise self.send_error
         self.sent.append((unit_name, data, opcode))
 
-    def _mark_unit_disconnected(self, unit_name):
-        self._active.discard(unit_name)
-        self.marked_down.append(unit_name)
-
-    async def _disconnect_unit(self, unit_name):
+    async def _disconnect_unit(self, unit_name, reason="echo timeout"):
         self._active.discard(unit_name)
         self.disconnected.append(unit_name)
 
@@ -174,7 +169,7 @@ def test_an_undeliverable_echo_retires_the_unit_on_the_spot(loop):
 
     spin(loop, INTERVAL * 3)
 
-    assert host.marked_down == ["Peer"]
+    assert host.disconnected == ["Peer"]
 
 
 def test_a_non_link_send_failure_only_costs_that_tick(loop):
@@ -186,7 +181,7 @@ def test_a_non_link_send_failure_only_costs_that_tick(loop):
     UnitEchoSupervisor(host).arm("Peer")
 
     spin(loop, INTERVAL * 3)
-    assert host.marked_down == []
+    assert host.disconnected == []
 
     host.send_error = None
     spin(loop, INTERVAL * 3)

@@ -86,8 +86,8 @@ def test_two_peers_with_their_own_structures_encode_their_own_layouts(
     (path_a, ns_a), (path_b, ns_b) = link_structures
     connection = manager.create("multi", _config(free_ports(2), path_a, path_b))
 
-    assert connection.config.structures_for("PeerA") == (ns_a,)
-    assert connection.config.structures_for("PeerB") == (ns_b,)
+    assert connection.config.connections["PeerA"].structures == (ns_a,)
+    assert connection.config.connections["PeerB"].structures == (ns_b,)
 
     # AlphaTrack is two UInt16s (4 bytes); BetaStatus is one Byte (1 byte).
     # Same opcode, same sender code -- only the destination differs.
