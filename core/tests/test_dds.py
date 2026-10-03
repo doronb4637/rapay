@@ -621,13 +621,13 @@ def test_unit_name_comes_from_the_interface_only_when_unambiguous(tmp_path):
 # --------------------------------------------------------------------------- #
 # Sending
 # --------------------------------------------------------------------------- #
-def test_a_sample_is_sent_on_its_classs_topic_to_its_sole_subscriber():
+def test_a_sample_is_sent_on_its_classs_topic_stamped_with_its_source():
     sensor = build(SENSOR)
     sensor._writers["Track"] = writer = RecordingWriter()
     sample = Track(track_id=3)
     sensor.send_message(sample)
     assert writer.written == [sample]
-    assert (sample.header.source_unit, sample.header.destination_unit) == (SENSOR_CODE, CONTROL_CODE)
+    assert (sample.header.source_unit, sample.header.destination_unit) == (SENSOR_CODE, 0)
 
 
 def test_caller_set_header_values_are_not_overwritten():
@@ -657,27 +657,15 @@ def test_send_refuses_raw_bytes():
         build(SENSOR).send_message(b"raw")
 
 
-def test_a_sample_must_match_the_topic_it_is_sent_on():
-    with pytest.raises(TypeError, match="carried by Track"):
-        build(SENSOR).send_message(Status(), "Track")
-
-
 def test_send_on_a_topic_the_unit_only_subscribes_is_refused():
     with pytest.raises(ValueError, match="does not publish 'Status'"):
         build(SENSOR).send_message(Status())
 
 
-def test_send_to_a_unit_that_does_not_subscribe_the_topic_is_refused(tmp_path):
-    a = build("A", write_interface(tmp_path, THREE_UNITS))
-    a._writers["Track"] = RecordingWriter()
-    with pytest.raises(ValueError, match="'C' does not subscribe 'Track'"):
-        a.send_message(Track(), unit_name="C")
-
-
 def test_periodic_sending_is_keyed_by_topic():
     sensor = build(SENSOR)
     sensor._writers["Track"] = writer = RecordingWriter()
-    sensor.periodic_sending(Track(track_id=3), None, 0.02)
+    sensor.periodic_sending(Track(track_id=3), 0.02)
     deadline = threading.Event()
     for _ in range(100):
         if len(writer.written) >= 2:

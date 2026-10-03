@@ -570,15 +570,15 @@ disconnect at exactly `EchoTimeout`.
 ## 6a. Periodic sending
 
 ```python
-connection.periodic_sending(data: bytes, opcode: int | None, interval: int | float,
+connection.periodic_sending(data: bytes, interval: int | float, opcode: int | None = None,
                             unit_name: str | None = None) -> None
 connection.stop_periodic(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-`data` comes first, `opcode` second -- matching `send_message`'s own
-`(data, opcode, unit_name)` order, since `periodic_sending` behaves exactly
-like `send_message` but keeps sending in the background every `interval`
-seconds. `opcode` may be `None` if `data` is an IRS message object carrying
+`data` comes first, then `interval`, with `opcode` optional after it (it is
+unneeded on DDS and for IRS messages carrying their own `_opCode`).
+`periodic_sending` behaves exactly like `send_message` but keeps sending in
+the background every `interval` seconds. `opcode` may be `None` if `data` is an IRS message object carrying
 its own `_opCode` (the same auto-detection `send_message` does); a raw
 `bytes` payload has no such attribute and needs `opcode` given explicitly.
 

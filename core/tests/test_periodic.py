@@ -58,7 +58,7 @@ def test_periodic_sending_repeats(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", 1, FAST_INTERVAL)
+    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
     time.sleep(FAST_INTERVAL * 8)
 
     assert counter.read() >= 3, "periodic sender did not repeat"
@@ -71,11 +71,11 @@ def test_periodic_sending_replaces_the_sender_for_a_route(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"fast", 1, FAST_INTERVAL)
+    client.periodic_sending(b"fast", FAST_INTERVAL, 1)
     time.sleep(FAST_INTERVAL * 6)
     assert counter.read() >= 2
 
-    client.periodic_sending(b"slow", 1, SLOW_INTERVAL)
+    client.periodic_sending(b"slow", SLOW_INTERVAL, 1)
     after_replace = counter.read()
     time.sleep(FAST_INTERVAL * 10)
 
@@ -86,7 +86,7 @@ def test_periodic_sending_replaces_the_sender_for_a_route(manager, free_port):
 
 def test_stop_periodic_reports_whether_there_was_one_to_stop(manager, free_port):
     _server, client = _pair(manager, free_port)
-    client.periodic_sending(b"tick", 1, FAST_INTERVAL)
+    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
 
     assert client.stop_periodic(1, unit_name="Peer") is True
     assert client.stop_periodic(1, unit_name="Peer") is False
@@ -97,7 +97,7 @@ def test_stopped_sender_actually_stops(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", 1, FAST_INTERVAL)
+    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
     time.sleep(FAST_INTERVAL * 6)
     client.stop_periodic(1, unit_name="Peer")
     settled = counter.read()
@@ -110,7 +110,7 @@ def test_periodic_sending_rejects_a_non_positive_interval(manager, free_port):
     _server, client = _pair(manager, free_port)
     for bad in (0, -1, -0.5):
         with pytest.raises(ValueError, match="interval must be > 0"):
-            client.periodic_sending(b"tick", 1, bad)
+            client.periodic_sending(b"tick", bad, 1)
 
 
 def test_close_cancels_periodic_senders(manager, free_port):
@@ -118,7 +118,7 @@ def test_close_cancels_periodic_senders(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", 1, FAST_INTERVAL)
+    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
     time.sleep(FAST_INTERVAL * 6)
     client.close()
     settled = counter.read()
@@ -135,6 +135,6 @@ def test_periodic_sending_and_a_standing_callback_share_the_route_key(manager, f
     counter = Counter()
     client.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", 1, FAST_INTERVAL)
+    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
     assert client.stop_periodic(1, unit_name="Peer") is True
     assert client.stop_on_receive(1, unit_name="Peer") is True

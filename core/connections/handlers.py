@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Callable, TypeVar
 
-from .base import Connection, ConnectCallback, MessageSelector, ReceiveCallback, UnitName
+from .base import Connection, ConnectCallback, OpCode, ReceiveCallback, UnitName
 from .composite import CompositeUnit
 
 _F = TypeVar("_F", bound=Callable)
@@ -34,7 +34,7 @@ _ROUTE_ATTR = "_route_opcode"
 _ON_CONNECT_ATTR = "_is_connect_handler"
 
 
-def route(opCode: MessageSelector) -> Callable[[_F], _F]:
+def route(opCode: OpCode) -> Callable[[_F], _F]:
     """Tags a `BaseUnitHandler` method with '_ROUTE_ATTR'.
     than returns the function unchanged
     `BaseUnitHandler.__init_subclass__` is what turns it into a
@@ -78,7 +78,7 @@ class UnitHandler:
     """
     unitCode: int
     #: selector (opcode, or DDS topic class) -> method name, built once per subclass.
-    _routes: dict[MessageSelector, str]
+    _routes: dict[OpCode, str]
     #: name of the `@on_connect`-tagged method, or None if the subclass has
     #: none. Built once per subclass, alongside `_routes`.
     _on_connect_name: str | None
@@ -98,7 +98,7 @@ class UnitHandler:
                 if getattr(value, _ON_CONNECT_ATTR, False):
                     connect_names.add(name)
 
-        routes: dict[MessageSelector, str] = {}
+        routes: dict[OpCode, str] = {}
         for name in tagged_names:
             opcode = getattr(getattr(cls, name), _ROUTE_ATTR, None)
             if opcode is None:

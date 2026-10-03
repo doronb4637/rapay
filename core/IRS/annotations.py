@@ -11,6 +11,6 @@ from .core import Message
 
 IrsMessage: TypeAlias = type[Message]
 UnitCode: TypeAlias = int
-OpCode: TypeAlias = UnitCode
+OpCode: TypeAlias = int | type[Message]
 Namespace: TypeAlias = str
 NamespaceScope: TypeAlias = Namespace | Iterable[Namespace]

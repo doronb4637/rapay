@@ -12,7 +12,7 @@ everything else follows from that:
     keyed by TOPIC NAME. Wherever the framed protocols take an opcode, callers
     name a topic by its class, a sample of it, or its name:
 
-        unit.send_message(Track(track_id=1))        # destination: Track's only subscriber
+        unit.send_message(Track(track_id=1))        # every subscriber of Track
         status = unit.receive_message(Status, timeout=5)
         unit.handle_on_receive(Status, on_status)   # or @route(Status) on a UnitHandler
 
@@ -60,7 +60,7 @@ import rti.connextdds as dds  # type: ignore  # raises ImportError if not instal
 import rti.asyncio as rti_asyncio  # type: ignore
 
 from ._routes import MessageKey, RouteKey, UnitName
-from .base import Connection, MessageSelector
+from .base import Connection, OpCode
 from .config import ConnectionConfig
 from .dds_config import DdsUnitConfig, TopicDirection, TopicSpec, second_copy_message
 
@@ -251,13 +251,13 @@ class DdsConnection(Connection):
                     f"the senders apart. Add the header to the type, or point config['header'] "
                     f"at the fields it does carry.")
 
-    def _stamp_outgoing(self, sample: Any, unit_name: str) -> None:
+    def _stamp_outgoing(self, sample: Any) -> None:
         """
-        Fill in `source_unit` / `destination_unit` on an outgoing sample.
+        Fill in `source_unit` on an outgoing sample.
 
-        The peer routes on these exactly as we do, so leaving them at zero is an
-        easy and completely invisible mistake -- the sample goes out fine and is
-        discarded at the far end. Values the caller set explicitly are never
+        The peer identifies the sender by it, so leaving it at zero is an easy
+        and completely invisible mistake -- the sample goes out fine and is
+        discarded at the far end. A value the caller set explicitly is never
         overwritten; only a field still at its zero default is filled.
         """
         if not self._stamp_header:
@@ -270,11 +270,6 @@ class DdsConnection(Connection):
                 setattr(header, self._source_field, self._own_unit_code)
             except Exception as exc:  # noqa: BLE001 - a read-only/absent field is not fatal
                 logger.debug("could not stamp %r: %s", self._source_field, exc)
-        if not getattr(header, self._destination_field, None):
-            try:
-                setattr(header, self._destination_field, self._unit_code_for(unit_name))
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("could not stamp %r: %s", self._destination_field, exc)
 
     def _warn_once(self, cause: tuple[Any, ...], message: str, *args: Any) -> None:
         if cause not in self._warned:
@@ -325,25 +320,41 @@ class DdsConnection(Connection):
     # ------------------------------------------------------------------ #
     # Routing: topics, not opcodes
     # ------------------------------------------------------------------ #
-    def _message_key(self, selector: MessageSelector) -> MessageKey:
+    def _message_key(self, topic_id: OpCode) -> MessageKey:
         """A topic class, a sample of it, or its name -> the topic name."""
-        return self._dds.topic_for(selector).name
+        return self._dds.topic_for(topic_id).name
 
-    def _send_key(self, data: Any, selector: MessageSelector | None) -> MessageKey:
-        """The topic `data` goes out on: the one `selector` names, or -- the
-        normal case -- the one its own class carries."""
-        if isinstance(data, (bytes, bytearray, memoryview)):
-            raise TypeError(
-                f"DDS publishes typed samples, not bytes: build an instance of one of "
-                f"{self._dds.topic_names}")
-        spec = self._dds.topic_for(data if selector is None else selector)
-        if not isinstance(data, spec.sample_type):
-            if type(data).__name__ == spec.name:
-                raise TypeError(second_copy_message(type(data), spec))
-            raise TypeError(
-                f"topic {spec.name!r} is carried by {spec.sample_type.__qualname__}, but the "
-                f"sample is a {type(data).__qualname__}")
-        return spec.name
+    def send_message(self, data: Any, opcode: OpCode | None = None,
+                     unit_name: str | None = None) -> None:
+        """
+        Publish `data` on the topic its own class carries.
+
+        A sample is the whole message: DDS puts the topic, not an opcode, on the
+        wire and delivers to every subscriber, so there is no key to compute
+        and no destination to resolve. `opcode` and `unit_name` exist only to
+        keep the `Unit` signature and are ignored.
+        """
+        self._loop_thread.await_coroutine(self._do_send(data))
+
+    def periodic_sending(self, data: Any, interval: int | float, opcode: OpCode | None = None,
+                         unit_name: str | None = None) -> None:
+        """`send_message` on a schedule, filed under the sample's topic. `opcode` is ignored."""
+        key = self._message_key(data)
+        interval_seconds = float(interval)
+        if interval_seconds <= 0:
+            raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
+        unit, route_key = self._resolve_route(unit_name, key)
+        self._loop_thread.await_coroutine(self._start_periodic(unit, route_key, data, key, interval_seconds))
+
+    async def _periodic_send_loop(self, unit_name: str, data: Any, key: MessageKey, interval: float) -> None:
+        while True:
+            try:
+                await self._do_send(data)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("periodic send (topic=%s) failed: %s", key, exc)
+            await asyncio.sleep(interval)
 
     @staticmethod
     def _speakers(spec: TopicSpec) -> tuple[str, ...]:
@@ -452,28 +463,22 @@ class DdsConnection(Connection):
         except Exception:
             logger.exception("DDS read loop failed for topic %s", spec.name)
 
-    async def _do_send(self, unit_name: str, data: Any, key: MessageKey) -> None:
-        """
-        Publish one sample on topic `key`, addressed to `unit_name`.
-
-        DDS delivers to every subscriber regardless; the destination is stamped
-        into the header for the peers that route on it, and is checked against
-        the Interface so a send no one is listening for fails here.
-        """
-        spec = self._dds.topic_for(key)
+    async def _do_send(self, sample: Any) -> None:  # type: ignore[override]
+        """Publish one sample on its class's topic, to every subscriber."""
+        if isinstance(sample, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"DDS publishes typed samples, not bytes: build an instance of one of "
+                f"{self._dds.topic_names}")
+        spec = self._dds.topic_for(sample)
         if not spec.publishes:
             raise ValueError(
                 f"{self._dds.unit} does not publish {spec.name!r} in the DDS Interface (it only "
                 f"subscribes it)")
-        if unit_name not in spec.subscribers:
-            raise ValueError(
-                f"{unit_name!r} does not subscribe {spec.name!r} in the DDS Interface; its "
-                f"subscribers are {list(spec.subscribers)}")
         writer = self._writers.get(spec.name)
         if writer is None:
             raise ConnectionError(f"topic {spec.name!r} has no DataWriter yet: start() the connection first")
-        self._stamp_outgoing(data, unit_name)
-        writer.write(data)
+        self._stamp_outgoing(sample)
+        writer.write(sample)
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:
         """

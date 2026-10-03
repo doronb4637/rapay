@@ -494,7 +494,7 @@ no-op. Other exceptions keep the old behaviour (log, retry next tick, let the wa
 ### 6a. Periodic sending
 
 ```python
-connection.periodic_sending(data: IrsMessage | dict, opcode: int | None, interval: int | float,
+connection.periodic_sending(data: IrsMessage | dict, interval: int | float, opcode: int | None = None,
                             unit_name: str | None = None) -> None
 connection.stop_periodic(opcode: int, unit_name: str | None = None) -> bool
 ```

@@ -18,7 +18,7 @@ import time
 from typing import Any
 
 from .base import (ConnectCallback, ConnectedTarget, Connection, IrsMessage,
-                   MessageSelector, ReceiveCallback, TriggerFunction)
+                   OpCode, ReceiveCallback, TriggerFunction)
 
 
 class CompositeUnit:
@@ -88,7 +88,7 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     # Public API -- identical shape to Connection.send_message/receive_message
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage | dict, opcode: MessageSelector | None = None,
+    def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None,
                      unit_name: str | None = None) -> None:
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
@@ -115,7 +115,7 @@ class CompositeUnit:
 
     def receive_message(
         self,
-        opcode: MessageSelector,
+        opcode: OpCode,
         unit_name: str | None = None,
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
@@ -126,7 +126,7 @@ class CompositeUnit:
 
     def handle_on_receive(
         self,
-        opcode: MessageSelector,
+        opcode: OpCode,
         callback_func: ReceiveCallback,
         unit_name: str | None = None,
     ) -> None:
@@ -136,7 +136,7 @@ class CompositeUnit:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         self._receiver.handle_on_receive(opcode, callback_func, unit_name)
 
-    def stop_on_receive(self, opcode: MessageSelector, unit_name: str | None = None) -> bool:
+    def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         if self._receiver is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no receive-capable member")
         return self._receiver.stop_on_receive(opcode, unit_name)
@@ -160,8 +160,8 @@ class CompositeUnit:
     def periodic_sending(
         self,
         data: IrsMessage | dict[str, Any],
-        opcode: MessageSelector | None,
         interval: int | float,
+        opcode: OpCode | None = None,
         unit_name: str | None = None,
     ) -> None:
         """Repeating send, routed to the same member that handles
@@ -169,9 +169,9 @@ class CompositeUnit:
         member, periodic or not."""
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
-        self._sender.periodic_sending(data, opcode, interval, unit_name)
+        self._sender.periodic_sending(data, interval, opcode, unit_name)
 
-    def stop_periodic(self, opcode: MessageSelector, unit_name: str | None = None) -> bool:
+    def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         if self._sender is None:
             raise RuntimeError(f"CompositeUnit {self.name!r} has no send-capable member")
         return self._sender.stop_periodic(opcode, unit_name)

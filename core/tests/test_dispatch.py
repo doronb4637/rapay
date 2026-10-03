@@ -352,8 +352,8 @@ def test_disconnect_unit_drops_only_that_units_callbacks(manager, free_ports):
 def test_disconnect_unit_cancels_only_that_units_periodic_senders(manager, free_ports):
     server = _two_unit_server(manager, free_ports(2))
     server.start()
-    server.periodic_sending(b"tick", 1, 0.05, unit_name="PeerA")
-    server.periodic_sending(b"tick", 1, 0.05, unit_name="PeerB")
+    server.periodic_sending(b"tick", 0.05, 1, unit_name="PeerA")
+    server.periodic_sending(b"tick", 0.05, 1, unit_name="PeerB")
 
     _disconnect(server, "PeerA")
 

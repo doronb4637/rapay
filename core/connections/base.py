@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from asyncio import Event
 from typing import Any, Callable, Coroutine, Iterable, Protocol
 
+from annotations import OpCode
 from core.annotations import IrsMessage, Namespace, UnitCode
 from core.IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
 from core.tools.general import extract_opcode
@@ -38,7 +39,6 @@ ConnectedTarget = UnitCode | UnitName | Iterable[UnitName]
 #: How a caller names a message. On IRS-framed links: its opcode, as an int, a
 #: "0x.." string or the IRS message itself. On DDS: the topic's class, a sample
 #: of it, or the topic name. Each connection turns it into its `MessageKey`.
-MessageSelector = Any
 
 
 class Unit(Protocol):
@@ -53,16 +53,16 @@ class Unit(Protocol):
     def active_units(self) -> set[str]: ...
     def start(self, retry: bool = False) -> None: ...
     def close(self, timeout: float | int | None = 5.0) -> None: ...
-    def send_message(self, data: IrsMessage | dict, opcode: MessageSelector | None = None, unit_name: str | None = None) -> None: ...
-    def receive_message(self, opcode: MessageSelector, unit_name: str | None = None,
+    def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
+    def receive_message(self, opcode: OpCode, unit_name: str | None = None,
                         timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage: ...
-    def handle_on_receive(self, opcode: MessageSelector, callback_func: ReceiveCallback, unit_name: str | None = None) -> None: ...
-    def stop_on_receive(self, opcode: MessageSelector, unit_name: str | None = None) -> bool: ...
+    def handle_on_receive(self, opcode: OpCode, callback_func: ReceiveCallback, unit_name: str | None = None) -> None: ...
+    def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool: ...
     def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None: ...
     def stop_on_connect(self, unit_name: str | None = None) -> bool: ...
-    def periodic_sending(self, data: IrsMessage | dict[str, Any], opcode: MessageSelector | None,
-                         interval: int | float, unit_name: str | None = None) -> None: ...
-    def stop_periodic(self, opcode: MessageSelector,
+    def periodic_sending(self, data: IrsMessage | dict[str, Any], interval: int | float,
+                         opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
+    def stop_periodic(self, opcode: OpCode,
                       unit_name: str | None = None) -> bool: ...
     def wait_for_connected_units(self, target: ConnectedTarget,
                                  timeout: float | int | None = None) -> bool: ...
@@ -262,7 +262,7 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Message keys -- what a caller's selector routes under
     # ------------------------------------------------------------------ #
-    def _message_key(self, selector: MessageSelector) -> MessageKey:
+    def _message_key(self, opCode: OpCode) -> MessageKey:
         """
         The key `selector` routes under on this connection.
 
@@ -271,17 +271,7 @@ class Connection(ABC):
         message itself). DDS overrides this to route on the topic, because DDS
         puts no opcode on the wire -- the topic is the message identity.
         """
-        return extract_opcode(selector)
-
-    def _send_key(self, data: Any, selector: MessageSelector | None) -> MessageKey:
-        """
-        The key an outgoing `data` is sent under.
-
-        On IRS-framed links the caller must name the opcode: the payload goes
-        into a header that needs it. DDS overrides this, since a sample names
-        its own topic through its class.
-        """
-        return self._message_key(selector)
+        return extract_opcode(opCode)
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -616,7 +606,7 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage | dict, opcode: MessageSelector | None = None,
+    def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None,
                      unit_name: str | None = None) -> None:
         """
         Send `data` tagged with `opcode` to `unit_name` (or the sole
@@ -624,9 +614,9 @@ class Connection(ABC):
         must declare what kind of message it is so the receiving side's
         subscribe-or-drop filtering and echo handling can work.
 
-        On DDS it is optional and means the topic: a sample names its own
-        topic through its class, so `send_message(Track(...))` is the whole
-        call (see `DdsConnection._send_key`).
+        DDS overrides this: a sample names its own topic through its class, so
+        `send_message(Track(...))` is the whole call (see
+        `DdsConnection.send_message`).
 
         `opcode` goes through `tools.general.validated_opCode` first, so a
         caller may pass whatever spelling their opcode constants come in --
@@ -642,9 +632,7 @@ class Connection(ABC):
         taken as already-encoded and sent through unchanged, so a caller that
         assembles its own payload still works.
         """
-        key = self._send_key(data, opcode)
-        # Resolved WITH the key, not just the name, so a protocol that knows
-        # who listens to a message (DDS) can pick the destination itself.
+        key = extract_opcode(opcode)
         unit, _route_key = self._resolve_route(unit_name, key)
         payload = self._encode(key, data, unit)
         self._loop_thread.await_coroutine(self._do_send(unit, payload, key))
@@ -718,7 +706,7 @@ class Connection(ABC):
             return False
         return True
 
-    def receive_message(self, opcode: MessageSelector, unit_name: str | None = None,
+    def receive_message(self, opcode: OpCode, unit_name: str | None = None,
         timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage:
         """
         Blocking, synchronous receive. Returns (unit_name, message) for the
@@ -765,7 +753,7 @@ class Connection(ABC):
         )
         return message
 
-    def handle_on_receive(self, opcode: MessageSelector,
+    def handle_on_receive(self, opcode: OpCode,
         callback_func: ReceiveCallback, unit_name: str | None = None) -> None:
         """
         Register a standing handler for a route instead of polling it.
@@ -796,7 +784,7 @@ class Connection(ABC):
         self._validate_route(unit, route_key)
         self._loop_thread.call_on_loop(self._routes.register_callback, route_key, callback_func)
 
-    def stop_on_receive(self, opcode: MessageSelector, unit_name: str | None = None) -> bool:
+    def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         """
         Remove the standing callback registered for this route by
         `handle_on_receive`. Returns True if one was registered, False if
@@ -854,8 +842,8 @@ class Connection(ABC):
     def periodic_sending(
         self,
         data: IrsMessage | dict[str, Any],
-        opcode: MessageSelector | None,
         interval: int | float,
+        opcode: OpCode | None = None,
         unit_name: str | None = None,
     ) -> None:
         """
@@ -880,7 +868,7 @@ class Connection(ABC):
         `unit_name` is optional when this connection has exactly one
         connected unit, matching `send_message`/`receive_message`.
         """
-        key = self._send_key(data, opcode)
+        key = extract_opcode(opcode)
         interval_seconds = float(interval)
         if interval_seconds <= 0:
             raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
@@ -888,7 +876,7 @@ class Connection(ABC):
         payload = self._encode(key, data, unit)
         self._loop_thread.await_coroutine(self._start_periodic(unit, route_key, payload, key, interval_seconds))
 
-    def stop_periodic(self, opcode: MessageSelector, unit_name: str | None = None) -> bool:
+    def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         """
         Stop the periodic sender started for this (unit, opcode) route.
         Returns True if one was running, False if there was nothing to stop.
