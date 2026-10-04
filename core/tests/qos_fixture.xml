@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!--
+  QoS fixture for core/tests/test_dds.py. NOT a deployment file.
+
+  The tests pin its exact values (Status writer history depth 37 via a
+  topic_filter, 10 for everything else), so they must not read
+  dds_config.DEFAULT_QOS_FILE, which a deployment replaces with its own
+  profiles and security settings.
+-->
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="http://community.rti.com/schema/7.7.0/rti_dds_qos_profiles.xsd">
+  <qos_library name="MyLib">
+    <qos_profile name="Reliable" is_default_qos="true">
+
+      <datawriter_qos>
+        <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+        <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+      </datawriter_qos>
+
+      <datareader_qos>
+        <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+        <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+      </datareader_qos>
+
+      <!-- Per-topic override: same profile, deeper history for one topic. -->
+      <datawriter_qos topic_filter="Status">
+        <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>37</depth></history>
+        <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+      </datawriter_qos>
+
+    </qos_profile>
+  </qos_library>
+</dds>

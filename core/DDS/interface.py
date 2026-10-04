@@ -76,10 +76,10 @@ class DdsUnit:
     Two names are deliberately NOT fields, because each is already written once:
     the unit's name is the module-level variable this is bound to in the
     Interface (`SensorUnit = DdsUnit(...)`), and a topic's name is its class's
-    `__name__`.
+    wire type name (the class name unless pinned with `idl.type_name`).
 
-    `unitCode` is the uint8 every sample's header carries as `source_unit` /
-    `destination_unit`. A class may appear in both `publish` and `subscribe`.
+    `unitCode` is the unit's system id: every sample carries its sender's as
+    `A_sourceID.A_systemId`. A class may appear in both `publish` and `subscribe`.
     """
 
     unitCode: int
@@ -92,6 +92,6 @@ class DdsUnit:
         if isinstance(self.unitCode, bool) or not isinstance(self.unitCode, int):
             raise TypeError(f"DdsUnit.unitCode must be an int, got {self.unitCode!r}")
         if not 0 <= self.unitCode <= 0xFF:
-            raise ValueError(f"DdsUnit.unitCode = {self.unitCode} does not fit the uint8 header field")
+            raise ValueError(f"DdsUnit.unitCode = {self.unitCode} is not a uint8 unit code")
         object.__setattr__(self, "publish", _topic_classes(self.publish, "publish"))
         object.__setattr__(self, "subscribe", _topic_classes(self.subscribe, "subscribe"))

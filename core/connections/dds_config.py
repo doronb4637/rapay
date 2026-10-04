@@ -19,9 +19,11 @@ Two naming rules keep it that small, and both are load-bearing:
 
   * A unit's name is the variable it is bound to: `"unit": "SensorUnit"` in a
     config picks `SensorUnit` above.
-  * A topic's name is its class's `__name__`. There is no topic table -- the
-    classes ARE the topics -- so the units' publish/subscribe lists are the
-    whole routing contract.
+  * A topic's name is its class's wire type name (`type_support.type_name`):
+    the class name, unless the type pins one with `idl.type_name`, as IDL with
+    modules does (`P_Radar_PSM::Track`). There is no topic table -- the classes
+    ARE the topics -- so the units' publish/subscribe lists are the whole
+    routing contract.
 
 Everything here runs at CONFIG LOAD (`ConnectionConfig.from_json` calls
 `resolve_unit`), so a contract that cannot work fails `create()`, never
@@ -48,7 +50,9 @@ from core.tools.general import names_a_file
 logger = logging.getLogger("connmgr.dds")
 
 DEFAULT_DOMAIN_ID: int = 67
-DEFAULT_QOS_FILE: Path = Path(__file__).resolve().parent.parent / "configs" / "qos" / "UNIVERSAL_QOS.xml"
+_CORE_DIR: Path = Path(__file__).resolve().parent.parent
+DEFAULT_QOS_FILE: Path = _CORE_DIR / "DDS" / "Configuration" / "UNIVERSAL_QOS.xml"
+DEFAULT_LICENSE_FILE: Path = _CORE_DIR / "rti_license.dat"
 
 
 class TopicDirection(str, Enum):
@@ -90,6 +94,13 @@ class TopicSpec:
 
 def _qualified(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def topic_name_of(cls: type) -> str:
+    """The topic `cls` carries: its wire type name. Falls back to the class name
+    for a selector that is not an @idl type at all."""
+    type_support = getattr(cls, "type_support", None)
+    return cls.__name__ if type_support is None else type_support.type_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +161,7 @@ class DdsUnitConfig:
         for spec in self.topics:
             if spec.sample_type is cls:
                 return spec
-        spec = self.topic_named(cls.__name__)
+        spec = self.topic_named(topic_name_of(cls))
         if spec is not None:
             raise TypeError(second_copy_message(cls, spec))
         raise ValueError(
@@ -267,17 +278,18 @@ def _units_of(module: ModuleType, where: str) -> dict[str, DdsUnit]:
 
 
 def _check_topic_names(units: dict[str, DdsUnit], where: str) -> None:
-    """One class per topic name. Two classes sharing a `__name__` would be one
+    """One class per topic name. Two classes sharing a type name would be one
     topic on the wire carried by two different types -- or the same generated
     module imported twice."""
     owner: dict[str, type] = {}
     for unit in units.values():
         for cls in (*unit.publish, *unit.subscribe):
-            known = owner.setdefault(cls.__name__, cls)
+            name = topic_name_of(cls)
+            known = owner.setdefault(name, cls)
             if known is not cls:
                 raise ValueError(
-                    f"{where}: topic {cls.__name__!r} is carried by two different classes, "
-                    f"{_qualified(known)} and {_qualified(cls)}. A topic's name is its class "
+                    f"{where}: topic {name!r} is carried by two different classes, "
+                    f"{_qualified(known)} and {_qualified(cls)}. A topic's name is its type "
                     f"name, so these would collide on the wire; if they are the same generated "
                     f"module, import it one way only.")
 
@@ -291,7 +303,7 @@ def _own_topics(unit: str, units: dict[str, DdsUnit]) -> tuple[TopicSpec, ...]:
         direction = (TopicDirection.BOTH if publishes and subscribes
                      else TopicDirection.PUBLISH if publishes else TopicDirection.SUBSCRIBE)
         specs.append(TopicSpec(
-            name=cls.__name__,
+            name=topic_name_of(cls),
             sample_type=cls,
             direction=direction,
             publishers=tuple(name for name, other in others.items() if cls in other.publish),

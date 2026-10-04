@@ -11,6 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `INTERFACE_FORMAT`. Re-exported by `__init__.py`.
 - `Interfaces/Example/example_interface.py` -- the reference DDS Interface: the exact shape the
   system-XML -> Python XSLT (written and owned by the user, not in this repo) must produce.
+- `Configuration/` -- the deployment's QoS: `UNIVERSAL_QOS.xml` (`dds_config.DEFAULT_QOS_FILE`) and
+  the security files it references. Data, not code. The RTI license sits beside the package, at
+  `core/rti_license.dat` (`dds_config.DEFAULT_LICENSE_FILE`, exported as `RTI_LICENSE_FILE` by
+  `connections/dds.py` before RTI is imported, unless the environment already sets it).
 
 Standalone in the repo's dependency graph (see root `CLAUDE.md`): nothing here imports
 `core.connections`, `core.tools`, `core.IRS` or `core.annotations`. `__init__.py` and
@@ -44,9 +48,12 @@ The rules, each enforced -- by `DdsUnit.__post_init__` at the Interface's own im
 
 - **A unit's name is its variable.** `DdsUnit` deliberately has no `name` field. One object bound
   to two names is an error, and so are two units sharing a `unitCode` (it identifies senders).
-- **A topic's name is its class's `__name__`.** There is no topic table: the classes ARE the
-  topics. Two different classes sharing a `__name__` are an error -- they would be one topic on the
-  wire carried by two types.
+- **A topic's name is its class's wire type name** (`type_support.type_name`): the class name,
+  unless the type pins one with `idl.type_name`. Types generated from IDL with modules do -- class
+  `P_Radar_PSM_Track`, type and topic `P_Radar_PSM::Track` -- and peers name the topic after the
+  type, so the class name would never match. There is no topic table: the classes ARE the topics.
+  Two different classes sharing a type name are an error -- they would be one topic on the wire
+  carried by two types.
 - **Import `DdsUnit` from `core.DDS`, never define it.** The loader finds units by `isinstance`
   against this one class; an Interface with its own `class DdsUnit` gets an error saying so.
 - **Imports are absolute.** The Interface's topic classes must be the very objects the application
@@ -64,7 +71,7 @@ The rules, each enforced -- by `DdsUnit.__post_init__` at the Interface's own im
 RTI's `@idl.struct` takes only extensibility, `type_name`, data-representation and XTypes
 annotations -- nothing says "this struct is a topic" versus "this struct is nested inside one". So
 the generated type modules cannot tell the two apart, and do not need to: a struct becomes a topic
-only by appearing in some `DdsUnit`'s `publish`/`subscribe`. `Header` in the example appears in
+only by appearing in some `DdsUnit`'s `publish`/`subscribe`. `SourceId` in the example appears in
 none, so no unit ever gets an entity for it.
 
 ## Still no TYPE registry
@@ -81,26 +88,40 @@ import rti.types as idl
 from dataclasses import field
 
 @idl.struct
-class Header:
-    source_unit: idl.uint8 = 0
-    destination_unit: idl.uint8 = 0
+class SourceId:
+    A_platformId: idl.int32 = 0
+    A_systemId: idl.int16 = 0
+    A_moduleId: idl.int16 = 0
 
 @idl.struct
 class Track:
-    header: Header = field(default_factory=Header)
+    A_sourceID: SourceId = field(default_factory=SourceId)
     x: float = 0.0
 ```
 
-## Two Python gotchas
+## The sender is always `A_sourceID`
 
-- **Nested struct members need `field(default_factory=...)`, not a bare instance.** `@idl.struct`
-  builds a dataclass under the hood, so `header: Header = Header()` raises `ValueError: mutable
-  default ... is not allowed` at import time. Always `header: Header = field(default_factory=Header)`.
-- **Include a `Header` struct with `source_unit`/`destination_unit` fields** (or whatever
-  `config['header']` on the connection names instead). A DataReader serves every publisher of its
-  topic at once, so the sample is the only thing that says who sent it. A topic with a single
-  publisher still routes without it, but one with several publishers -- or one a unit both
-  publishes and subscribes -- is refused at load if its type lacks the field.
+Every topic type carries its sender as a member named `A_sourceID`: a struct of
+`A_platformId: int32`, `A_systemId: int16`, `A_moduleId: int16`. This is fixed by the ICD, so
+nothing configures it -- a connection config with a `header` key is refused.
+
+- **`A_systemId` is the unit code** -- the `unitCode` of the sender's `DdsUnit`. It alone decides
+  who sent a sample; `A_platformId` (always 1) and `A_moduleId` (0 unless changed) are carried, not
+  routed on.
+- **On send, only `A_systemId` is stamped** (with our own unit code, and only while it is still 0).
+  The platform and module ids are the caller's to set. There is no destination field: naming a
+  destination on a send is checked against the Interface, nothing more.
+- A DataReader serves every publisher of its topic at once, so the sample is the only thing that
+  says who sent it. A topic with a single publisher still routes without `A_sourceID`, but one with
+  several publishers -- or one a unit both publishes and subscribes -- is refused at load if its
+  type lacks it.
+
+## A Python gotcha
+
+**Nested struct members need `field(default_factory=...)`, not a bare instance.** `@idl.struct`
+builds a dataclass under the hood, so `A_sourceID: SourceId = SourceId()` raises `ValueError:
+mutable default ... is not allowed` at import time. Always
+`A_sourceID: SourceId = field(default_factory=SourceId)`.
 
 ## Two ways this fails silently
 
@@ -109,8 +130,9 @@ no sample ever arrives -- with no error anywhere.
 
 - **Type name mismatch.** `@idl.struct` names the DDS type after the Python class. A peer whose
   type came from real IDL may be advertising a different name (`MyModule::Track`); pin it on the
-  type with `@idl.struct(type_annotations=[idl.type_name("MyModule::Track")])`. The TOPIC name is
-  unaffected -- it stays the class name.
+  type with `@idl.struct(type_annotations=[idl.type_name("MyModule::Track")])`. The TOPIC name
+  follows it, so the pin fixes both -- and QoS `topic_filter`s must then match `MyModule::Track`
+  (or a wildcard such as `*Track`), or that topic silently gets the profile's baseline.
 - **Extensibility mismatch.** `idl.final` / `idl.extensible` / `idl.mutable` (passed via
   `@idl.struct(type_annotations=[...])`) must agree with what the peer's IDL declares.
 

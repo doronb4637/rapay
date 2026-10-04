@@ -7,7 +7,8 @@
   profile as `topic_filter` attributes rather than in separate files: the
   unfiltered <datawriter_qos>/<datareader_qos> is the profile's baseline, and a
   filtered one overrides it for the topics whose names match. A topic's name is
-  its type's class name (`Track`, `Status`), so that is what a filter matches.
+  its type's wire name (`Track`, or `P_Radar_PSM::Track` for a type pinned with
+  idl.type_name), so that is what a filter matches; `*Track` matches both.
 
   Reading those filters requires the topic-aware QosProvider accessors:
   set_topic_*_qos(profile, topic) for a named profile, get_topic_*_qos(topic)

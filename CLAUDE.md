@@ -33,7 +33,9 @@ gsim           uses core (the whole package -- connections, IRS, tools, annotati
 - **`core/DDS`** is the topic-based counterpart to `IRS`, and is deliberately small. It holds
   `Structures/` -- plain Python modules of `@idl.struct` classes -- and `interface.py`, the
   vocabulary (`DdsUnit`) that a generated **DDS Interface** is written in: the system contract
-  naming each unit, its code, and the topic classes it publishes and subscribes. There is still no
+  naming each unit, its code, and the topic classes it publishes and subscribes. `Configuration/`
+  holds the deployment's QoS (`UNIVERSAL_QOS.xml`) and its security files -- data, not code; the
+  RTI license is `core/rti_license.dat`. There is still no
   TYPE registry and no engine. The asymmetry with `IRS` is the whole point: a binary IRS payload
   carries no type information, so *something* has to look up a layout by `(unitCode, opCode)`; a
   DDS sample carries its type on the wire and RTI matches publishers to subscribers itself. The

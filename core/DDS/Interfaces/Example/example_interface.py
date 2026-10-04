@@ -10,7 +10,7 @@ the whole contract `core.connections.dds_config` reads:
     not know.
   * `SYSTEM` -- optional, used in logs.
   * One module-level `DdsUnit` per unit. The variable name IS the unit name (a
-    config's `"unit": "SensorUnit"`), and each topic is named after its class.
+    config's `"unit": "SensorUnit"`), and each topic is named after its type.
   * ABSOLUTE imports. The topic classes must be the very objects the
     application builds samples from, however this file itself gets loaded.
 """

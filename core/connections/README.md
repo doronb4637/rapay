@@ -686,25 +686,27 @@ ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
 ```
 
 Two naming rules keep the Interface that small: a unit's name is the variable
-its `DdsUnit` is bound to, and a topic's name is its class's `__name__`. From
+its `DdsUnit` is bound to, and a topic's name is its class's wire type name
+(the class name, unless pinned with `idl.type_name` -- `P_Radar_PSM::Track`). From
 the config's `unit`, `dds_config.resolve_unit` derives -- at load, so a broken
 contract fails `create()` -- this unit's code, its peers (every unit that
 publishes what it subscribes or subscribes what it publishes) and its topics.
 `side`, `ip` and `local_ip` are `None`. A config naming any of them, or
-`unitCode` / `connections` / `topics` / `idl_modules` / `Structures` / an echo
-key, is refused with the reason -- each is either a socket concept or now the
-Interface's to say.
+`unitCode` / `connections` / `topics` / `idl_modules` / `Structures` / `header`
+/ an echo key, is refused with the reason -- each is either a socket concept,
+fixed by the ICD, or now the Interface's to say.
 
 Optional keys override deployment defaults that are constants in
 `dds_config`: `domain_id` (`DEFAULT_DOMAIN_ID`), `qos_file` (`DEFAULT_QOS_FILE`,
-an absolute path to `core/configs/qos/UNIVERSAL_QOS.xml`) and `qos_profile`
-(default: the file's `is_default_qos` profile). `header` names the routing
-fields inside a sample (below).
+an absolute path to `core/DDS/Configuration/UNIVERSAL_QOS.xml`) and
+`qos_profile` (default: the file's `is_default_qos` profile). The RTI license is
+`core/rti_license.dat` (`DEFAULT_LICENSE_FILE`), exported as `RTI_LICENSE_FILE`
+before RTI is imported unless the environment already sets it.
 
 **Entities follow the Interface, and nothing else**: a DataWriter per topic the
 unit publishes, a DataReader per topic it subscribes. `@idl.struct` has no
 "this is a topic" marker; a struct is a topic only because a `DdsUnit` lists
-it, so a nested `Header` never gets an entity.
+it, so the nested `A_sourceID` struct never gets an entity.
 
 **Routes are keyed by topic, not opcode.** DDS puts the topic on the wire, so
 the route key is `(unit_code, topic_name)`, and callers name a topic by its
@@ -721,11 +723,13 @@ unit.handle_on_receive(Status, on_status)          # or @route(Status) in a Unit
 the topic. An int is refused: DDS has no opcodes.
 
 **A topic is not a unit.** A DataReader serves every publisher of its topic at
-once, so the sending unit is read off the SAMPLE (`header.source_unit`; field
-names configurable via `config["header"]`), falling back to the Interface when
-it lists exactly one publisher. A topic with several publishers -- or one this
-unit also publishes, since a participant hears its own writes -- must carry the
-header, and a type that does not is a load error. A sample from a peer the
+once, so the sending unit is read off the SAMPLE: always
+`A_sourceID.A_systemId`, the sender's unit code (`A_sourceID` is the ICD's
+fixed `A_platformId: int32, A_systemId: int16, A_moduleId: int16` struct),
+falling back to the Interface when it lists exactly one publisher. A topic with
+several publishers -- or one this unit also publishes, since a participant
+hears its own writes -- must carry `A_sourceID`, and a type that does not is a
+load error. A sample from a peer the
 Interface does not list as publishing that topic is warned about once and
 dropped.
 
@@ -768,14 +772,14 @@ detaches it. A start that fails part-way closes what it had created.
 ### Everything else that differs
 
 - **Two silent failures remain DDS's own**: the type NAME (the class name,
-  unless pinned with `@idl.struct(type_annotations=[idl.type_name(...)])`) and
-  EXTENSIBILITY must match the peer's IDL. `rtiddsspy -domainId <N>` shows what
+  unless pinned with `@idl.struct(type_annotations=[idl.type_name(...)])`;
+  the topic name follows it) and EXTENSIBILITY must match the peer's IDL. `rtiddsspy -domainId <N>` shows what
   a peer actually advertises.
 - **Echo is refused at config load.** It transmits raw bytes, which a
   DataWriter cannot accept; LIVELINESS QoS is the mechanism that belongs there.
 - **`_do_send` takes a typed sample, not bytes**, checks that the destination
-  subscribes the topic, and stamps `source_unit` / `destination_unit` (values
-  the caller set are never overwritten).
+  subscribes the topic, and stamps our unit code into `A_sourceID.A_systemId`
+  (a value the caller set is never overwritten).
 - **`rti.asyncio` must stay imported.** `DataReader.take_data_async` does not
   exist until that import monkey-patches it on.
 

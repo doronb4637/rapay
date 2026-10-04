@@ -128,9 +128,6 @@ DDS_INTERFACE_KEYS = ("dds_interface", "DdsInterface", "ddsInterface")
 DDS_DOMAIN_ID_KEYS = ("domain_id", "DomainId", "domainId")
 DDS_QOS_FILE_KEYS = ("qos_file", "QosFile", "qosFile")
 DDS_QOS_PROFILE_KEYS = ("qos_profile", "QosProfile", "qosProfile")
-DDS_HEADER_KEY = "header"
-#: The keys of a DDS config's `header` block (see `dds.DdsConnection`).
-DDS_HEADER_SUBKEYS = frozenset({"field", "source_unit", "destination_unit", "stamp"})
 #: The hand-written topic list DDS configs used to carry. Refused everywhere
 #: now: DDS topics are the classes in the Interface, and no other protocol has any.
 TOPICS_KEY = "topics"
@@ -474,10 +471,12 @@ _DDS_REFUSED_KEYS: dict[tuple[str, ...], str] = {
     STRUCTURES_KEYS: "Structures are IRS message layouts; DDS samples are typed by their classes",
     tuple(sorted(ECHO_KEYS)): "the echo transmits raw bytes, which a DataWriter cannot publish "
                               "-- use LIVELINESS QoS in the QoS profile instead",
+    ("header",): "the sender is always read from the sample's A_sourceID.A_systemId; there is "
+                 "nothing to configure",
 }
 
 #: Every key a DDS config may carry.
-_DDS_KEYS = frozenset({PROTOCOL_KEY, SCHEMA_KEY, DDS_HEADER_KEY, *DDS_UNIT_KEYS, *DDS_INTERFACE_KEYS,
+_DDS_KEYS = frozenset({PROTOCOL_KEY, SCHEMA_KEY, *DDS_UNIT_KEYS, *DDS_INTERFACE_KEYS,
                        *DDS_DOMAIN_ID_KEYS, *DDS_QOS_FILE_KEYS, *DDS_QOS_PROFILE_KEYS})
 
 
@@ -490,18 +489,6 @@ def _refuse_non_dds_keys(data: Mapping[str, Any]) -> None:
     unknown = sorted(key for key in data if key not in _DDS_KEYS)
     if unknown:
         raise ValueError(f"protocol 'dds' has no setting(s) {unknown}; accepted: {sorted(_DDS_KEYS)}")
-
-
-def _check_dds_header(data: Mapping[str, Any]) -> None:
-    header = data.get(DDS_HEADER_KEY)
-    if header is None:
-        return
-    if not isinstance(header, dict):
-        raise ValueError(f"config[{DDS_HEADER_KEY!r}] must be an object, got {header!r}")
-    unknown = sorted(set(header) - DDS_HEADER_SUBKEYS)
-    if unknown:
-        raise ValueError(
-            f"config[{DDS_HEADER_KEY!r}] has no setting(s) {unknown}; accepted: {sorted(DDS_HEADER_SUBKEYS)}")
 
 
 def _parse_dds_domain_id(data: Mapping[str, Any]) -> int:
@@ -638,7 +625,7 @@ class ConnectionConfig:
     unitCode: int
     connections: dict[str, UnitEndpoint]
     #: Every key outside the fixed set: echo, Structures, and protocol-specific
-    #: keys (`mode`, `ttl`, DDS `header`, ...).
+    #: keys (`mode`, `ttl`, ...).
     extra: dict[str, Any] = field(default_factory=dict)
     #: DDS only: this unit as its DDS Interface defines it -- its topics, peers,
     #: domain and QoS. None everywhere else.
@@ -695,14 +682,12 @@ class ConnectionConfig:
         A DDS node is ONE UNIT of a DDS Interface. Its unit code, its peers and
         its topics are the Interface's to say (`dds_config.resolve_unit`); this
         config only picks the unit and may override the deployment defaults
-        (`domain_id`, `qos_file`, `qos_profile`). `header` stays in `extra` for
-        `DdsConnection`, unchanged.
+        (`domain_id`, `qos_file`, `qos_profile`).
 
         Each derived peer's `port` is the domain id, which keeps "a DDS
         endpoint's port is its domain" true for anything reading `ports`.
         """
         _refuse_non_dds_keys(data)
-        _check_dds_header(data)
         unit = _lookup(data, *DDS_UNIT_KEYS)
         interface = _lookup(data, *DDS_INTERFACE_KEYS)
         if not unit or not interface:

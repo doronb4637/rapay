@@ -48,7 +48,8 @@ udp.py         UdpConnection
 multicast.py   MulticastConnection (direction derived from config.side)
 dds.py         DdsConnection (RTI Connext; native payloads, no framing, topic routing)
 dds_config.py  DDS Interface loading/validation + one unit's view of it (DdsUnitConfig,
-               TopicSpec), DEFAULT_DOMAIN_ID / DEFAULT_QOS_FILE. Imports no rti
+               TopicSpec), DEFAULT_DOMAIN_ID / DEFAULT_QOS_FILE / DEFAULT_LICENSE_FILE.
+               Imports no rti
 composite.py   CompositeUnit -- combines direction-limited connections into one Unit
 manager.py     ConnectionManager -- factory + centralized absolute-shutdown
 ```
@@ -573,20 +574,27 @@ ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
 ```
 
 Two naming rules, both load-bearing: **a unit's name is its variable**, and **a topic's name is its
-class's `__name__`** — there is no topic table. `dds_config.resolve_unit` (called from
+class's wire type name** (`dds_config.topic_name_of`: `type_support.type_name`, i.e. the class name
+unless pinned with `idl.type_name`, as IDL modules are — `P_Radar_PSM::Track`) — there is no topic
+table. `dds_config.resolve_unit` (called from
 `ConnectionConfig._from_dds_json`, i.e. at load) validates the WHOLE Interface and derives this
 unit's code, its peers (units publishing what it subscribes or subscribing what it publishes) and
 its `TopicSpec`s, each carrying the peer `publishers`/`subscribers` the routing below leans on.
 `config.dds` holds the result; `unitCode`/`connections` are derived from it (a peer's `port` is
 the domain id), and `side`/`ip`/`local_ip` are **None**. A DDS config naming `side`, `ip`,
-`local_ip`, `unitCode`, `connections`, `topics`, `idl_modules`/`idl_file`, `Structures` or an echo
-key is refused with the reason, and so is any other key it does not read (including unknown
-`header` sub-keys) — never silently ignored.
+`local_ip`, `unitCode`, `connections`, `topics`, `idl_modules`/`idl_file`, `Structures`, `header`
+or an echo key is refused with the reason, and so is any other key it does not read — never
+silently ignored.
 
-**Deployment defaults are constants** in `dds_config`: `DEFAULT_DOMAIN_ID` and `DEFAULT_QOS_FILE`
-(absolute, derived from `__file__`, so it does not depend on the working directory). The
-`domain_id`, `qos_file` and `qos_profile` keys override them; `qos_profile` defaults to the file's
-`is_default_qos` profile. A missing QoS file fails at load, an unknown profile at construction.
+**Deployment defaults are constants** in `dds_config`, all absolute and derived from `__file__`, so
+none depends on the working directory: `DEFAULT_DOMAIN_ID`, `DEFAULT_QOS_FILE`
+(`core/DDS/Configuration/UNIVERSAL_QOS.xml`, beside the security files it references) and
+`DEFAULT_LICENSE_FILE` (`core/rti_license.dat`). The `domain_id`, `qos_file` and `qos_profile` keys
+override the first two; `qos_profile` defaults to the file's `is_default_qos` profile. A missing QoS
+file fails at load, an unknown profile at construction. The license is exported as
+`RTI_LICENSE_FILE` at the top of `dds.py`, *before* `rti` is imported, and only when the file
+exists and the environment does not already set it. The tests read their own
+`core/tests/qos_fixture.xml`, never the deployment file.
 
 **No opcodes.** DDS puts the topic on the wire, so DDS route keys are `(unit_code, topic_name)` and
 callers select a topic by class, sample or name (§4). `RouteTable` and the echo check only hash and
@@ -594,9 +602,10 @@ compare keys, so the generalisation cost the framed protocols nothing. An int se
 `TypeError` saying so.
 
 **A topic is not a unit.** A DataReader serves every publisher of its topic, so the sender is read
-off the SAMPLE (`header.source_unit`, names configurable via `config["header"]`), falling back to
-the Interface's sole publisher of that topic. A subscribed topic with several publishers — or one
-the unit also publishes, since a participant hears its own writes — **must** carry the header;
+off the SAMPLE — always `A_sourceID.A_systemId`, which is the sender's unit code (`A_sourceID` is
+the ICD's fixed `(A_platformId, A_systemId, A_moduleId)` struct; nothing configures it) — falling
+back to the Interface's sole publisher of that topic. A subscribed topic with several publishers —
+or one the unit also publishes, since a participant hears its own writes — **must** carry it;
 `_check_senders_identifiable` makes a type that does not a construction error rather than silent
 drops. A sample from a peer the Interface does not list as publishing the topic is a third-party
 fault: warned about once, dropped. `_validate_route` / `_do_send` check the Interface the same way
@@ -628,13 +637,14 @@ Smaller things that are each load-bearing:
   import monkey-patches it on. Its dispatcher is a process-global, first touched inside `_read_loop`
   (on the shared loop thread, where it must be), and `rti.asyncio.close()` is called only by the
   last `DdsConnection` to stop — `_live_connections` counts the ones that started successfully.
-- **Self-reception** is filtered by `source_unit == own code`, preferred to `ignore_participant`,
+- **Self-reception** is filtered by `A_systemId == own code`, preferred to `ignore_participant`,
   which would also block a legitimate second process of ours on the same host.
 - **`can_send`/`can_receive` are the union of the topic directions**, so a subscribe-only unit
   can't be chosen as a `CompositeUnit` sender.
-- **`_do_send` takes a typed sample** and stamps `source_unit`/`destination_unit` outbound, never
-  overwriting values the caller set. `destination_unit` is informational: every subscriber still
-  receives every sample.
+- **`_do_send` takes a typed sample** and stamps our unit code into `A_sourceID.A_systemId`
+  outbound, never overwriting a value the caller set; `A_platformId`/`A_moduleId` are the caller's.
+  There is no destination field: a named destination is only checked against the Interface, and
+  every subscriber still receives every sample.
 
 Tests live in `core/tests/test_dds.py`. Everything that needs only `rti.connextdds` (Interface
 loading, QoS parsing, selectors, routing via `_dispatch_incoming`, sends into a recording writer,

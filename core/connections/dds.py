@@ -6,8 +6,8 @@ that is the system contract (`core/DDS/interface.py`, `dds_config.py`) -- and
 everything else follows from that:
 
   * Entities. A DataWriter for each topic the unit publishes, a DataReader for
-    each topic it subscribes, and nothing else. A topic's name is its class's
-    name.
+    each topic it subscribes, and nothing else. A topic's name is its type's
+    wire name (`P_Radar_PSM::Track`).
   * Routing. DDS puts the topic, not an opcode, on the wire, so routes here are
     keyed by TOPIC NAME. Wherever the framed protocols take an opcode, callers
     name a topic by its class, a sample of it, or its name:
@@ -17,8 +17,9 @@ everything else follows from that:
         unit.handle_on_receive(Status, on_status)   # or @route(Status) on a UnitHandler
 
   * Senders. A DataReader serves every publisher of its topic at once, so the
-    sending unit is read off the SAMPLE (`header.source_unit`), falling back to
-    the Interface when it lists exactly one publisher of the topic.
+    sending unit is read off the SAMPLE (`A_sourceID.A_systemId` is its unit
+    code), falling back to the Interface when it lists exactly one publisher of
+    the topic.
   * Lifecycle. `participant.close()` closes every topic, writer and reader the
     participant contains. The one ordering that is ours to get right is
     stopping the read loops before it (see `_close_entities`).
@@ -34,10 +35,11 @@ Configuration -- only `unit` and `dds_interface` are required:
       "dds_interface": "C:/ICD/generated/dds_interface.py",
       "domain_id": 0,                     # default dds_config.DEFAULT_DOMAIN_ID
       "qos_file": ".../UNIVERSAL_QOS.xml",  # default dds_config.DEFAULT_QOS_FILE
-      "qos_profile": "MyLib::Reliable",   # default: the file's is_default_qos profile
-      "header": {"field": "header", "source_unit": "source_unit",
-                 "destination_unit": "destination_unit", "stamp": true}
+      "qos_profile": "MyLib::Reliable"    # default: the file's is_default_qos profile
     }
+
+The RTI license is `core/rti_license.dat` (dds_config.DEFAULT_LICENSE_FILE),
+unless RTI_LICENSE_FILE is already set in the environment.
 
 QoS answers HOW, from one universal file of named profiles. Per-topic settings
 live inside a profile as `topic_filter` attributes, which is why every entity
@@ -50,28 +52,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
-import rti.connextdds as dds  # type: ignore  # raises ImportError if not installed
+from .dds_config import DEFAULT_LICENSE_FILE, DdsUnitConfig, TopicDirection, TopicSpec
+
+# Before RTI is imported, so the license is found whatever the working directory.
+if DEFAULT_LICENSE_FILE.is_file():
+    os.environ.setdefault("RTI_LICENSE_FILE", str(DEFAULT_LICENSE_FILE))
+
+import rti.connextdds as dds  # type: ignore  # noqa: E402  # raises ImportError if not installed
 # Importing this is what ATTACHES `take_data_async` to dds.DataReader -- it is a
 # monkey-patch at the bottom of rti/asyncio.py, not a method on the class. It
 # looks unused to a linter and is load-bearing: without it `_read_loop` below
 # raises AttributeError and no sample is ever received.
-import rti.asyncio as rti_asyncio  # type: ignore
+import rti.asyncio as rti_asyncio  # type: ignore  # noqa: E402
 
-from ._routes import MessageKey, RouteKey, UnitName
-from .base import Connection, OpCode
-from .config import ConnectionConfig
-from .dds_config import DdsUnitConfig, TopicDirection, TopicSpec
+from ._routes import MessageKey, RouteKey, UnitName  # noqa: E402
+from .base import Connection, OpCode  # noqa: E402
+from .config import ConnectionConfig  # noqa: E402
 
 logger = logging.getLogger("connmgr.dds")
 
-#: Default names for the routing fields inside a sample. Overridable per
-#: connection through config['header'], because the layout is an ICD's
-#: business, not ours.
-DEFAULT_HEADER_FIELD = "header"
-DEFAULT_SOURCE_FIELD = "source_unit"
-DEFAULT_DESTINATION_FIELD = "destination_unit"
+#: Every topic type carries its sender as `A_sourceID`, a struct of
+#: (A_platformId: int32, A_systemId: int16, A_moduleId: int16). The system id is
+#: the unit code the DDS Interface names units by.
+SOURCE_ID_FIELD = "A_sourceID"
+SYSTEM_ID_FIELD = "A_systemId"
+SOURCE_PATH = f"{SOURCE_ID_FIELD}.{SYSTEM_ID_FIELD}"
 
 #: `rti.asyncio`'s waitset dispatcher is a PROCESS-wide singleton, and
 #: `rti.asyncio.close()` tears it down for everyone. With two DdsConnections
@@ -104,14 +112,6 @@ class DdsConnection(Connection):
         #: BEFORE the participant closes, not after (see `_close_entities`).
         self._read_tasks: list[asyncio.Task[None]] = []
         self._counted_live = False
-
-        header_cfg: dict[str, Any] = config.extra.get("header") or {}
-        #: None means the routing fields sit at the top level of the sample
-        #: rather than inside a nested struct.
-        self._header_field: str | None = header_cfg.get("field", DEFAULT_HEADER_FIELD)
-        self._source_field: str = header_cfg.get("source_unit", DEFAULT_SOURCE_FIELD)
-        self._destination_field: str = header_cfg.get("destination_unit", DEFAULT_DESTINATION_FIELD)
-        self._stamp_header: bool = bool(header_cfg.get("stamp", True))
         #: Warnings about inbound traffic are once per cause, not once per
         #: sample: a cause is a property of a peer or a type, so it would
         #: otherwise repeat at full data rate.
@@ -199,39 +199,33 @@ class DdsConnection(Connection):
         return self._qos_provider.participant_qos
 
     # ------------------------------------------------------------------ #
-    # Header access
+    # Sender identity: A_sourceID
     # ------------------------------------------------------------------ #
-    @property
-    def _source_path(self) -> str:
-        return self._source_field if self._header_field is None else f"{self._header_field}.{self._source_field}"
+    @staticmethod
+    def _source_code(sample: Any) -> Any:
+        """The sender's unit code (`A_sourceID.A_systemId`), or None if this
+        type carries no A_sourceID."""
+        source_id = getattr(sample, SOURCE_ID_FIELD, None)
+        return None if source_id is None else getattr(source_id, SYSTEM_ID_FIELD, None)
 
-    def _header_of(self, sample: Any) -> Any:
-        """The struct carrying the routing fields, or None if this type has none."""
-        if self._header_field is None:
-            return sample
-        return getattr(sample, self._header_field, None)
-
-    def _header_value(self, sample: Any, field: str) -> Any:
-        header = self._header_of(sample)
-        return None if header is None else getattr(header, field, None)
-
-    def _carries_source(self, sample_type: type) -> bool | None:
-        """Whether `sample_type` has the source field, or None if a default
+    @staticmethod
+    def _carries_source(sample_type: type) -> bool | None:
+        """Whether `sample_type` has A_sourceID.A_systemId, or None if a default
         sample cannot be built to look."""
         try:
             sample = sample_type()
         except Exception:  # noqa: BLE001 - a type we cannot probe is not a type we can fault
             return None
-        header = self._header_of(sample)
-        return header is not None and hasattr(header, self._source_field)
+        source_id = getattr(sample, SOURCE_ID_FIELD, None)
+        return source_id is not None and hasattr(source_id, SYSTEM_ID_FIELD)
 
     def _check_senders_identifiable(self) -> None:
         """
-        A subscribed topic needs the header when anything but one peer can
+        A subscribed topic needs A_sourceID when anything but one peer can
         write to it: when several units publish it, or when this unit publishes
-        it too (a participant's reader hears its own writer). Without the header
-        every such sample would be unattributable and silently dropped, so it is
-        a load error instead.
+        it too (a participant's reader hears its own writer). Without it every
+        such sample would be unattributable and silently dropped, so it is a
+        load error instead.
         """
         for spec in self._dds.topics:
             hears_itself = spec.publishes
@@ -242,32 +236,23 @@ class DdsConnection(Connection):
                        else f"it has {len(spec.publishers)} publishers {list(spec.publishers)}")
                 raise ValueError(
                     f"unit {self._dds.unit!r} subscribes {spec.name!r} and {why}, but "
-                    f"{spec.sample_type.__qualname__} has no {self._source_path!r} field to tell "
-                    f"the senders apart. Add the header to the type, or point config['header'] "
-                    f"at the fields it does carry.")
+                    f"{spec.sample_type.__qualname__} has no {SOURCE_PATH!r} field to tell "
+                    f"the senders apart.")
 
-    def _stamp_outgoing(self, sample: Any, unit_name: UnitName | None) -> None:
+    def _stamp_outgoing(self, sample: Any) -> None:
         """
-        Fill in `source_unit` (and `destination_unit`, when the send named one)
-        on an outgoing sample. The far end identifies the sender by the source,
-        so leaving it at zero silently gets the sample dropped there. Only
-        fields still at their zero default are filled; caller-set values stay.
+        Fill in our unit code as `A_sourceID.A_systemId` on an outgoing sample.
+        The far end identifies the sender by it, so leaving it at zero silently
+        gets the sample dropped there. Only a field still at zero is filled; a
+        caller-set value stays, and the platform/module ids are the caller's.
         """
-        if not self._stamp_header:
+        source_id = getattr(sample, SOURCE_ID_FIELD, None)
+        if source_id is None or getattr(source_id, SYSTEM_ID_FIELD, None):
             return
-        header = self._header_of(sample)
-        if header is None:
-            return
-        stamps = [(self._source_field, self._own_unit_code)]
-        if unit_name is not None:
-            stamps.append((self._destination_field, self._unit_code_for(unit_name)))
-        for field, code in stamps:
-            if getattr(header, field, None):
-                continue
-            try:
-                setattr(header, field, code)
-            except Exception as exc:  # noqa: BLE001 - a read-only/absent field is not fatal
-                logger.debug("could not stamp %r: %s", field, exc)
+        try:
+            setattr(source_id, SYSTEM_ID_FIELD, self._own_unit_code)
+        except Exception as exc:  # noqa: BLE001 - a read-only/absent field is not fatal
+            logger.debug("could not stamp %r: %s", SOURCE_PATH, exc)
 
     def _warn_once(self, cause: tuple[Any, ...], message: str, *args: Any) -> None:
         if cause not in self._warned:
@@ -283,7 +268,7 @@ class DdsConnection(Connection):
         publishing this topic are a third party's fault, not ours: warned about
         once, and dropped.
         """
-        source = self._header_value(sample, self._source_field)
+        source = self._source_code(sample)
         code = None if source is None else int(source)
         if code is not None and code == self._own_unit_code:
             # Our own write, heard back by our own reader. Preferred to
@@ -291,7 +276,7 @@ class DdsConnection(Connection):
             # process of ours on the same host.
             return None
         if code == 0 and self.config.unit_for_code(0) is None:
-            code = None  # a header the sender never stamped
+            code = None  # an A_sourceID the sender never stamped
         if code is None:
             if len(spec.publishers) == 1:
                 return spec.publishers[0]
@@ -299,7 +284,7 @@ class DdsConnection(Connection):
                 ("no-header", spec.name),
                 "topic %r: samples carry no stamped %r and the DDS Interface lists %d publishers "
                 "of it %s, so the sender cannot be identified -- dropping",
-                spec.name, self._source_path, len(spec.publishers), list(spec.publishers))
+                spec.name, SOURCE_PATH, len(spec.publishers), list(spec.publishers))
             return None
         unit_name = self.config.unit_for_code(code)
         if unit_name is None:
@@ -348,8 +333,9 @@ class DdsConnection(Connection):
 
     def _send_unit(self, unit_name: str | None, key: MessageKey) -> UnitName | None:
         """None -- every subscriber of the topic -- unless the caller names one,
-        which must then subscribe it. A named destination is stamped into the
-        header; DDS still delivers to every subscriber."""
+        which must then subscribe it. A named destination is only checked:
+        A_sourceID has no destination field, and DDS delivers to every
+        subscriber regardless."""
         if unit_name is None:
             return None
         spec = self._dds.topic_for(key)
@@ -472,7 +458,7 @@ class DdsConnection(Connection):
         writer = self._writers.get(opcode)
         if writer is None:
             raise ConnectionError(f"topic {opcode!r} has no DataWriter yet: start() the connection first")
-        self._stamp_outgoing(sample, unit_name)
+        self._stamp_outgoing(sample)
         writer.write(sample)
 
     async def _do_disconnect_unit(self, unit_name: str) -> None:

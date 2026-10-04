@@ -10,7 +10,7 @@
     "protocol": {
       "type": "string",
       "enum": ["tcp", "udp", "multicast", "dds"],
-      "description": "Transport for this connection. 'dds' selects a completely different shape: just 'unit' and 'dds_interface' (plus optional domain_id/qos_file/qos_profile/header); everything else here is for the socket protocols."
+      "description": "Transport for this connection. 'dds' selects a completely different shape: just 'unit' and 'dds_interface' (plus optional domain_id/qos_file/qos_profile); everything else here is for the socket protocols."
     },
     "side": {
       "type": "string",
@@ -110,25 +110,11 @@
 
     "qos_file": {
       "type": "string",
-      "description": "DDS ONLY. Overrides the default QoS profile XML (dds_config.DEFAULT_QOS_FILE, core/configs/qos/UNIVERSAL_QOS.xml)."
+      "description": "DDS ONLY. Overrides the default QoS profile XML (dds_config.DEFAULT_QOS_FILE, core/DDS/Configuration/UNIVERSAL_QOS.xml)."
     },
     "qos_profile": {
       "type": "string",
       "description": "DDS ONLY. Qualified QoS profile name within the QoS file (e.g. 'MyLib::Reliable'). Default: the file's is_default_qos profile."
-    },
-    "header": {
-      "type": "object",
-      "description": "DDS ONLY. Configures where routing fields live inside each sample.",
-      "properties": {
-        "field": {
-          "type": ["string", "null"],
-          "description": "Name of the nested struct field holding the header, or null if the routing fields sit at the sample's top level. Default: framework's DEFAULT_HEADER_FIELD."
-        },
-        "source_unit": { "type": "string", "description": "Field name (inside the header) carrying the sending unit's code. Default: DEFAULT_SOURCE_FIELD." },
-        "destination_unit": { "type": "string", "description": "Field name (inside the header) carrying the destination unit's code. Default: DEFAULT_DESTINATION_FIELD." },
-        "stamp": { "type": "boolean", "description": "Whether outgoing samples get source/destination stamped automatically. Default true.", "default": true }
-      },
-      "additionalProperties": false
     }
   },
   "additionalProperties": true,

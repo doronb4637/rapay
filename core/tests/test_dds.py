@@ -39,12 +39,14 @@ from core.connections.dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE,  #
                                          TopicDirection, load_dds_interface, resolve_unit)
 from core.connections.handlers import UnitHandler, route  # noqa: E402
 from core.DDS import DdsUnit  # noqa: E402
-from core.DDS.idl_types.Example.example_topics import Header, Status, Track  # noqa: E402
+from core.DDS.idl_types.Example.example_topics import SourceId, Status, Track  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INTERFACE = str(REPO_ROOT / "core" / "DDS" / "Interfaces" / "Example" / "example_interface.py")
 INTERFACE_DOTTED = "core.DDS.Interfaces.Example.example_interface"
-QOS_FILE = str(REPO_ROOT / "core" / "configs" / "qos" / "UNIVERSAL_QOS.xml")
+#: The tests' own QoS file. DEFAULT_QOS_FILE is the deployment's, so its
+#: contents are not something a test may pin.
+QOS_FILE = str(Path(__file__).resolve().parent / "qos_fixture.xml")
 
 SENSOR, CONTROL = "SensorUnit", "ControlUnit"
 SENSOR_CODE, CONTROL_CODE = 0x01, 0x02
@@ -69,6 +71,17 @@ B = DdsUnit(unitCode=0x0B, subscribe=(Track, Status))
 C = DdsUnit(unitCode=0x0C, publish=(Track,), subscribe=(Status,))
 """
 
+#: A topic type with no A_sourceID, for the cases where the sender cannot be
+#: read off the sample.
+NO_SOURCE_ID = """\
+import rti.types as idl
+
+@idl.struct
+class Plain:
+    x: idl.int32 = 0
+
+"""
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -84,18 +97,18 @@ def build(unit: str = SENSOR, interface: str = INTERFACE, **overrides) -> DdsCon
     return DdsConnection(ConnectionConfig.from_json(dds_config(unit, interface, **overrides)))
 
 
-def write_interface(tmp_path: Path, body: str, preamble: bool = True) -> str:
+def write_interface(tmp_path: Path, body: str, preamble: bool = True, types: str = "") -> str:
     """A stand-in for a generated Interface, written where a deployment's would
     be. `body` is dedented; the absolute-import preamble is prepended unless the
-    test is about the preamble itself."""
+    test is about the preamble itself, then `types` (extra type definitions)."""
     path = tmp_path / "dds_interface.py"
-    path.write_text((PREAMBLE if preamble else "") + textwrap.dedent(body), encoding="utf-8")
+    path.write_text((PREAMBLE if preamble else "") + types + textwrap.dedent(body), encoding="utf-8")
     return str(path)
 
 
 def sample_from(cls, source_code: int, **fields):
     sample = cls(**fields)
-    sample.header.source_unit = source_code
+    sample.A_sourceID.A_systemId = source_code
     return sample
 
 
@@ -280,7 +293,7 @@ def test_one_unit_under_two_names_is_refused(tmp_path):
 
 
 def test_two_classes_with_one_name_are_refused(tmp_path):
-    """A topic is named after its class, so these would be one topic on the
+    """A topic is named after its type, so these would be one topic on the
     wire carried by two types -- or one module imported two ways."""
     path = write_interface(tmp_path, """\
         import rti.types as idl
@@ -295,6 +308,25 @@ def test_two_classes_with_one_name_are_refused(tmp_path):
         """)
     with pytest.raises(ValueError, match="two different classes"):
         resolve_unit(path, "A")
+
+
+def test_a_pinned_type_name_is_the_topic_name(tmp_path):
+    """IDL modules flatten into the class name (`P_Radar_PSM_Track`) but stay
+    scoped in the pinned type name, which is what peers name the topic by."""
+    path = write_interface(tmp_path, """\
+        import rti.types as idl
+
+        @idl.struct(type_annotations=[idl.type_name("P_Radar_PSM::Track")])
+        class P_Radar_PSM_Track:
+            x: idl.int32 = 0
+
+        A = DdsUnit(unitCode=1, publish=(P_Radar_PSM_Track,))
+        B = DdsUnit(unitCode=2, subscribe=(P_Radar_PSM_Track,))
+        """)
+    a = resolve_unit(path, "A")
+    (spec,) = a.topics
+    assert (spec.name, spec.type_name) == ("P_Radar_PSM::Track", "P_Radar_PSM::Track")
+    assert a.topic_for(spec.sample_type) is spec and a.topic_for("P_Radar_PSM::Track") is spec
 
 
 def test_a_unit_with_no_peers_is_refused(tmp_path):
@@ -414,19 +446,19 @@ def test_a_bad_domain_id_is_refused(bad):
 
 def test_a_missing_qos_file_fails_at_load():
     with pytest.raises(FileNotFoundError, match="qos_file"):
-        ConnectionConfig.from_json(dds_config(qos_file="core/configs/qos/does_not_exist.xml"))
+        ConnectionConfig.from_json(dds_config(qos_file="core/DDS/Configuration/does_not_exist.xml"))
 
 
 def test_an_unknown_qos_profile_fails_at_create_naming_the_files_profiles():
     with pytest.raises(ValueError) as excinfo:
-        build(qos_profile="MyLib::Nope")
+        build(qos_file=QOS_FILE, qos_profile="MyLib::Nope")
     message = str(excinfo.value)
     assert "MyLib::Nope" in message and "MyLib::Reliable" in message
     assert "BuiltinQosLib::" not in message, "RTI's built-in profiles would bury the file's own"
 
 
 def test_a_builtin_qos_profile_is_accepted():
-    build(qos_profile="BuiltinQosLib::Generic.StrictReliable")
+    build(qos_file=QOS_FILE, qos_profile="BuiltinQosLib::Generic.StrictReliable")
 
 
 # --------------------------------------------------------------------------- #
@@ -461,7 +493,7 @@ def test_entity_qos_honors_topic_filters_with_or_without_a_profile(profile):
     """With no profile named, the file's default profile is used -- through the
     topic-aware `get_topic_*_qos`, not the filter-blind `.datawriter_qos`."""
     overrides = {} if profile is None else {"qos_profile": profile}
-    connection = build(SENSOR, **overrides)
+    connection = build(SENSOR, qos_file=QOS_FILE, **overrides)
     assert connection._qos_for("datawriter", "Status").history.depth == 37
     assert connection._qos_for("datawriter", "Track").history.depth == 10
 
@@ -479,7 +511,7 @@ def test_an_opcode_is_refused_with_the_reason():
         build()._message_key(0x12)
 
 
-@pytest.mark.parametrize("selector", ["Nope", Header])
+@pytest.mark.parametrize("selector", ["Nope", SourceId])
 def test_an_unknown_topic_lists_the_units_topics(selector):
     with pytest.raises(ValueError) as excinfo:
         build()._message_key(selector)
@@ -506,40 +538,56 @@ def test_a_second_copy_of_a_topic_class_is_named_as_such():
 # --------------------------------------------------------------------------- #
 # Inbound: who sent it
 # --------------------------------------------------------------------------- #
-def test_the_sender_comes_from_the_header():
+def test_the_sender_comes_from_a_source_id_system_id():
     control = build(CONTROL)
     assert control._sending_unit(sample_from(Track, SENSOR_CODE), spec_of(control, "Track")) == SENSOR
 
 
-def test_a_headerless_sample_falls_back_to_the_sole_publisher():
-    control = build(CONTROL, header={"field": "no_such_header"})
-    assert control._sending_unit(Track(), spec_of(control, "Track")) == SENSOR
+def test_platform_and_module_ids_do_not_pick_the_sender():
+    control = build(CONTROL)
+    sample = sample_from(Track, SENSOR_CODE)
+    sample.A_sourceID.A_platformId, sample.A_sourceID.A_moduleId = 1, CONTROL_CODE
+    assert control._sending_unit(sample, spec_of(control, "Track")) == SENSOR
 
 
-def test_an_unstamped_header_falls_back_to_the_sole_publisher():
+def test_a_sample_without_source_id_falls_back_to_the_sole_publisher(tmp_path):
+    b = build("B", write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Plain,))
+        B = DdsUnit(unitCode=2, subscribe=(Plain,))
+        """, types=NO_SOURCE_ID))
+    spec = spec_of(b, "Plain")
+    assert b._sending_unit(spec.sample_type(), spec) == "A"
+
+
+def test_an_unstamped_source_id_falls_back_to_the_sole_publisher():
     control = build(CONTROL)
     assert control._sending_unit(Track(), spec_of(control, "Track")) == SENSOR
 
 
-def test_with_several_publishers_the_header_decides(tmp_path):
+def test_with_several_publishers_the_source_id_decides(tmp_path):
     b = build("B", write_interface(tmp_path, THREE_UNITS))
     assert b._sending_unit(sample_from(Track, 0x0C), spec_of(b, "Track")) == "C"
     assert b._sending_unit(sample_from(Track, 0x0A), spec_of(b, "Track")) == "A"
 
 
-def test_several_publishers_and_no_header_fails_at_load(tmp_path):
+def test_several_publishers_and_no_source_id_fails_at_load(tmp_path):
     """Every sample would be unattributable -- a load error, not silent drops."""
-    with pytest.raises(ValueError, match=r"2 publishers \['A', 'C'\]"):
-        build("B", write_interface(tmp_path, THREE_UNITS), header={"field": "no_such_header"})
-
-
-def test_a_topic_the_unit_also_publishes_needs_the_header(tmp_path):
     path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Track,))
-        B = DdsUnit(unitCode=2, publish=(Track,), subscribe=(Track,))
-        """)
+        A = DdsUnit(unitCode=0x0A, publish=(Plain,))
+        B = DdsUnit(unitCode=0x0B, subscribe=(Plain,))
+        C = DdsUnit(unitCode=0x0C, publish=(Plain,))
+        """, types=NO_SOURCE_ID)
+    with pytest.raises(ValueError, match=r"2 publishers \['A', 'C'\]"):
+        build("B", path)
+
+
+def test_a_topic_the_unit_also_publishes_needs_a_source_id(tmp_path):
+    path = write_interface(tmp_path, """\
+        A = DdsUnit(unitCode=1, publish=(Plain,), subscribe=(Plain,))
+        B = DdsUnit(unitCode=2, publish=(Plain,), subscribe=(Plain,))
+        """, types=NO_SOURCE_ID)
     with pytest.raises(ValueError, match="hears its own writes"):
-        build("A", path, header={"field": "no_such_header"})
+        build("A", path)
 
 
 def test_a_units_own_samples_are_filtered(tmp_path):
@@ -633,24 +681,18 @@ def test_a_sample_is_sent_on_its_classs_topic_stamped_with_its_source():
     sample = Track(track_id=3)
     sensor.send_message(sample)
     assert writer.written == [sample]
-    assert (sample.header.source_unit, sample.header.destination_unit) == (SENSOR_CODE, 0)
+    source_id = sample.A_sourceID
+    assert (source_id.A_platformId, source_id.A_systemId, source_id.A_moduleId) == (0, SENSOR_CODE, 0), \
+        "only the unit code is ours to stamp"
 
 
-def test_caller_set_header_values_are_not_overwritten():
+def test_a_caller_set_system_id_is_not_overwritten():
     sensor = build(SENSOR)
     sensor._writers["Track"] = RecordingWriter()
     sample = Track()
-    sample.header.source_unit, sample.header.destination_unit = 111, 112
+    sample.A_sourceID.A_systemId = 111
     sensor.send_message(sample)
-    assert (sample.header.source_unit, sample.header.destination_unit) == (111, 112)
-
-
-def test_stamping_can_be_disabled():
-    sensor = build(SENSOR, header={"stamp": False})
-    sensor._writers["Track"] = RecordingWriter()
-    sample = Track()
-    sensor.send_message(sample)
-    assert (sample.header.source_unit, sample.header.destination_unit) == (0, 0)
+    assert sample.A_sourceID.A_systemId == 111
 
 
 def test_send_before_start_says_so():
@@ -681,12 +723,11 @@ def test_periodic_sending_is_keyed_by_topic():
     assert len(writer.written) >= 2
 
 
-def test_a_named_destination_is_checked_and_stamped():
+def test_a_named_destination_is_checked():
     sensor = build(SENSOR)
-    sensor._writers["Track"] = RecordingWriter()
-    sample = Track()
-    sensor.send_message(sample, unit_name=CONTROL)
-    assert sample.header.destination_unit == CONTROL_CODE
+    sensor._writers["Track"] = writer = RecordingWriter()
+    sensor.send_message(Track(), unit_name=CONTROL)
+    assert len(writer.written) == 1
     with pytest.raises(ValueError, match="does not subscribe"):
         sensor.send_message(Track(), unit_name="NoSuchUnit")
 
@@ -706,8 +747,12 @@ def test_an_int_opcode_is_refused_on_dds():
 def test_unknown_dds_config_keys_are_refused():
     with pytest.raises(ValueError, match="no setting"):
         ConnectionConfig.from_json(dds_config(domainID=3))
-    with pytest.raises(ValueError, match="sorce_unit"):
-        ConnectionConfig.from_json(dds_config(header={"sorce_unit": "src"}))
+
+def test_a_header_block_is_refused_with_the_reason():
+    """The sender's location is fixed (A_sourceID.A_systemId); a config that
+    still tries to set it must not believe it is in force."""
+    with pytest.raises(ValueError, match="A_sourceID"):
+        ConnectionConfig.from_json(dds_config(header={"field": "header"}))
 
 
 # --------------------------------------------------------------------------- #
@@ -776,13 +821,13 @@ def test_a_failed_start_closes_what_it_created(monkeypatch):
 def test_two_units_talk_over_a_real_domain(manager):
     """
     The end-to-end proof: each unit gets exactly the entities the Interface
-    gives it, and samples flow both ways, attributed from their headers.
+    gives it, and samples flow both ways, attributed from their A_sourceID.
 
     This is what fails if `rti.asyncio` stops being imported (no
     `take_data_async`) -- which none of the offline tests above can catch.
     """
-    sensor = manager.create("sensor", dds_config(SENSOR, domain_id=TEST_DOMAIN))
-    control = manager.create("control", dds_config(CONTROL, domain_id=TEST_DOMAIN))
+    sensor = manager.create("sensor", dds_config(SENSOR, domain_id=TEST_DOMAIN, qos_file=QOS_FILE))
+    control = manager.create("control", dds_config(CONTROL, domain_id=TEST_DOMAIN, qos_file=QOS_FILE))
     control.start()
     sensor.start()
     assert (set(sensor._writers), set(sensor._readers)) == ({"Track"}, {"Status"})
@@ -794,9 +839,9 @@ def test_two_units_talk_over_a_real_domain(manager):
         Track, timeout=15,
         trigger_function=lambda: sensor.send_message(Track(track_id=99, x=1.5)))
     assert track.track_id == 99 and track.x == 1.5
-    assert (track.header.source_unit, track.header.destination_unit) == (SENSOR_CODE, CONTROL_CODE)
+    assert track.A_sourceID.A_systemId == SENSOR_CODE
 
     status = sensor.receive_message(
         Status, timeout=15,
         trigger_function=lambda: control.send_message(Status(healthy=False, message="degraded")))
-    assert status.message == "degraded" and status.header.source_unit == CONTROL_CODE
+    assert status.message == "degraded" and status.A_sourceID.A_systemId == CONTROL_CODE
