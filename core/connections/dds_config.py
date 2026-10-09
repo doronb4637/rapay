@@ -255,7 +255,7 @@ def _units_of(module: ModuleType, where: str) -> dict[str, DdsUnit]:
     name_of: dict[int, str] = {}
     code_owner: dict[int, str] = {}
     for name, value in vars(module).items():
-        if not isinstance(value, DdsUnit):
+        if not type(value).__name__ == "DdsUnit":
             continue
         if id(value) in name_of:
             raise ValueError(
