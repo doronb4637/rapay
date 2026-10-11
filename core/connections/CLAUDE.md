@@ -111,14 +111,14 @@ dataclass. `pack_message`/`unpack_message` and `IRSDataError` round out the modu
 ### 2a. IRS payload codec
 
 The header is this framework's business (TCP needs `DataLength` to find message boundaries);
-everything after it belongs to the `IRS` package. `FramedConnection` sets `uses_irs_parser = True`,
-so on those connections:
+everything after it belongs to the `IRS` package. `Connection`'s codec hooks (`_encode`, `_decode`)
+pass payloads through untouched; `FramedConnection` overrides them, so on those connections:
 
-- `Connection._encode(opcode, message)` calls `irs_to_bytes(own_unit_code, opcode, message)` —
+- `FramedConnection._encode(opcode, message)` calls `irs_to_bytes(own_unit_code, opcode, message)` —
   **our** code, since the receiver needs to know who sent it. Used by `send_message` and
   `periodic_sending` (which encodes once, at schedule time). Raw `bytes` pass through untouched
   (this is also how the config-supplied echo payload travels).
-- `Connection._decode(unit_code, opcode, payload)` calls `parse_irs(their_unit_code, ...)` — the
+- `FramedConnection._decode(unit_code, opcode, payload)` calls `parse_irs(their_unit_code, ...)` — the
   **sender's** code selects the message layout. Called from `_dispatch_incoming` *after* a route
   owner is found, so unowned messages cost nothing.
 - Both wrap the parser call in `try/except` and re-raise as `IRSDataError` naming the unit code
@@ -139,11 +139,11 @@ so on those connections:
 Both codec calls are **scoped to the link** — see §2b. `_encode` takes the destination unit name
 for exactly that reason, even though the name never reaches the wire.
 
-`DdsConnection` leaves `uses_irs_parser = False`: its payloads are typed samples and both codec
-hooks become no-ops. The eager check in `receive_message`/`handle_on_receive` goes through
-`Connection._validate_route()` rather than calling `validate_irs` directly, precisely so DDS can
-answer the same question ("could this connection ever deliver this route?") against its topic
-list. Overriding it is required, skipping it is not an option — an unanswerable question is how
+`DdsConnection` keeps the pass-through hooks: its payloads are typed samples. The eager check in
+`receive_message`/`handle_on_receive` goes through the abstract `Connection._validate_route()`
+rather than calling `validate_irs` directly, precisely so DDS can answer the same question ("could
+this connection ever deliver this route?") against its topic list while `FramedConnection` asks
+IRS. Implementing it is required, skipping it is not an option — an unanswerable question is how
 a `receive_message` that blocks forever gets written.
 
 ### 2b. Structures are per-LINK, and layouts are namespaced by their module

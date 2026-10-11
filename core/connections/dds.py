@@ -24,8 +24,9 @@ everything else follows from that:
     participant contains. The one ordering that is ours to get right is
     stopping the read loops before it (see `_close_entities`).
 
-Payloads are native: no (UnitCode,OpCode,DataLength) header, `uses_irs_parser`
-stays False, and `_do_send` takes a typed sample rather than bytes.
+Payloads are native: no (UnitCode,OpCode,DataLength) header, no IRS codec
+(the base `_encode` / `_decode` pass through), and `_do_send` takes a typed
+sample rather than bytes.
 
 Configuration -- only `unit` and `dds_interface` are required:
 

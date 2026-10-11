@@ -163,8 +163,6 @@ class Connection(ABC):
     """
     can_send: bool = True
     can_receive: bool = True
-    #: False where payloads are native samples (DDS), so the IRS codec is skipped.
-    uses_irs_parser: bool = False
 
     def __init__(self, config: ConnectionConfig) -> None:
         self.config = config
@@ -434,50 +432,24 @@ class Connection(ABC):
         self._track(self._run_callback(owner, message, unit_name, key))
 
     # ------------------------------------------------------------------ #
-    # IRS codec boundary
+    # Codec hooks -- native payloads by default; FramedConnection adds IRS
     # ------------------------------------------------------------------ #
+    @abstractmethod
     def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
         """
         Raise if this connection could never deliver `route_key` -- subscribing
         to a message we don't define is our bug, and must not become a
-        `receive_message` that never returns. DDS overrides this to ask its
-        Interface instead of IRS.
+        `receive_message` that never returns.
         """
-        validate_irs(*route_key, self._structures_for(unit_name))
+        ...
 
-    def _encode(self, opcode: MessageKey, message: IrsMessage, unit_name: UnitName | None) -> bytes | IrsMessage:
-        """
-        Application message -> wire payload, stamped with OUR unit code.
-        `unit_name` selects the layout: our code is the same for every peer, so
-        only the destination's structures can tell two links apart. Bytes pass
-        through; native payloads (DDS) are not encoded.
-        """
-        if not self.uses_irs_parser or isinstance(message, (bytes, bytearray, memoryview)):
-            return message
-        assert unit_name is not None
-        structures = self._structures_for(unit_name)
-        try:
-            return irs_to_bytes(self._own_unit_code, opcode, message, structures)
-        except Exception as exc:
-            raise IRSDataError(
-                f"irs_to_bytes(unitCode={self._own_unit_code}, opCode={opcode}, "
-                f"structures={list(structures) or 'any'}) failed: {exc}"
-            ) from exc
-
-    def _decode(self, unit_code: int, opcode: MessageKey, payload: Any, unit_name: UnitName) -> IrsMessage:
-        """Wire payload -> application message, parsed with THEIR unit code and
-        this link's structures."""
-        if not self.uses_irs_parser:
-            return payload
-        structures = self._structures_for(unit_name)
-        try:
-            _name, message = parse_irs(unit_code, opcode, payload, structures)
-        except Exception as exc:
-            raise IRSDataError(
-                f"parse_irs(unitCode={unit_code}, opCode={opcode}, "
-                f"structures={list(structures) or 'any'}) failed: {exc}"
-            ) from exc
+    def _encode(self, key: MessageKey, message: Any, unit_name: UnitName | None) -> Any:
+        """Application message -> wire payload."""
         return message
+
+    def _decode(self, unit_code: UnitCode, key: MessageKey, payload: Any, unit_name: UnitName) -> Any:
+        """Wire payload -> application message."""
+        return payload
 
     async def _run_callback(
         self, callback: ReceiveCallback, payload: IrsMessage, unit_name: str, key: MessageKey
@@ -778,8 +750,39 @@ class FramedConnection(Connection):
     Base for the connections that frame payloads with the (UnitCode, OpCode,
     DataLength) header and carry IRS message bodies: TCP, UDP and Multicast.
     """
-    uses_irs_parser = True
 
     def _frame(self, data: bytes, opcode: int) -> bytes:
         """Header (stamped with OUR unit code) + payload."""
         return pack_message(self._own_unit_code, opcode, data)
+
+    def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
+        validate_irs(*route_key, self._structures_for(unit_name))
+
+    def _encode(self, opcode: OpCode, message: IrsMessage | bytes, unit_name: UnitName) -> bytes:
+        """
+        Stamped with OUR unit code. `unit_name` selects the layout: our code is
+        the same for every peer, so only the destination's structures can tell
+        two links apart. Bytes pass through.
+        """
+        if isinstance(message, (bytes, bytearray, memoryview)):
+            return message
+        structures = self._structures_for(unit_name)
+        try:
+            return irs_to_bytes(self._own_unit_code, opcode, message, structures)
+        except Exception as exc:
+            raise IRSDataError(
+                f"irs_to_bytes(unitCode={self._own_unit_code}, opCode={opcode}, "
+                f"structures={list(structures) or 'any'}) failed: {exc}"
+            ) from exc
+
+    def _decode(self, unit_code: UnitCode, opcode: OpCode, payload: bytes, unit_name: UnitName) -> IrsMessage:
+        """Parsed with THEIR unit code and this link's structures."""
+        structures = self._structures_for(unit_name)
+        try:
+            _name, message = parse_irs(unit_code, opcode, payload, structures)
+        except Exception as exc:
+            raise IRSDataError(
+                f"parse_irs(unitCode={unit_code}, opCode={opcode}, "
+                f"structures={list(structures) or 'any'}) failed: {exc}"
+            ) from exc
+        return message

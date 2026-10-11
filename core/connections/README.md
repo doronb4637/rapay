@@ -72,15 +72,15 @@ DataLength) rather than re-parsing the format string on every call.
 
 The header stays this framework's business -- TCP needs `DataLength` to find
 message boundaries at all -- and everything after it belongs to the `IRS`
-package. `FramedConnection` sets `uses_irs_parser = True`, which turns
-on the codec at both boundaries:
+package. `FramedConnection` overrides the codec hooks (`_encode`, `_decode`),
+which turns on the codec at both boundaries:
 
 ```python
 connection.send_message(Track(track_id=7, label="alpha"), opCode=60)
 unit, track = connection.receive_message(60, timeout=3)  # -> a Track object
 ```
 
-- **Outbound** (`send_message`, `periodic_sending`): `Connection._encode` calls
+- **Outbound** (`send_message`, `periodic_sending`): `FramedConnection._encode` calls
   `irs_to_bytes(own_unit_code, opcode, message)` -- **our** code, per §3 --
   before the result is framed and transmitted. Raw `bytes` are taken as
   already-encoded and pass through untouched, which is how a caller that
@@ -88,7 +88,7 @@ unit, track = connection.receive_message(60, timeout=3)  # -> a Track object
   unchanged. `periodic_sending` encodes once, when the schedule is created, so
   a message that can never be encoded fails in the caller's thread instead of
   logging forever in the background.
-- **Inbound** (`receive_message`, `handle_on_receive`): `Connection._decode`
+- **Inbound** (`receive_message`, `handle_on_receive`): `FramedConnection._decode`
   calls `parse_irs(their_unit_code, opcode, payload)` -- the **sender's** code,
   since that is what says how the bytes are laid out -- and the resulting
   message object is what the caller receives. Decoding happens in
@@ -106,8 +106,8 @@ unit, track = connection.receive_message(60, timeout=3)  # -> a Track object
   is unwrapped to its second element, since `parse_irs` returns
   `(message_name, message_object)` and the object is what the caller wants.
 
-`DdsConnection` leaves `uses_irs_parser = False`: its payloads are typed DDS
-samples, and both codec hooks become no-ops for it.
+`DdsConnection` keeps `Connection`'s pass-through hooks: its payloads are typed
+DDS samples.
 
 ## 3. Unit routing: our code vs their code
 
