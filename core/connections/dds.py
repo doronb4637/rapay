@@ -422,13 +422,13 @@ class DdsConnection(Connection):
         if spec.publishes:
             self._writers[spec.name] = dds.DataWriter(
                 participant.implicit_publisher, topic, self._qos_for("datawriter", spec.name))
-            logger.info("DDS unit %s: DataWriter on %r (type %s)", self._dds.unit, spec.name, spec.type_name)
+            logger.info("DDS unit %s: DataWriter on %r", self._dds.unit, spec.name)
         if spec.subscribes:
             reader = dds.DataReader(
                 participant.implicit_subscriber, topic, self._qos_for("datareader", spec.name))
             self._readers[spec.name] = reader
             self._read_tasks.append(self._track(self._read_loop(spec, reader)))
-            logger.info("DDS unit %s: DataReader on %r (type %s)", self._dds.unit, spec.name, spec.type_name)
+            logger.info("DDS unit %s: DataReader on %r", self._dds.unit, spec.name)
 
     async def _read_loop(self, spec: TopicSpec, reader: Any) -> None:
         """

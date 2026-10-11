@@ -42,7 +42,7 @@ gsim           uses core (the whole package -- connections, IRS, tools, annotati
   Interface is a *routing* contract, not a type registry. `core/DDS/__init__.py` and
   `interface.py` do not import `rti`, so `core.DDS` stays importable in a process without Connext;
   only the `Structures/` modules (and the Interfaces importing them) need it.
-  `core.connections.dds_config` loads and validates an Interface (see `core/connections/CLAUDE.md`
+  `core.connections.dds_config` loads an Interface (see `core/connections/CLAUDE.md`
   section 9) -- the arrow points from `connections` into `DDS`, never the reverse.
 - **`core/annotations.py`** re-exports those same names (`from core.IRS.annotations import ...`)
   purely so `core.connections` and `core.tools` keep one familiar import (`from core.annotations

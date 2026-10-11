@@ -32,7 +32,7 @@ Skip the slower, real-timing echo tests during iteration:
 ```
 
 DDS is exercised by `test_dds.py` (`rti.connext` is installed in this `.venv`),
-which covers `DdsUnit`, DDS Interface loading and validation (bad Interfaces are
+which covers `DdsUnit`, DDS Interface loading (stand-in Interfaces are
 written to `tmp_path` and loaded by path, like a deployment's), config
 validation, QoS `topic_filter` resolution with and without a named profile,
 topic selectors, sender attribution, send/route checks against the Interface,

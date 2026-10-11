@@ -58,7 +58,6 @@ TEST_DOMAIN = 77
 PREAMBLE = """\
 from core.DDS import DdsUnit
 from core.DDS.idl_types.Example.example_topics import Status, Track
-INTERFACE_FORMAT = 1
 """
 
 #: Three units, to have the cases two cannot express:
@@ -152,7 +151,7 @@ requires_license = pytest.mark.skipif(
 
 
 # --------------------------------------------------------------------------- #
-# DdsUnit -- checked at the Interface's own import
+# DdsUnit
 # --------------------------------------------------------------------------- #
 def test_a_lone_class_is_a_one_element_tuple():
     """`publish=(Track)` has no trailing comma, so it is not a tuple -- a
@@ -163,32 +162,6 @@ def test_a_lone_class_is_a_one_element_tuple():
 
 def test_any_iterable_of_topic_classes_is_accepted():
     assert DdsUnit(unitCode=1, publish=[Track, Status]).publish == (Track, Status)
-
-
-@pytest.mark.parametrize("not_a_topic", [int, object, "Track"])
-def test_an_entry_that_is_not_a_topic_type_is_refused(not_a_topic):
-    with pytest.raises(TypeError):
-        DdsUnit(unitCode=1, publish=(not_a_topic,))
-
-
-def test_a_class_without_idl_struct_is_refused_with_the_fix():
-    class Plain:
-        pass
-
-    with pytest.raises(TypeError, match=r"@idl\.struct"):
-        DdsUnit(unitCode=1, subscribe=(Plain,))
-
-
-@pytest.mark.parametrize("code, error", [(-1, ValueError), (256, ValueError),
-                                         ("1", TypeError), (True, TypeError)])
-def test_unit_code_must_be_a_uint8_int(code, error):
-    with pytest.raises(error):
-        DdsUnit(unitCode=code)
-
-
-def test_a_topic_listed_twice_is_refused():
-    with pytest.raises(ValueError, match="more than once"):
-        DdsUnit(unitCode=1, publish=(Track, Track))
 
 
 def test_a_unit_is_immutable():
@@ -230,84 +203,10 @@ def test_the_interface_classes_are_the_ones_application_code_imports():
     assert load_dds_interface(INTERFACE).Track is Track
 
 
-@pytest.mark.parametrize("format_line, expected", [
-    ("", "the generated file must set it"),
-    ("INTERFACE_FORMAT = 2", "reads format 1"),
-])
-def test_the_interface_format_is_checked(tmp_path, format_line, expected):
-    path = write_interface(tmp_path, f"""\
-        from core.DDS import DdsUnit
-        from core.DDS.idl_types.Example.example_topics import Status, Track
-        {format_line}
-        A = DdsUnit(unitCode=1, publish=(Track,))
-        B = DdsUnit(unitCode=2, subscribe=(Track,))
-        """, preamble=False)
-    with pytest.raises(ValueError, match=expected):
-        resolve_unit(path, "A")
-
-
-def test_an_interface_with_no_units_is_refused(tmp_path):
-    path = write_interface(tmp_path, "")
-    with pytest.raises(ValueError, match="defines no DdsUnit"):
-        resolve_unit(path, "A")
-
-
-def test_an_interface_defining_its_own_ddsunit_class_is_told_to_import_it(tmp_path):
-    path = write_interface(tmp_path, """\
-        from core.DDS.idl_types.Example.example_topics import Status, Track
-        INTERFACE_FORMAT = 1
-
-        class DdsUnit:
-            def __init__(self, unitCode, publish, subscribe):
-                self.unitCode, self.publish, self.subscribe = unitCode, publish, subscribe
-
-        SensorUnit = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Status,))
-        """, preamble=False)
-    with pytest.raises(ValueError, match="from core.DDS import DdsUnit"):
-        resolve_unit(path, "SensorUnit")
-
-
 def test_an_unknown_unit_lists_the_ones_that_exist():
     with pytest.raises(ValueError) as excinfo:
         resolve_unit(INTERFACE, "Nobody")
     assert SENSOR in str(excinfo.value) and CONTROL in str(excinfo.value)
-
-
-def test_duplicate_unit_codes_are_refused(tmp_path):
-    path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=7, publish=(Track,))
-        B = DdsUnit(unitCode=7, subscribe=(Track,))
-        """)
-    with pytest.raises(ValueError, match="both use unitCode 0x07"):
-        resolve_unit(path, "A")
-
-
-def test_one_unit_under_two_names_is_refused(tmp_path):
-    path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=1, publish=(Track,))
-        B = DdsUnit(unitCode=2, subscribe=(Track,))
-        Alias = A
-        """)
-    with pytest.raises(ValueError, match="same DdsUnit"):
-        resolve_unit(path, "B")
-
-
-def test_two_classes_with_one_name_are_refused(tmp_path):
-    """A topic is named after its type, so these would be one topic on the
-    wire carried by two types -- or one module imported two ways."""
-    path = write_interface(tmp_path, """\
-        import rti.types as idl
-        from core.DDS.idl_types.Example import example_topics
-
-        @idl.struct
-        class Track:
-            x: idl.int32 = 0
-
-        A = DdsUnit(unitCode=1, publish=(example_topics.Track,))
-        B = DdsUnit(unitCode=2, subscribe=(Track,))
-        """)
-    with pytest.raises(ValueError, match="two different classes"):
-        resolve_unit(path, "A")
 
 
 def test_a_pinned_type_name_is_the_topic_name(tmp_path):
@@ -325,38 +224,8 @@ def test_a_pinned_type_name_is_the_topic_name(tmp_path):
         """)
     a = resolve_unit(path, "A")
     (spec,) = a.topics
-    assert (spec.name, spec.type_name) == ("P_Radar_PSM::Track", "P_Radar_PSM::Track")
+    assert spec.name == "P_Radar_PSM::Track"
     assert a.topic_for(spec.sample_type) is spec and a.topic_for("P_Radar_PSM::Track") is spec
-
-
-def test_a_unit_with_no_peers_is_refused(tmp_path):
-    path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=1, publish=(Track,))
-        B = DdsUnit(unitCode=2, publish=(Status,))
-        """)
-    with pytest.raises(ValueError, match="no peers"):
-        resolve_unit(path, "A")
-
-
-def test_dangling_topics_are_warned_about(tmp_path, caplog):
-    path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=1, publish=(Track, Status))
-        B = DdsUnit(unitCode=2, subscribe=(Track,))
-        """)
-    with caplog.at_level(logging.WARNING, logger="connmgr.dds"):
-        resolve_unit(path, "A")
-    assert any("publishes 'Status', but no other unit subscribes it" in r.message for r in caplog.records)
-
-
-def test_a_relative_import_is_refused_with_the_reason(tmp_path):
-    (tmp_path / "topics.py").write_text("X = 1\n", encoding="utf-8")
-    path = write_interface(tmp_path, """\
-        from core.DDS import DdsUnit
-        from .topics import X
-        INTERFACE_FORMAT = 1
-        """, preamble=False)
-    with pytest.raises(ImportError, match="absolute module name"):
-        load_dds_interface(path)
 
 
 def test_a_missing_interface_file_is_named(tmp_path):
@@ -518,18 +387,18 @@ def test_an_unknown_topic_lists_the_units_topics(selector):
     assert "Track" in str(excinfo.value) and "Status" in str(excinfo.value)
 
 
-def test_a_second_copy_of_a_topic_class_is_named_as_such():
+def test_a_second_copy_of_a_topic_class_shows_both_modules():
     """The trap a path-loaded module sets: same class name, different object.
-    It must say so, not report an unknown topic."""
+    The error names both modules, which is what gives it away."""
     source = REPO_ROOT / "core" / "DDS" / "idl_types" / "Example" / "example_topics.py"
     spec = importlib.util.spec_from_file_location("_second_copy_of_example_topics", source)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
-        with pytest.raises(TypeError, match="two copies of one generated module"):
+        with pytest.raises(ValueError, match="_second_copy_of_example_topics.Track.*example_topics.Track"):
             build()._message_key(module.Track)
-        with pytest.raises(TypeError, match="two copies of one generated module"):
+        with pytest.raises(ValueError, match="_second_copy_of_example_topics.Track"):
             build().send_message(module.Track())
     finally:
         sys.modules.pop("_second_copy_of_example_topics", None)

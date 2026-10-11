@@ -47,7 +47,7 @@ tcp.py         TcpConnection
 udp.py         UdpConnection
 multicast.py   MulticastConnection (direction derived from config.side)
 dds.py         DdsConnection (RTI Connext; native payloads, no framing, topic routing)
-dds_config.py  DDS Interface loading/validation + one unit's view of it (DdsUnitConfig,
+dds_config.py  DDS Interface loading + one unit's view of it (DdsUnitConfig,
                TopicSpec), DEFAULT_DOMAIN_ID / DEFAULT_QOS_FILE / DEFAULT_LICENSE_FILE.
                Imports no rti
 composite.py   CompositeUnit -- combines direction-limited connections into one Unit
@@ -568,16 +568,16 @@ XSLT: `core/DDS/Interfaces/Example/example_interface.py`):
 ```python
 from core.DDS import DdsUnit
 from my_icd.topics import Status, Track      # ABSOLUTE imports -- see "class identity" below
-INTERFACE_FORMAT = 1
 SensorUnit = DdsUnit(unitCode=0x01, publish=(Track,), subscribe=(Status,))
 ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
 ```
 
 Two naming rules, both load-bearing: **a unit's name is its variable**, and **a topic's name is its
-class's wire type name** (`dds_config.topic_name_of`: `type_support.type_name`, i.e. the class name
-unless pinned with `idl.type_name`, as IDL modules are — `P_Radar_PSM::Track`) — there is no topic
+class's wire type name** (`type_support.type_name`, pinned with `idl.type_name` as IDL modules
+are — `P_Radar_PSM::Track`) — there is no topic
 table. `dds_config.resolve_unit` (called from
-`ConnectionConfig._from_dds_json`, i.e. at load) validates the WHOLE Interface and derives this
+`ConnectionConfig._from_dds_json`, i.e. at load) trusts the Interface -- it is generated, so
+nothing validates it; only the config's `unit` is checked against it -- and derives this
 unit's code, its peers (units publishing what it subscribes or subscribing what it publishes) and
 its `TopicSpec`s, each carrying the peer `publishers`/`subscribers` the routing below leans on.
 `config.dds` holds the result; `unitCode`/`connections` are derived from it (a peer's `port` is
@@ -614,10 +614,9 @@ on our side, where a mismatch is our bug and raises.
 **Class identity.** The Interface imports the topic classes and application code builds samples
 from them, so both must hold the SAME class objects — the IRS `_alias.py` problem in another form.
 Hence: absolute imports in generated files (a path-loaded Interface has no package to be relative
-to, and inventing one would load a private copy of every class — `load_dds_interface` refuses
-relative imports and says why); path loads keyed in `sys.modules` by a digest of the *resolved*
-path, so one file is one module; and a class named like a topic but not identical to it raises
-"two copies of one generated module" instead of "unknown topic".
+to, and inventing one would load a private copy of every class); path loads keyed in `sys.modules` by a digest of the *resolved*
+path, so one file is one module; and a class that is not a topic's own class raises an error
+naming both classes with their modules, which is what gives a second copy away.
 
 **QoS answers *how*.** One universal XML, per-topic settings inside profiles as `topic_filter`
 attributes. `_qos_for(entity, topic)` uses `set_topic_*_qos(profile, topic)` for a named profile and

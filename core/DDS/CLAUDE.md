@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `core/DDS` holds what a DDS system is *described* in, as opposed to how a connection runs it:
 
 - `idl_types/` -- plain Python modules of `@idl.struct` topic types (`Example/example_topics.py`).
-- `interface.py` -- `DdsUnit`, the vocabulary a **DDS Interface** is written in, plus
-  `INTERFACE_FORMAT`. Re-exported by `__init__.py`.
+- `interface.py` -- `DdsUnit`, the vocabulary a **DDS Interface** is written in. Re-exported by
+  `__init__.py`.
 - `Interfaces/Example/example_interface.py` -- the reference DDS Interface: the exact shape the
   system-XML -> Python XSLT (written and owned by the user, not in this repo) must produce.
 - `Configuration/` -- the deployment's QoS: `UNIVERSAL_QOS.xml` (`dds_config.DEFAULT_QOS_FILE`) and
@@ -20,7 +20,7 @@ Standalone in the repo's dependency graph (see root `CLAUDE.md`): nothing here i
 `core.connections`, `core.tools`, `core.IRS` or `core.annotations`. `__init__.py` and
 `interface.py` must never import `rti`, so `core.DDS` stays importable in a process without Connext
 -- only the `idl_types` modules (and the Interfaces that import them) need it.
-`core.connections.dds_config` is what loads and validates an Interface; the arrow points from
+`core.connections.dds_config` is what loads an Interface; the arrow points from
 `connections` into `DDS`, never back.
 
 ## The DDS Interface
@@ -32,7 +32,6 @@ it publishes and subscribes:
 from core.DDS import DdsUnit
 from my_icd.topics import Status, Track      # ABSOLUTE imports
 
-INTERFACE_FORMAT = 1
 SYSTEM = "ExampleSystem"                     # optional, used in logs
 
 SensorUnit = DdsUnit(unitCode=0x01, publish=(Track,), subscribe=(Status,))
@@ -43,28 +42,25 @@ A connection then names only which unit it is: `{"protocol": "dds", "unit": "Sen
 "dds_interface": "<path to this file>"}`. Its own code, its peers, its topics and therefore its
 DataWriters/DataReaders all follow from the Interface.
 
-The rules, each enforced -- by `DdsUnit.__post_init__` at the Interface's own import, or by
-`dds_config.resolve_unit` when a config loads it:
+The rules. None is checked: the Interface is generated and trusted, so
+`dds_config.resolve_unit` reads it as written.
 
-- **A unit's name is its variable.** `DdsUnit` deliberately has no `name` field. One object bound
-  to two names is an error, and so are two units sharing a `unitCode` (it identifies senders).
+- **A unit's name is its variable.** `DdsUnit` deliberately has no `name` field. Every unit has
+  its own `unitCode` (it identifies senders).
 - **A topic's name is its class's wire type name** (`type_support.type_name`): the class name,
   unless the type pins one with `idl.type_name`. Types generated from IDL with modules do -- class
   `P_Radar_PSM_Track`, type and topic `P_Radar_PSM::Track` -- and peers name the topic after the
   type, so the class name would never match. There is no topic table: the classes ARE the topics.
-  Two different classes sharing a type name are an error -- they would be one topic on the wire
+  Two different classes must not share a type name -- they would be one topic on the wire
   carried by two types.
-- **Import `DdsUnit` from `core.DDS`, never define it.** The loader finds units by `isinstance`
-  against this one class; an Interface with its own `class DdsUnit` gets an error saying so.
+- **Import `DdsUnit` from `core.DDS`.** The loader picks up every module-level object whose
+  class is *named* `DdsUnit`.
 - **Imports are absolute.** The Interface's topic classes must be the very objects the application
   builds samples from. An Interface is loaded by *path*, so it has no package to be relative to,
   and giving it one would load a private second copy of every class -- the same two-module-objects
-  failure `core/IRS/_alias.py` exists to prevent for IRS. The loader refuses relative imports and
-  says why.
+  failure `core/IRS/_alias.py` exists to prevent for IRS.
 - **`(Track)` is not a tuple.** `DdsUnit` accepts a lone class or any iterable for
   `publish`/`subscribe`, so a missing trailing comma in generated code cannot change the contract.
-- **`INTERFACE_FORMAT`** must equal `interface.INTERFACE_FORMAT`. Bump both, and the XSLT, if the
-  shape ever changes; an Interface written for another format is refused rather than half-read.
 
 ## There is no "topic" marker on a struct
 

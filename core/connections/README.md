@@ -674,7 +674,6 @@ Interface** -- the generated Python module that is the system contract:
 from core.DDS import DdsUnit
 from my_icd.topics import Status, Track      # ABSOLUTE imports
 
-INTERFACE_FORMAT = 1
 SYSTEM = "ExampleSystem"
 
 SensorUnit = DdsUnit(unitCode=0x01, publish=(Track,), subscribe=(Status,))
@@ -740,8 +739,8 @@ from them, so both must hold the SAME class objects. Generated files use
 absolute imports (a path-loaded Interface has no package to be relative to, and
 giving it one would load a private copy of every class); `load_dds_interface`
 keys a path by its resolved location, so one file is one module; and a class
-named like a topic but not identical to it is reported as "two copies of one
-generated module", never as an unknown topic.
+that is not a topic's own class raises an error naming both classes with
+their modules, which is what gives a second copy away.
 
 ### QoS
 
