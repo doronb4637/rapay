@@ -54,7 +54,7 @@ def _getting_struct_name(depth: int = 2) -> Namespace:
         raise ImportError(f"No Structure named found")
 
 
-def register_message(unitCode: int, opCode: int, message: IrsMessage,
+def register_message(unitCode: int, message: IrsMessage,
                      namespace: Namespace | None = None) -> None:
     """Register a message class under the calling structure module's namespace.
 
@@ -75,7 +75,7 @@ def register_message(unitCode: int, opCode: int, message: IrsMessage,
     """
     if namespace is None:
         namespace = _getting_struct_name()
-    STRUCTURE_REGISTRY.setdefault(namespace, {}).setdefault(unitCode, {})[opCode] = message
+    STRUCTURE_REGISTRY.setdefault(namespace, {}).setdefault(unitCode, {})[message._opCode] = message
 
 
 def register_pair(unitCode: int, pair: UnitCode, namespace: Namespace | None = None) -> None:

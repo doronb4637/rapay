@@ -27,7 +27,7 @@ gsim           uses core (the whole package -- connections, IRS, tools, annotati
   inside its own directory (`core/IRS/*.py`, relative imports) plus third-party packages
   (`beartype`). It must never import `core.connections`, `core.tools`, or `core.annotations` --
   doing so would make the "standalone" claim false. `core/IRS/annotations.py` holds IRS's own type
-  vocabulary (`IrsMessage`, `UnitCode`, `OpCode`, `Namespace`, `NamespaceScope`) for exactly this
+  vocabulary (`IrsMessage`, `UnitCode`, `OperationCode`, `Namespace`, `NamespaceScope`) for exactly this
   reason: those names are needed by `IRS.REGISTRY` / `IRS.irs_parser` internally, so they live
   inside IRS rather than being borrowed from `core.annotations`.
 - **`core/DDS`** is the topic-based counterpart to `IRS`, and is deliberately small. It holds

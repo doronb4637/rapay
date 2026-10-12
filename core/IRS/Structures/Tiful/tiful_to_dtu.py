@@ -1,6 +1,7 @@
 from IRS import *
 from enum import IntEnum
 from IRS.REGISTRY import register_message
+from core import OperationCode
 
 Tiful = 0x01
 DTU = 0x02
@@ -35,6 +36,7 @@ class S_Area(BitField):
 
 
 """ Tiful Messages"""
+@OperationCode(0x0012)
 class GeneralFlag(Message):
     Flag: E_Flag
     value: int = Byte
@@ -42,11 +44,10 @@ class GeneralFlag(Message):
 
 register_message(
     unitCode=0x01,
-    opCode=0x0012,
     message=GeneralFlag
 )
 
-
+@OperationCode(0x0001)
 class ArrayOfAreas(Message):
     Len: int = Byte
     Areas: list[S_Area] = [S_Area, "Len"]
@@ -54,22 +55,21 @@ class ArrayOfAreas(Message):
 
 register_message(
     unitCode=0x01,
-    opCode=0x0001,
     message=ArrayOfAreas
 )
 
 """ DTU Messages """
+@OperationCode(0x0011)
 class GetGeneralFlag(Message):
     Flag: E_Flag
 
 
 register_message(
     unitCode=0x02,
-    opCode=0x0011,
     message=GetGeneralFlag
 )
 
-
+@OperationCode(0x0012)
 class SetGeneralFlag(Message):
     Flag: E_Flag
     value: int = Byte
@@ -77,7 +77,6 @@ class SetGeneralFlag(Message):
 
 register_message(
     unitCode=0x02,
-    opCode=0x0012,
     message=SetGeneralFlag
 )
 
@@ -86,11 +85,11 @@ class Data(Structure):
     value: int = Byte
     array: tuple[int] = [Byte, 9]
 
+@OperationCode(0x0200)
 class StructMessage(Message):
     datas: tuple[Data] = [Data, 9]
 
 register_message(
     unitCode=0x01,
-    opCode=0x0200,
     message=StructMessage
 )

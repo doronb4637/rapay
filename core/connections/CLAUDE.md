@@ -240,7 +240,7 @@ caches state derived from it, so mutating it post-construction would desync thos
 ### 4. opcode: mandatory on send, subscription key on receive
 
 ```python
-connection.send_message(data: IrsMessage | bytes, opcode: int, unit_name: str | None = None) -> None
+connection.send_message(data: IrsMessage | dict | bytes, opcode: int | None = None, unit_name: str | None = None) -> None
 connection.receive_message(opcode: int, unit_name: str | None = None,
                             timeout: float | int | None = None,
                             trigger_function: Callable[[], Any] | None = None) -> IrsMessage
@@ -249,7 +249,9 @@ connection.handle_on_receive(opcode: int, callback_func: Callable[[bytes], Any],
 connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-`opcode` is mandatory on send. `unit_name` is optional only when exactly one unit is connected
+On send, `opcode` is optional when `data` is an `IrsMessage` carrying its own (`@OperationCode`,
+read as `data._opCode`; an explicit one must agree or `ValueError`) and required when `data` is a
+dict or bytes (`TypeError`). Same for `periodic_sending`. `unit_name` is optional only when exactly one unit is connected
 (auto-resolved); otherwise required and validated — `receive_message()` only returns a message
 matching both the requested `opcode` and resolved `unit_name`.
 

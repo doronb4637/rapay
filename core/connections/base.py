@@ -231,8 +231,18 @@ class Connection(ABC):
         return extract_opcode(opCode)
 
     def _send_key(self, data: Any, opCode: OpCode | None) -> MessageKey:
-        """The key an outbound `data` goes out under. DDS derives it from the sample."""
-        return self._message_key(opCode)
+        """
+        The key an outbound `data` goes out under. An IRS message carries its own
+        opcode, so `opCode` is optional for it and, if given, must agree; a dict
+        or bytes has none, so it is required. DDS derives the key from the sample.
+        """
+        own = getattr(data, "_opCode", None)  # not truthiness: opcode 0 is valid
+        if own is None:
+            return self._message_key(opCode)
+        if opCode is not None and self._message_key(opCode) != own:
+            raise ValueError(
+                f"the message is opcode {own}, but the call names opcode {self._message_key(opCode)}")
+        return own
 
     def _send_unit(self, unit_name: str | None, key: MessageKey) -> UnitName | None:
         """The destination of a send. None only on DDS, where a sample goes to
