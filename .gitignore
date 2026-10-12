@@ -308,3 +308,4 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 /gsim/web/node_modules/
+/core/rti_license.dat
