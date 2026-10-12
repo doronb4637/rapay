@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from core.IRS import Message, UInt16
+from core.IRS.core import OperationCode
 from core.IRS.REGISTRY import (
     PAIR_REGISTRY,
     STRUCTURE_REGISTRY,
@@ -42,10 +43,12 @@ NS_A = "tests._ns_alpha"
 NS_B = "tests._ns_beta"
 
 
+@OperationCode(900)
 class Alpha(Message):
     value: int = UInt16
 
 
+@OperationCode(900)
 class Beta(Message):
     other: int = UInt16
 
@@ -67,8 +70,8 @@ def isolated_registry():
 
 def _register_both() -> None:
     """The situation this whole change exists for: two files, one route."""
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
-    register_message(UNIT, OPCODE, Beta, namespace=NS_B)
+    register_message(UNIT, Alpha, namespace=NS_A)
+    register_message(UNIT, Beta, namespace=NS_B)
 
 
 # --------------------------------------------------------------------------- #
@@ -77,7 +80,7 @@ def _register_both() -> None:
 def test_namespace_defaults_to_the_calling_module():
     """A structures file registers itself without naming itself -- which is why
     no existing structures file needed editing."""
-    register_message(UNIT, OPCODE, Alpha)
+    register_message(UNIT, Alpha)
     assert __name__ in STRUCTURE_REGISTRY
     assert get_specification(__name__)[UNIT][OPCODE] is Alpha
 
@@ -106,15 +109,15 @@ def test_unscoped_lookup_of_a_duplicated_route_raises_naming_both():
 def test_single_namespace_unscoped_still_resolves():
     """Regression guard: adding namespaces must not make the ordinary
     one-module case require a scope."""
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     assert get_message_class(UNIT, OPCODE) is Alpha
 
 
 def test_same_class_via_two_namespaces_is_not_ambiguous():
     """Two files importing one shared layout module agree; only genuinely
     different classes are a conflict."""
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_B)
+    register_message(UNIT, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_B)
     assert get_message_class(UNIT, OPCODE) is Alpha
 
 
@@ -132,12 +135,12 @@ def test_is_irs_exist_propagates_ambiguity_instead_of_answering_false():
 # The two-tier miss contract, preserved from before namespaces
 # --------------------------------------------------------------------------- #
 def test_known_unit_with_unknown_opcode_returns_none():
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     assert get_message_class(UNIT, 0x7FFF, NS_A) is None
 
 
 def test_unknown_unit_raises():
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     with pytest.raises(IRSNotFoundError):
         get_message_class(OTHER_UNIT, OPCODE, NS_A)
 
@@ -145,7 +148,7 @@ def test_unknown_unit_raises():
 def test_scope_naming_an_unregistered_module_raises():
     """A typo in a config's `Structures` fails at the subscribing call, naming
     what is actually registered -- not silently at first message."""
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     with pytest.raises(IRSNotFoundError, match="registered no messages"):
         get_message_class(UNIT, OPCODE, "tests._does_not_exist")
 
@@ -155,16 +158,16 @@ def test_scope_naming_an_unregistered_module_raises():
 # --------------------------------------------------------------------------- #
 def test_pair_alias_resolves_through_its_own_namespace():
     """A file written for the UNIT link also serves ALIAS_UNIT."""
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     register_pair(UNIT, ALIAS_UNIT, namespace=NS_A)
     assert get_message_class(ALIAS_UNIT, OPCODE, NS_A) is Alpha
     assert get_message_class(ALIAS_UNIT, OPCODE) is Alpha
 
 
 def test_pair_alias_does_not_leak_into_another_namespace():
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     register_pair(UNIT, ALIAS_UNIT, namespace=NS_A)
-    register_message(OTHER_UNIT, OPCODE, Beta, namespace=NS_B)
+    register_message(OTHER_UNIT, Beta, namespace=NS_B)
     with pytest.raises(IRSNotFoundError):
         get_message_class(ALIAS_UNIT, OPCODE, NS_B)
 
@@ -172,16 +175,16 @@ def test_pair_alias_does_not_leak_into_another_namespace():
 def test_a_unit_with_its_own_layouts_is_not_redirected_by_an_alias():
     """The alias is WHOLE-UNIT: it only fires when the unit is absent, so
     `register_pair` never silently overrides a unit that speaks for itself."""
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     register_pair(UNIT, ALIAS_UNIT, namespace=NS_A)
-    register_message(ALIAS_UNIT, OPCODE, Beta, namespace=NS_A)
+    register_message(ALIAS_UNIT, Beta, namespace=NS_A)
     assert get_message_class(ALIAS_UNIT, OPCODE, NS_A) is Beta
 
 
 def test_conflicting_aliases_in_two_namespaces_are_ambiguous_unscoped():
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     register_pair(UNIT, ALIAS_UNIT, namespace=NS_A)
-    register_message(OTHER_UNIT, OPCODE, Beta, namespace=NS_B)
+    register_message(OTHER_UNIT, Beta, namespace=NS_B)
     register_pair(OTHER_UNIT, ALIAS_UNIT, namespace=NS_B)
 
     with pytest.raises(IRSAmbiguousError):
@@ -214,7 +217,7 @@ def test_namespaces_for_names_every_definer():
 
 
 def test_known_unit_codes_includes_aliases():
-    register_message(UNIT, OPCODE, Alpha, namespace=NS_A)
+    register_message(UNIT, Alpha, namespace=NS_A)
     register_pair(UNIT, ALIAS_UNIT, namespace=NS_A)
     codes = known_unit_codes(NS_A)
     assert UNIT in codes and ALIAS_UNIT in codes

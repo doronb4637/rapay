@@ -30,16 +30,19 @@ SHARED_OPCODE = 940
 _FILE = """
 from core.IRS import *
 from core.IRS.REGISTRY import register_message
+from core.IRS.core import OperationCode
 
+@OperationCode({opcode})
 class {cls}(Message):
 {fields}
 
-register_message(unitCode={ours}, opCode={opcode}, message={cls})
+register_message(unitCode={ours}, message={cls})
 
+@OperationCode({opcode})
 class {cls}Reply(Message):
     ack: int = Byte
 
-register_message(unitCode={theirs}, opCode={opcode}, message={cls}Reply)
+register_message(unitCode={theirs}, message={cls}Reply)
 """
 
 

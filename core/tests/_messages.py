@@ -50,15 +50,18 @@ class Ping(Message):
 TEXT_UNIT_CODE = 200
 TEXT_OPCODES = range(1, 20)
 for _opcode in TEXT_OPCODES:
-    register_message(unitCode=TEXT_UNIT_CODE, opCode=_opcode, message=Text)
+    Text._opCode = _opcode
+    register_message(unitCode=TEXT_UNIT_CODE, message=Text)
 
 #: A second Text-speaking unit code, for tests that need two distinct peers
 #: (e.g. multi-unit routing, unit-code collisions) without reusing 200.
 TEXT_UNIT_CODE_2 = 201
 for _opcode in TEXT_OPCODES:
-    register_message(unitCode=TEXT_UNIT_CODE_2, opCode=_opcode, message=Text)
+    Text._opCode = _opcode
+    register_message(unitCode=TEXT_UNIT_CODE_2, message=Text)
 
 #: Typed round-trip: unitCode 210's peer sends Ping on opcode 21.
 PING_UNIT_CODE = 210
 PING_OPCODE = 21
-register_message(unitCode=PING_UNIT_CODE, opCode=PING_OPCODE, message=Ping)
+Ping._opCode = PING_OPCODE
+register_message(unitCode=PING_UNIT_CODE, message=Ping)

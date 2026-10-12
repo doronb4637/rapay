@@ -255,9 +255,11 @@ def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):
     body = (
         "from core.IRS import *\n"
         "from core.IRS.REGISTRY import register_message\n"
+        "from core.IRS.core import OperationCode\n"
+        "@OperationCode(950)\n"
         "class M{n}(Message):\n"
         "    v: int = UInt16\n"
-        "register_message(unitCode=24{n}, opCode=950, message=M{n})\n"
+        "register_message(unitCode=24{n}, message=M{n})\n"
     )
     paths = []
     for n in (1, 2):
