@@ -1,7 +1,7 @@
 from IRS import *
 from enum import IntEnum
 from IRS.REGISTRY import register_message
-from core import OperationCode
+from IRS.core import OperationCode
 
 Tiful = 0x01
 DTU = 0x02
