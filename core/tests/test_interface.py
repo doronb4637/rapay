@@ -6,7 +6,7 @@ import types
 
 import pytest
 
-from core.IRS import Byte, Definition, Message, is_definition
+from core.IRS import Byte, Definition, Message, is_definition, pair
 from core.IRS.irs_parser import Interface, IRSAmbiguousError, IRSNotFoundError, parse
 
 
@@ -112,3 +112,27 @@ def test_routes_and_unit_codes():
 def test_parse_uses_the_given_class():
     message = parse(AlphaReply, b"\x05")
     assert type(message) is AlphaReply and message.ok == 5
+
+
+# --------------------------------------------------------------------------- #
+# pair -- a unit that speaks another unit's IRS
+# --------------------------------------------------------------------------- #
+def test_a_pair_is_its_own_unit_code():
+    mfd = pair(2, 0x03)
+    assert mfd == 3 and mfd.impose == 2
+
+
+def test_a_pair_resolves_to_the_layouts_of_the_unit_it_speaks():
+    interface = Interface.from_module(_module("link", DTU=2, MFD=pair(2, 3), AlphaReply=AlphaReply))
+    assert dict(interface.units) == {"DTU": 2, "MFD": 3}
+    assert interface.speaks_as(3) == 2 and interface.speaks_as(2) == 2
+    assert interface.message_class(3, 0x10) is AlphaReply
+    assert interface.routes(3) == [(0x10, AlphaReply)]
+    assert interface.unit_codes() == [2, 3]
+
+
+def test_a_pair_names_itself_when_the_route_is_missing():
+    interface = Interface.from_module(_module("link", DTU=2, MFD=pair(2, 3), AlphaReply=AlphaReply))
+    with pytest.raises(IRSNotFoundError, match=r"Unit: 3 \(pair of 2\).*known opcodes: \[16\]"):
+        interface.message_class(3, 0x11)
+

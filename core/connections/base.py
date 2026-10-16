@@ -236,8 +236,8 @@ class Connection(ABC):
         """
         The key an outbound `data` goes out under. A message carries its own
         route from `@Definition`, so `opCode` is optional for it and, if given,
-        must agree -- and its unit must be US, since the header is stamped with
-        our code. Bytes carry nothing, so `opCode` is required (as it is with no
+        must agree -- and its unit must be US (or the unit we are a pair of),
+        since the header is stamped with our code. Bytes carry nothing, so `opCode` is required (as it is with no
         data at all, for `stop_periodic`). DDS derives the key from the sample.
         """
         if data is None or isinstance(data, (bytes, bytearray, memoryview)):
@@ -248,7 +248,8 @@ class Connection(ABC):
         message_class = type(data)
         if not is_definition(message_class):
             raise TypeError(f"{message_class.__name__} has no @Definition(unitCode=..., opCode=...)")
-        if message_class._unitCode != self._own_unit_code:
+        speaks_as = {interface.speaks_as(self._own_unit_code) for interface in self._interfaces.values()}
+        if message_class._unitCode != self._own_unit_code and message_class._unitCode not in speaks_as:
             raise ValueError(
                 f"{message_class.__name__} is sent by unit {message_class._unitCode}, but this "
                 f"connection is unit {self._own_unit_code}")
@@ -790,11 +791,12 @@ class FramedConnection(Connection):
         """The layout THEIR unit code sends on this opcode, from this link's own
         structures. A class selector is trusted; only its unit code is checked."""
         unit_code, opcode = route_key
-        if is_definition(selector) and selector._unitCode != unit_code:
+        interface = self._interfaces[unit_name]
+        if is_definition(selector) and selector._unitCode != interface.speaks_as(unit_code):
             raise ValueError(
                 f"{selector.__name__} is sent by unit {selector._unitCode}, not by "
                 f"{unit_name!r} (unit {unit_code})")
-        return self._interfaces[unit_name].message_class(unit_code, opcode)
+        return interface.message_class(unit_code, opcode)
 
     def _encode(self, opcode: OpCode, message: Message | bytes, unit_name: UnitName) -> bytes:
         """The message's own layout; bytes pass through. Stamped with OUR unit

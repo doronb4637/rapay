@@ -210,6 +210,23 @@ def Definition(unitCode: int, opCode: int):
     return wrapper
 
 
+class Pair(int):
+    """A unit code that speaks another unit's IRS: `MFD = pair(DTU, 0x03)` means
+    a message from 0x03 is laid out exactly as DTU's message on that opcode."""
+    impose: int
+
+    def __repr__(self) -> str:
+        return f"pair({self.impose}, {int(self)})"
+
+
+def pair(unitCode: int, pairCode: int) -> Pair:
+    """Declare `unitCode` as a pair of `unit` (a pair of a pair resolves to the
+    unit that actually owns the layouts)."""
+    paired = Pair(pairCode)
+    code.impose = unitCode
+    return code
+
+
 def is_definition(obj: Any) -> bool:
     """Whether `obj` is a message class carrying its OWN `@Definition` -- an
     undecorated subclass of one inherits the attributes but not the route."""

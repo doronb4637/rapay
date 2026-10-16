@@ -13,5 +13,5 @@ from .constants import *
 from .buffers import BinaryReader, BinaryWriter
 from .bitfields import baseType, BitField
 from .fields import Field, EnumField
-from .core import ArrayField, Structure, Message, Definition, is_definition
+from .core import ArrayField, Structure, Message, Definition, Pair, pair, is_definition
 from .annotations import IrsMessage, UnitCode, OpCode, Namespace, NamespaceScope

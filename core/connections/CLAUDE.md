@@ -43,8 +43,8 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - Inbound routing comes from the transport, not the header. `ConnectionConfig` is `frozen=True, slots=True`; mutating it would desync `Connection`'s caches.
 
 ### Sending and receiving
-- A send takes a `@Definition` message instance (its opcode is its own; an explicit one must agree, else `ValueError`; its `unitCode` must be ours, else `ValueError`) or bytes with an explicit opcode. Dicts and undecorated messages are a `TypeError`. Same for `periodic_sending`.
-- A receive selector (`receive_message`, `handle_on_receive`, `@route`) is the message class or an int/"0x.." opcode, resolved once at subscribe time against the unit's `Interface`; a class is trusted (no identity check against the link's layout), only its unit code must be THEIR unit code.
+- A send takes a `@Definition` message instance (its opcode is its own; an explicit one must agree, else `ValueError`; its `unitCode` must be ours or the unit we are a pair of, else `ValueError`) or bytes with an explicit opcode. Dicts and undecorated messages are a `TypeError`. Same for `periodic_sending`.
+- A receive selector (`receive_message`, `handle_on_receive`, `@route`) is the message class or an int/"0x.." opcode, resolved once at subscribe time against the unit's `Interface`; a class is trusted (no identity check against the link's layout), only its unit code must be THEIR unit code (or the unit they are a pair of).
 - `unit_name` may be omitted only when exactly one unit is connected. `receive_message()` matches both opcode and resolved unit.
 - The selector is turned into a route key by `_message_key`, `_send_key` and `_send_unit`. DDS overrides all three (selector = topic class, sample or name) and `_resolve_route`.
 - Subscribe-or-drop: no buffering. `_dispatch_incoming` consumes echoes first, then hands the message to the route owner; if none exists the message is discarded.

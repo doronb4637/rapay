@@ -13,9 +13,11 @@ play.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
+import core.IRS
 from core.IRS.irs_parser import IRSAmbiguousError, IRSNotFoundError
 from core.connections.config import ConnectionConfig
 from core.tools.general import resolve_module_name
@@ -171,3 +173,35 @@ def test_our_own_code_must_be_a_unit_of_every_link(manager, free_ports, link_str
     (path_a, _), (path_b, _) = link_structures
     with pytest.raises(ValueError, match=r"config\['unitCode'\] = 77 is not a unit of"):
         manager.create("multi", _config(free_ports(2), path_a, path_b, own_code=77))
+
+
+# --------------------------------------------------------------------------- #
+# A pair unit speaks the IRS of the unit it pairs (tiful_to_dtu: MFD = pair(DTU, 0x03))
+# --------------------------------------------------------------------------- #
+TIFUL_TO_DTU = str(Path(core.IRS.__file__).parent / "Structures" / "Tiful" / "tiful_to_dtu.py")
+
+
+def _pair_config(port, own_code, peer_name, peer_code):
+    return {
+        "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "unitCode": own_code,
+        "connections": {peer_name: {"port": port, "unitCode": peer_code, "Structures": [TIFUL_TO_DTU]}},
+    }
+
+
+def test_a_message_from_a_pair_is_parsed_as_the_paired_units_message(manager, free_ports):
+    """(0x03, 0x0012) is MFD sending us DTU's SetGeneralFlag."""
+    connection = manager.create("tiful", _pair_config(free_ports(1)[0], 0x01, "MFD", 0x03))
+    route, message_class = connection._claim_route("MFD", 0x0012)
+    assert route == (0x03, 0x0012) and message_class.__name__ == "SetGeneralFlag"
+    assert connection._claim_route("MFD", message_class)[1] is message_class
+    assert connection._decode(message_class, b"\x02\x07").value == 7
+
+
+def test_a_pair_sends_the_paired_units_messages(manager, free_ports):
+    connection = manager.create("mfd", _pair_config(free_ports(1)[0], 0x03, "Tiful", 0x01))
+    set_flag = connection.interface_for("Tiful").message_class(0x02, 0x0012)
+    general_flag = connection.interface_for("Tiful").message_class(0x01, 0x0012)
+    assert connection._send_key(set_flag(), None) == 0x0012
+    with pytest.raises(ValueError, match="sent by unit 1"):
+        connection._send_key(general_flag(), None)

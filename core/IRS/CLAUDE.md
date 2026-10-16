@@ -15,6 +15,7 @@ High-performance binary parsing/serialization engine. Moves all reflection and s
 - `core`: `Structure`, `Message`, `ArrayField`. `MessageMeta` turns annotations into the `_fields_` tuple. Arrays are fixed (int length), counted (length names a sibling field) or greedy (`None`).
 - `Structure.__init__(**kwargs)` applies kwargs and fills the rest with defaults, so `to_bytes()` never fails on a fresh object.
 - No registry. `@Definition(unitCode=, opCode=)` binds a message to its route; `irs_parser.Interface` reads one structures module's units (public module-level ints) and layouts. Its owner (a connection) holds it per link; see `core/connections/CLAUDE.md`.
+- A unit declared `MFD = pair(DTU, 0x03)` is a `Pair` (an `int`) that speaks DTU's IRS and has no layouts of its own: `Interface.speaks_as(0x03)` is DTU, and `message_class`/`routes` resolve through it. A pair that also defines its own messages, or one code paired two ways, raises `IRSAmbiguousError`.
 - Byte order is a property of a whole specification, declared once per structures file as a module-level `ENDIAN` constant. No declaration means little endian.
 - `@baseType(n)` inherits the file's `ENDIAN`; a second argument overrides it for one type. A type keeps the byte order of the file that *defined* it.
 - Endianness resolves in `IRS.constants.module_endian()` at class-creation time. An `ENDIAN` that is neither `'<'` nor `'>'` raises at import.

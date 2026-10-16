@@ -3,6 +3,7 @@ from enum import IntEnum
 
 Tiful = 0x01
 DTU = 0x02
+MFD = pair(DTU, 0x03)
 
 """ Data Types """
 @baseType(1)
