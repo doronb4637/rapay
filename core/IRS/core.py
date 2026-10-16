@@ -223,8 +223,8 @@ def pair(unitCode: int, pairCode: int) -> Pair:
     """Declare `unitCode` as a pair of `unit` (a pair of a pair resolves to the
     unit that actually owns the layouts)."""
     paired = Pair(pairCode)
-    code.impose = unitCode
-    return code
+    paired.impose = unitCode
+    return paired
 
 
 def is_definition(obj: Any) -> bool:
