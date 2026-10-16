@@ -196,10 +196,8 @@ route or unit name different meanings raise `IRSAmbiguousError`), and
   name and code** -- `"DTU": {"unitCode": 3}` against `DTU = 0x02` fails;
 - our own top-level `unitCode` must be one of that file's units too.
 
-`Connection.interface_for(unit_name)` returns a link's `Interface`. Application
-code that passes a message *class* as a selector must import it as the same
-module object the config loaded (same spelling), or the class is refused as
-foreign to the link.
+`Connection.interface_for(unit_name)` returns a link's `Interface`. A message
+*class* passed as a selector is trusted; only its unit code is checked.
 
 ## 4. opcode: mandatory on send, subscription key on receive
 

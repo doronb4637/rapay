@@ -36,8 +36,7 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - A connection-level `Structures` is legal only with exactly one unit, or on multicast; `from_json` rejects it otherwise.
 - `config.load_interfaces` (called by `Connection.__init__`) imports each unit's files and merges them into that unit's `Interface`; two files giving one route or unit name two meanings raise `IRSAmbiguousError`, which must not subclass `IRSNotFoundError`. Read it through `interface_for(unit_name)`.
 - `config.validate_interfaces` then requires every `connections[name]` to be a unit of its own file under the same name and code, and our top-level `unitCode` to be one of that file's units.
-- `tools.general.resolve_module_name` is the single source of a file's module name, shared by `ConnectionConfig` and `import_modules`. A `.py` path is always loaded from that path. Application code must use the same module object as the config (same spelling), or class selectors are refused as foreign.
-
+- `tools.general.resolve_module_name` is the single source of a file's module name, shared by `ConnectionConfig` and `import_modules`. A `.py` path is always loaded from that path.
 ### Unit routing
 - Top-level `unitCode` is OUR code (required, uint8): stamped into every header, and every message we send must be `@Definition`'d with it.
 - `connections[name].unitCode` is THEIR code (required, range- and collision-checked; ports unique too): it keys subscriptions/callbacks/periodic tasks and selects the sender's layouts in the unit's `Interface`.
@@ -45,7 +44,7 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 
 ### Sending and receiving
 - A send takes a `@Definition` message instance (its opcode is its own; an explicit one must agree, else `ValueError`; its `unitCode` must be ours, else `ValueError`) or bytes with an explicit opcode. Dicts and undecorated messages are a `TypeError`. Same for `periodic_sending`.
-- A receive selector (`receive_message`, `handle_on_receive`, `@route`) is the message class or an int/"0x.." opcode, resolved once at subscribe time against the unit's `Interface`; a class must be exactly that link's layout for THEIR unit code.
+- A receive selector (`receive_message`, `handle_on_receive`, `@route`) is the message class or an int/"0x.." opcode, resolved once at subscribe time against the unit's `Interface`; a class is trusted (no identity check against the link's layout), only its unit code must be THEIR unit code.
 - `unit_name` may be omitted only when exactly one unit is connected. `receive_message()` matches both opcode and resolved unit.
 - The selector is turned into a route key by `_message_key`, `_send_key` and `_send_unit`. DDS overrides all three (selector = topic class, sample or name) and `_resolve_route`.
 - Subscribe-or-drop: no buffering. `_dispatch_incoming` consumes echoes first, then hands the message to the route owner; if none exists the message is discarded.

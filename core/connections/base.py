@@ -788,22 +788,13 @@ class FramedConnection(Connection):
 
     def _route_class(self, unit_name: UnitName, selector: OpCode, route_key: RouteKey) -> IrsMessage:
         """The layout THEIR unit code sends on this opcode, from this link's own
-        structures. A class selector must be exactly that layout."""
+        structures. A class selector is trusted; only its unit code is checked."""
         unit_code, opcode = route_key
         if is_definition(selector) and selector._unitCode != unit_code:
             raise ValueError(
                 f"{selector.__name__} is sent by unit {selector._unitCode}, not by "
                 f"{unit_name!r} (unit {unit_code})")
-        message_class = self._interfaces[unit_name].message_class(unit_code, opcode)
-        if is_definition(selector) and selector is not message_class:
-            same_name = selector.__qualname__ == message_class.__qualname__
-            raise ValueError(
-                f"{selector.__module__}.{selector.__qualname__} is not part of the link to "
-                f"{unit_name!r}: its structures define {message_class.__module__}."
-                f"{message_class.__qualname__} on this route"
-                + (" -- the same file imported twice under two names; import the message the "
-                   "way the config names the file, or take it from interface_for()" if same_name else ""))
-        return message_class
+        return self._interfaces[unit_name].message_class(unit_code, opcode)
 
     def _encode(self, opcode: OpCode, message: Message | bytes, unit_name: UnitName) -> bytes:
         """The message's own layout; bytes pass through. Stamped with OUR unit
