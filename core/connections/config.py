@@ -47,12 +47,17 @@ while TrackerUnit falls back to the connection-wide 99 -- both at the shared
 1.0s/5.0s timings.
 
 `Structures` is hierarchical in the same shape but with a stricter rule, because
-a structures file defines the IRS for ONE link (see connections/CLAUDE.md 2b):
+a structures file defines the IRS for ONE link (see connections/CLAUDE.md):
 each unit names its own, and a connection-level list is only accepted when
 there is exactly one unit to apply it to -- or on multicast, where one sender
-genuinely does fan out to many receivers over a single shared IRS. Anything
-else is a load-time ValueError, since applying one list to several links is
-what let two files silently overwrite each other's layouts.
+genuinely does fan out to many receivers over a single shared IRS. Every unit
+MUST end up with a non-empty list: there is no global registry to fall back on,
+so a link without one could neither send nor receive.
+
+A unit's name and code are checked against its structures file when the
+connection is built (`validate_interfaces`): `"DTU": {"unitCode": 2}` requires
+the file to define `DTU = 2`, and our own top-level `unitCode` must be one of
+that file's units too.
 
 A `"protocol": "dds"` config is a different shape altogether: a DDS node has no
 socket to describe, and its routing is the system contract's to say. It names
@@ -76,7 +81,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from core.tools.general import resolve_module_name, validated_opcode, validated_unitcode
+from core.IRS.irs_parser import Interface
+from core.tools.general import import_modules, resolve_module_name, validated_opcode, validated_unitcode
 from core.annotations import Namespace, OpCode, UnitCode
 
 from .dds_config import DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE, DdsUnitConfig, resolve_unit
@@ -364,12 +370,10 @@ class UnitEndpoint:
     id). `echo` is this unit's settings, already merged with the
     connection-level block by `EchoSettings.resolve`.
 
-    `structures` is this LINK's IRS layouts, resolved to module namespaces --
-    what scopes every encode/decode/validate for this unit. Empty means
-    unscoped: every registered module is searched, which is what a byte-oriented
-    unit (and every config written before per-link structures existed) gets.
-    `structures_raw` keeps the spellings as configured, because that is what
-    `ConnectionManager` hands to `import_modules`.
+    `structures` is this LINK's IRS structures files, resolved to module
+    namespaces; never empty on a socket protocol. `structures_raw` keeps the
+    spellings as configured, because that is what `load_interfaces` hands to
+    `import_modules`.
     """
 
     port: int
@@ -568,6 +572,11 @@ def _parse_unit_endpoint(unit_name: str, spec: Any, global_extra: Mapping[str, A
         structures_raw, structures = resolve_structures(spec, global_extra)
     except ValueError as exc:
         raise ValueError(f"config['connections'][{unit_name!r}]: {exc}") from exc
+    if not structures_raw:
+        raise ValueError(
+            f"config['connections'][{unit_name!r}] has no 'Structures': every link must name "
+            f"the IRS structures file(s) it speaks, in its own entry (or once at connection "
+            f"level when there is a single unit, or on multicast)")
     return UnitEndpoint(port=port, unitCode=unitCode, echo=echo,
                         structures_raw=structures_raw, structures=structures)
 
@@ -746,26 +755,52 @@ class ConnectionConfig:
         return {name: endpoint.echo for name, endpoint in self.connections.items()}
 
     @property
-    def structures(self) -> tuple[Namespace, ...]:
-        """The connection-level `Structures` block, resolved. Recomputed per
-        access, like `echo`."""
-        raw = _structures_from(self.extra, "Structures") or ()
-        return tuple(resolve_module_name(entry) for entry in raw)
-
-    @property
     def unit_structures(self) -> dict[str, tuple[Namespace, ...]]:
         """{unit name: resolved structures namespaces}."""
         return {name: endpoint.structures for name, endpoint in self.connections.items()}
 
-    @property
-    def all_structures_raw(self) -> tuple[str, ...]:
-        """Every structures spelling this config references -- connection-level
-        plus every per-unit list -- de-duplicated in declaration order. This is
-        what `Connection` imports, so a per-unit list is never missed."""
-        seen: dict[str, None] = {}
-        for entry in _structures_from(self.extra, "Structures") or ():
-            seen[entry] = None
-        for endpoint in self.connections.values():
-            for entry in endpoint.structures_raw:
-                seen[entry] = None
-        return tuple(seen)
+
+# --------------------------------------------------------------------------- #
+# Interfaces: each link's structures, imported and checked against the config.
+# --------------------------------------------------------------------------- #
+def load_interfaces(config: ConnectionConfig) -> dict[str, Interface]:
+    """{unit name: that link's `Interface`}, importing each structures file once.
+    Empty on DDS, whose interface is its DDS Interface."""
+    if config.protocol is TransportProtocol.DDS:
+        return {}
+    loaded: dict[str, Interface] = {}
+    interfaces: dict[str, Interface] = {}
+    for unit_name, endpoint in config.connections.items():
+        for raw in endpoint.structures_raw:
+            if raw not in loaded:
+                loaded[raw] = Interface.from_module(import_modules(raw)[0])
+        interfaces[unit_name] = Interface.merge(*(loaded[raw] for raw in endpoint.structures_raw))
+    validate_interfaces(config, interfaces)
+    return interfaces
+
+
+def validate_interfaces(config: ConnectionConfig, interfaces: Mapping[str, Interface]) -> None:
+    """
+    Every configured unit must be a unit of its own structures file, under the
+    same name and code, and so must we.
+
+    Unit names are the contract between a config and a structures file: a
+    `"DTU": {"unitCode": 3}` against a file defining `DTU = 2` would subscribe
+    and parse against the wrong sender, silently.
+    """
+    for unit_name, endpoint in config.connections.items():
+        interface = interfaces[unit_name]
+        where = f"structures {', '.join(interface.namespaces)}"
+        defined = interface.units.get(unit_name)
+        if defined is None:
+            raise ValueError(
+                f"config['connections'][{unit_name!r}]: {where} defines no unit named "
+                f"{unit_name!r}; units defined there: {dict(interface.units)}")
+        if defined != endpoint.unitCode:
+            raise ValueError(
+                f"config['connections'][{unit_name!r}]['unitCode'] = {endpoint.unitCode}, but "
+                f"{where} defines {unit_name} = {defined}")
+        if config.unitCode not in interface.units.values():
+            raise ValueError(
+                f"config['unitCode'] = {config.unitCode} is not a unit of {where} (the link to "
+                f"{unit_name!r}); units defined there: {dict(interface.units)}")

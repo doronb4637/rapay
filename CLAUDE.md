@@ -21,7 +21,7 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
 - `core/annotations.py` re-exports IRS names so `connections` and `tools` keep one import; the arrow points from it into IRS only.
 - If IRS or DDS needs something from `connections`, `tools` or `core/annotations.py`, move the shared piece into IRS/DDS. Never add the reverse import.
 - `gsim` depends on `core` as a whole, only through `gsim/core_gateway/`, and never modifies `core` (see `gsim/CLAUDE.md`).
-- IRS has two spellings, `core.IRS.x` and `IRS.x`; `core/IRS/_alias.py` makes them one module object at every depth. Two copies fail silently (empty registry, `isinstance` misses), and `_alias.py` raises on a genuine second copy.
+- IRS has two spellings, `core.IRS.x` and `IRS.x`; `core/IRS/_alias.py` makes them one module object at every depth. Two copies fail silently (`isinstance`/`is` checks against message classes miss), and `_alias.py` raises on a genuine second copy.
 - Structures files are plugins that consume IRS, not IRS internals. A `Structures` entry is either a `.py` path anywhere on disk (loaded from that path) or a dotted name for a module under `core/IRS/Structures/`. Never branch import behaviour on file location.
 - Classes shared across an Interface/structures file and application code must be the same objects: use absolute imports and one module object per file (same failure class as `_alias.py`).
 

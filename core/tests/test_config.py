@@ -5,6 +5,7 @@ EchoSettings resolution. Pure logic, no I/O, no event loop.
 import pytest
 
 from core.connections.config import ConnectionConfig, EchoSettings, Side, TransportProtocol
+from core.tests._messages import MESSAGES
 
 
 def _base(**overrides):
@@ -13,7 +14,7 @@ def _base(**overrides):
         "side": "server",
         "ip": "127.0.0.1",
         "unitCode": 1,
-        "connections": {"Peer": {"port": 5000, "unitCode": 2}},
+        "connections": {"Peer": {"port": 5000, "unitCode": 2, "Structures": [MESSAGES]}},
     }
     cfg.update(overrides)
     return cfg
@@ -99,7 +100,7 @@ def test_connection_spec_must_be_a_dict():
 def test_connection_port_non_numeric_rejected():
     with pytest.raises(ValueError, match="port"):
         ConnectionConfig.from_json(
-            _base(connections={"Peer": {"port": "nope", "unitCode": 2}})
+            _base(connections={"Peer": {"port": "nope", "unitCode": 2, "Structures": [MESSAGES]}})
         )
 
 
@@ -107,7 +108,7 @@ def test_connection_port_non_numeric_rejected():
 def test_connection_port_out_of_range_rejected(bad_port):
     with pytest.raises(ValueError, match="port"):
         ConnectionConfig.from_json(
-            _base(connections={"Peer": {"port": bad_port, "unitCode": 2}})
+            _base(connections={"Peer": {"port": bad_port, "unitCode": 2, "Structures": [MESSAGES]}})
         )
 
 
@@ -115,29 +116,29 @@ def test_connection_unit_code_is_required_per_unit():
     """No default-from-port fallback -- every connection must name its own
     unitCode explicitly."""
     with pytest.raises(ValueError):
-        ConnectionConfig.from_json(_base(connections={"Peer": {"port": 5000}}))
+        ConnectionConfig.from_json(_base(connections={"Peer": {"port": 5000, "Structures": [MESSAGES]}}))
 
 
 @pytest.mark.parametrize("bad_code", [256, -1])
 def test_connection_unit_code_out_of_uint8_range_rejected(bad_code):
     with pytest.raises(ValueError):
         ConnectionConfig.from_json(
-            _base(connections={"Peer": {"port": 5000, "unitCode": bad_code}})
+            _base(connections={"Peer": {"port": 5000, "unitCode": bad_code, "Structures": [MESSAGES]}})
         )
 
 
 def test_duplicate_unit_codes_across_connections_rejected():
     with pytest.raises(ValueError, match="unitCode"):
         ConnectionConfig.from_json(_base(connections={
-            "A": {"port": 5000, "unitCode": 9},
-            "B": {"port": 5001, "unitCode": 9},
+            "A": {"port": 5000, "unitCode": 9, "Structures": [MESSAGES]},
+            "B": {"port": 5001, "unitCode": 9, "Structures": [MESSAGES]},
         }))
 
 
 def test_multiple_connections_with_distinct_codes_accepted():
     config = ConnectionConfig.from_json(_base(connections={
-        "A": {"port": 5000, "unitCode": 9},
-        "B": {"port": 5001, "unitCode": 10},
+        "A": {"port": 5000, "unitCode": 9, "Structures": [MESSAGES]},
+        "B": {"port": 5001, "unitCode": 10, "Structures": [MESSAGES]},
     }))
     assert config.unit_codes == {"A": 9, "B": 10}
     assert [endpoint.port for endpoint in config.connections.values()] == [5000, 5001]
@@ -157,19 +158,19 @@ def test_unrecognized_top_level_keys_land_in_extra_with_a_warning(caplog):
 def test_unknown_unit_keys_are_refused():
     with pytest.raises(ValueError, match="Structure"):
         ConnectionConfig.from_json(_base(connections={
-            "Peer": {"port": 5000, "unitCode": 7, "Structure": ["x"]}}))
+            "Peer": {"port": 5000, "unitCode": 7, "Structure": ["x"], "Structures": [MESSAGES]}}))
 
 
 def test_a_port_shared_by_two_units_is_refused():
     with pytest.raises(ValueError, match="both use port"):
         ConnectionConfig.from_json(_base(connections={
-            "A": {"port": 5000, "unitCode": 7}, "B": {"port": 5000, "unitCode": 8}}))
+            "A": {"port": 5000, "unitCode": 7, "Structures": [MESSAGES]}, "B": {"port": 5000, "unitCode": 8, "Structures": [MESSAGES]}}))
 
 
 @pytest.mark.parametrize("bad", [True, 5000.5, None])
 def test_a_non_integer_port_is_refused(bad):
     with pytest.raises(ValueError, match="port"):
-        ConnectionConfig.from_json(_base(connections={"Peer": {"port": bad, "unitCode": 7}}))
+        ConnectionConfig.from_json(_base(connections={"Peer": {"port": bad, "unitCode": 7, "Structures": [MESSAGES]}}))
 
 
 @pytest.mark.parametrize("missing", ["side", "ip", "protocol"])
@@ -188,7 +189,7 @@ def test_a_side_the_protocol_does_not_have_is_refused():
 def test_a_null_echo_opcode_opts_out_whatever_the_global_spelling():
     config = ConnectionConfig.from_json(_base(
         RecvEchoOpcode=99, SendEchoOpcode=100,
-        connections={"Peer": {"port": 5000, "unitCode": 7, "echo_opcode": None}}))
+        connections={"Peer": {"port": 5000, "unitCode": 7, "echo_opcode": None, "Structures": [MESSAGES]}}))
     assert not config.connections["Peer"].echo.enabled
 
 
@@ -294,8 +295,8 @@ def test_resolve_bad_merge_names_error_from_unit_perspective():
 def test_from_json_resolves_echo_per_connection():
     config = ConnectionConfig.from_json(_base(
         connections={
-            "A": {"port": 5000, "unitCode": 9, "echo_opcode": 10},
-            "B": {"port": 5001, "unitCode": 10},
+            "A": {"port": 5000, "unitCode": 9, "echo_opcode": 10, "Structures": [MESSAGES]},
+            "B": {"port": 5001, "unitCode": 10, "Structures": [MESSAGES]},
         },
         echo_opcode=99, EchoInterval=1.0, EchoTimeout=5.0,
     ))
@@ -308,7 +309,7 @@ def test_from_json_fails_at_load_time_on_bad_unit_echo():
     with pytest.raises(ValueError, match="BadUnit"):
         ConnectionConfig.from_json(_base(connections={
             "BadUnit": {"port": 5000, "unitCode": 9, "echo_opcode": 1,
-                        "EchoInterval": 5.0, "EchoTimeout": 1.0},
+                        "EchoInterval": 5.0, "EchoTimeout": 1.0, "Structures": [MESSAGES]},
         }))
 
 
@@ -320,9 +321,8 @@ TIFUL_MESSAGES = "core.IRS.Structures.Tiful.tiful_to_dtu"
 
 
 def test_from_json_resolves_structures_per_unit():
-    """Each link's own list, resolved to the namespace `register_message`
-    captures -- so the config and the registry cannot name the module
-    differently."""
+    """Each link's own list, resolved to the module name `import_modules`
+    loads it under."""
     config = ConnectionConfig.from_json(_base(connections={
         "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
         "B": {"port": 5001, "unitCode": 10, "Structures": [TIFUL_MESSAGES]},
@@ -334,20 +334,9 @@ def test_from_json_resolves_structures_per_unit():
     assert config.connections["A"].structures_raw == (TEST_MESSAGES,)
 
 
-def test_all_structures_raw_is_the_deduplicated_union():
-    """What ConnectionManager imports: miss this and a per-unit config would
-    register no layouts at all."""
-    config = ConnectionConfig.from_json(_base(connections={
-        "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
-        "B": {"port": 5001, "unitCode": 10, "Structures": [TIFUL_MESSAGES]},
-        "C": {"port": 5002, "unitCode": 11, "Structures": [TEST_MESSAGES]},
-    }))
-    assert config.all_structures_raw == (TEST_MESSAGES, TIFUL_MESSAGES)
-
-
 def test_connection_level_structures_is_legal_for_a_single_unit():
-    config = ConnectionConfig.from_json(_base(Structures=[TEST_MESSAGES]))
-    assert config.structures == (TEST_MESSAGES,)
+    config = ConnectionConfig.from_json(_base(
+        Structures=[TEST_MESSAGES], connections={"Peer": {"port": 5000, "unitCode": 2}}))
     assert config.connections["Peer"].structures == (TEST_MESSAGES,)
 
 
@@ -387,31 +376,39 @@ def test_unit_structures_replace_the_connection_level_list_as_a_group():
     assert config.connections["Peer"].structures == (TIFUL_MESSAGES,)
 
 
-def test_no_structures_anywhere_stays_unscoped():
-    """Every config written before per-link structures keeps working: empty
-    means "search every module", not "no layouts"."""
-    config = ConnectionConfig.from_json(_base())
-    assert config.structures == ()
-    assert config.connections["Peer"].structures == ()
-    assert config.all_structures_raw == ()
+def test_a_unit_without_structures_is_rejected():
+    """No global registry to fall back on: a link that names no structures
+    could neither send nor receive."""
+    with pytest.raises(ValueError, match="'Peer'.*has no 'Structures'"):
+        ConnectionConfig.from_json(_base(connections={"Peer": {"port": 5000, "unitCode": 2}}))
 
 
-def test_a_unit_may_declare_no_structures_on_a_multi_unit_connection():
-    """Byte-oriented units register no layouts at all (see CLAUDE.md 2a), so
-    this is legal -- only a connection-LEVEL list is restricted."""
-    config = ConnectionConfig.from_json(_base(connections={
-        "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
-        "B": {"port": 5001, "unitCode": 10},
-    }))
-    assert config.connections["A"].structures == (TEST_MESSAGES,)
-    assert config.connections["B"].structures == ()
+def test_one_unit_without_structures_on_a_multi_unit_connection_is_rejected():
+    with pytest.raises(ValueError, match="'B'.*has no 'Structures'"):
+        ConnectionConfig.from_json(_base(connections={
+            "A": {"port": 5000, "unitCode": 9, "Structures": [TEST_MESSAGES]},
+            "B": {"port": 5001, "unitCode": 10},
+        }))
+
+
+def test_an_empty_structures_list_is_rejected():
+    with pytest.raises(ValueError, match="has no 'Structures'"):
+        ConnectionConfig.from_json(_base(connections={"Peer": {"port": 5000, "unitCode": 2,
+                                                               "Structures": []}}))
+
+
+def test_dds_still_refuses_structures():
+    with pytest.raises(ValueError, match="Structures"):
+        ConnectionConfig.from_json({"protocol": "dds", "unit": "X", "dds_interface": "x.py",
+                                    "Structures": [TEST_MESSAGES]})
 
 
 def test_structures_accepts_a_bare_string():
-    config = ConnectionConfig.from_json(_base(Structures=TEST_MESSAGES))
+    config = ConnectionConfig.from_json(_base(
+        Structures=TEST_MESSAGES, connections={"Peer": {"port": 5000, "unitCode": 2}}))
     assert config.connections["Peer"].structures == (TEST_MESSAGES,)
 
 
 def test_structures_rejects_a_non_list():
     with pytest.raises(ValueError, match="list of IRS structures"):
-        ConnectionConfig.from_json(_base(Structures=17))
+        ConnectionConfig.from_json(_base(Structures=17, connections={"Peer": {"port": 5000, "unitCode": 2}}))

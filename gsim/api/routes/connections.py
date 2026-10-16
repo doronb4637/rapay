@@ -39,9 +39,9 @@ def create_connection(request: ConnectionCreate) -> dict[str, Any]:
          -- the flat `{protocol, side, ip, local_ip, unitCode, connections{...}}`
          dict, with `Structures` and any echo keys alongside.
       3. `runtime.create()` hands that dict to `ConnectionManager.create()`,
-         which validates it (`ConnectionConfig.from_json`), imports the
-         `Structures` modules (each under its own namespace) so the registry is populated *before* the
-         connection object exists, and instantiates the protocol class.
+         which validates it (`ConnectionConfig.from_json`), loads each link's
+         `Structures` into its interface and checks the peers against it, and
+         instantiates the protocol class.
       4. Receive handlers are registered per (peer, opcode) and, if requested,
          the connection is started.
 

@@ -11,7 +11,7 @@ import threading
 import pytest
 
 from core.connections.handlers import UnitHandler, on_connect
-from core.tests._messages import TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
 
 #: A UDP client knows its peer address from `_do_start`, so it reports the unit
 #: connected the moment `start()` returns -- no handshake to wait on.
@@ -23,7 +23,7 @@ CLIENT_SPEC = {
 
 def _client(manager, port, name="client", **overrides):
     spec = dict(CLIENT_SPEC, **overrides)
-    spec["connections"] = {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}}
+    spec["connections"] = {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}}
     return manager.create(name, spec)
 
 
@@ -127,7 +127,7 @@ def test_on_connect_decorator_installs_through_handle_on_connect(manager, free_p
     GREETED_UNITS.clear()
 
     spec = dict(CLIENT_SPEC)
-    spec["connections"] = {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}}
+    spec["connections"] = {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}}
     client = manager.create("client", spec, handler_class=GreetingHandler)
 
     # Installed by create(), so the slot is already claimed before start().

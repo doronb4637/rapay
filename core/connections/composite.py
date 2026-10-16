@@ -8,10 +8,10 @@ and exposes the same public surface as a `Connection`.
 from __future__ import annotations
 
 import time
-from typing import Any
+from core.IRS.irs_parser import Interface
 
 from .base import (ConnectCallback, ConnectedTarget, Connection, IrsMessage,
-                   OpCode, ReceiveCallback, TriggerFunction)
+                   OpCode, Outbound, ReceiveCallback, TriggerFunction)
 
 
 class CompositeUnit:
@@ -89,9 +89,16 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     # Public API -- same shape as Connection
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None,
+    def send_message(self, data: Outbound, opcode: OpCode | None = None,
                      unit_name: str | None = None) -> None:
         self._require_sender().send_message(data, opcode, unit_name)
+
+    def interface_for(self, unit_name: str | None = None) -> Interface:
+        """The IRS interface of the first member that configures `unit_name`."""
+        for member in self._members:
+            if unit_name is None or unit_name in member.config.connections:
+                return member.interface_for(unit_name)
+        raise ValueError(f"CompositeUnit {self.name!r}: no member configures unit {unit_name!r}")
 
     @property
     def active_units(self) -> set[str]:
@@ -159,7 +166,7 @@ class CompositeUnit:
 
     def periodic_sending(
         self,
-        data: IrsMessage | dict[str, Any],
+        data: Outbound,
         interval: int | float,
         opcode: OpCode | None = None,
         unit_name: str | None = None,

@@ -42,6 +42,7 @@ from . import registry as message_registry
 from .behaviours import BehaviourEngine
 from .filters import FilterSet
 from .payloads import prepare_message
+from .registry import Interface
 from .timing import wall_time
 
 logger = logging.getLogger("gsim.runtime")
@@ -82,7 +83,7 @@ class LogEntry:
     direction: str          # "sent" | "received"
     connection_name: str    # which GSim connection owns this entry (the console is global)
     unit_name: str          # OUR name when sent, the SENDER's configured name when received
-    unit_code: int          # the code the layout is registered under -- ours on send, theirs on receive
+    unit_code: int          # the sending unit's code -- ours on send, theirs on receive
     op_code: int
     message_name: str
     payload: dict[str, Any] | None
@@ -218,25 +219,19 @@ class ConnectionRecord:
         connections = self.config.get("connections", {})
         return {name: connected_unit["unitCode"] for name, connected_unit in connections.items()}
 
-    def structures_for(self, unit_name: str) -> list[str]:
-        """The IRS structures namespaces scoping ONE link's layouts.
+    def interface_for(self, unit_name: str | None) -> Interface:
+        """The IRS interface of ONE link, straight from core's connection -- the
+        very object it parses and sends with, so the two cannot disagree.
 
-        Read from core's PARSED config rather than re-derived from the raw dict:
-        a structures spelling ("Test.messages", or a file path) is normalised to
-        a module name by `tools.general.resolve_module_name`, and GSim resolving
-        it a second time is exactly how the two would eventually disagree about
-        which module a link uses.
-
-        Empty means unscoped -- every registered module is searched, which is
-        what a connection with no `Structures` gets.
+        `None` merges every peer's link, for views that list the whole
+        connection; two links giving one route different layouts raise
+        `IRSAmbiguousError` there rather than one quietly winning.
         """
-        config = getattr(self.unit, "config", None)
-        if config is None:            # CompositeUnit has no config of its own
-            return []
-        try:
-            return list(config.structures_for(unit_name))
-        except ValueError:            # unit_name not configured on this connection
-            return []
+        if unit_name is not None:
+            if unit_name not in self.peers():
+                raise KeyError(f"unknown connected unit {unit_name!r}; known: {sorted(self.peers())}")
+            return self.unit.interface_for(unit_name)
+        return Interface.merge(*(self.unit.interface_for(name) for name in self.peers()))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -766,8 +761,8 @@ class GSimRuntime:
         record = self.get(connection_name)
         # Scoped by the DESTINATION: our own unit code is the same for every
         # peer, so it alone cannot say which link's layout this opcode means.
-        structures = record.structures_for(unit_name)
-        prepared = prepare_message(record.own_unit_code, op_code, structures, payload)
+        prepared = prepare_message(record.own_unit_code, op_code,
+                                   record.interface_for(unit_name), payload)
         return PreparedSend(
             runtime=self, record=record, unit_name=unit_name, op_code=op_code,
             message=prepared.message, message_name=prepared.name,
@@ -779,10 +774,8 @@ class GSimRuntime:
         """Normalise, encode, send, and log it.
 
         The payload is built into a real IRS message here rather than handed to
-        core as a dict. `_encode` passes any non-`bytes` straight to
-        `irs_to_bytes`, which calls `message.to_bytes()` on a message and does its
-        own route lookup + `from_dict` on a dict -- so building it once here is
-        also what stops that work happening twice per send.
+        core as a dict: core only sends `@Definition` message instances (or
+        bytes), encoding each with its own `to_bytes()`.
 
         What is logged is the message's own `to_dict()`, which is why a sent entry
         spells enums as member names exactly as a received one always has.
@@ -821,21 +814,18 @@ class GSimRuntime:
     def _install_receive_handlers(self, record: ConnectionRecord) -> None:
         """Register one standing callback per (peer, opcode) that peer may send.
 
-        The opcode set comes from the registry keyed by the PEER's unit code and
-        scoped to THAT PEER's structures modules -- the same lookup `parse_irs`
-        performs when decoding -- so every route registered here is one core will
-        accept (`handle_on_receive` eagerly `validate_irs`-es and would raise
-        otherwise). Scoping matters beyond correctness of the layout: unscoped,
-        this registered every opcode any module had ever assigned to that unit
-        code, on every peer that happened to share it.
+        The opcode set comes from THAT PEER's link interface, keyed by the
+        peer's unit code -- the same one core resolves the opcode against in
+        `handle_on_receive` -- so every route registered here is one core will
+        accept.
 
         `unit_name` is closed over rather than passed by core: callbacks are
         invoked as `callback(message)` with no route context, and it is exactly
         the sender's *configured* name the Received log must display.
         """
         for unit_name, peer_code in record.peers().items():
-            structures = record.structures_for(unit_name)
-            for summary in message_registry.list_messages(peer_code, structures):
+            interface = record.interface_for(unit_name)
+            for summary in message_registry.list_messages(peer_code, interface):
                 op_code = summary["op_code"]
                 record.unit.handle_on_receive(
                     op_code,

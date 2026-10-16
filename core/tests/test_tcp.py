@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 def test_multi_unit_round_trip(manager, free_ports):
@@ -15,19 +15,19 @@ def test_multi_unit_round_trip(manager, free_ports):
         "protocol": "tcp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
-            "Radar": {"port": port_radar, "unitCode": TEXT_UNIT_CODE},
-            "Tracker": {"port": port_tracker, "unitCode": TEXT_UNIT_CODE_2},
+            "Radar": {"port": port_radar, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]},
+            "Tracker": {"port": port_tracker, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]},
         },
     })
     radar = manager.create("radar", {
         "protocol": "tcp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Radar": {"port": port_radar, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Radar": {"port": port_radar, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     tracker = manager.create("tracker", {
         "protocol": "tcp", "unitCode": 102, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Tracker": {"port": port_tracker, "unitCode": TEXT_UNIT_CODE_2}},
+        "connections": {"Tracker": {"port": port_tracker, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
     })
     manager.start_all()
     assert server.wait_for_connected_units(["Radar", "Tracker"], timeout=3) is True
@@ -51,12 +51,12 @@ def test_message_larger_than_one_packet_reassembles_correctly(manager, free_port
     server = manager.create("server", {
         "protocol": "tcp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
         "protocol": "tcp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
     assert server.wait_for_connected_units("Peer", timeout=3) is True
@@ -75,14 +75,14 @@ def test_new_client_supersedes_the_previous_peer_and_rearms_echo(manager, free_p
     server = manager.create("server", {
         "protocol": "tcp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     server.start()
 
     client_a = manager.create("client_a", {
         "protocol": "tcp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client_a.start()
     assert server.wait_for_connected_units("Peer", timeout=3) is True
@@ -90,7 +90,7 @@ def test_new_client_supersedes_the_previous_peer_and_rearms_echo(manager, free_p
     client_b = manager.create("client_b", {
         "protocol": "tcp", "unitCode": 102, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client_b.start()
     time.sleep(0.3)
@@ -107,12 +107,12 @@ def test_peer_closing_marks_the_unit_disconnected(manager, free_port):
     server = manager.create("server", {
         "protocol": "tcp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
         "protocol": "tcp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
     assert server.wait_for_connected_units("Peer", timeout=3) is True
@@ -128,7 +128,7 @@ def test_send_with_no_active_peer_raises_connection_error(manager, free_port):
     server = manager.create("server", {
         "protocol": "tcp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     server.start()
     with pytest.raises(ConnectionError):
@@ -139,11 +139,11 @@ def test_own_unit_code_is_stamped_in_the_header_not_the_peers(manager, free_port
     from core.connections.framing import unpack_header
 
     connection = manager.create("c", {
-        "protocol": "tcp", "unitCode": 77, "side": "client",
+        "protocol": "tcp", "unitCode": 100, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": 21}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     header = unpack_header(connection._frame(b"payload", opcode=5))
-    assert header.unit_code == 77
+    assert header.unit_code == 100
     assert header.opcode == 5
     assert header.data_length == 7

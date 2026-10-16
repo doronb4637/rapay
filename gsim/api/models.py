@@ -1,16 +1,11 @@
 """
 Request/response models -- and the GSim wrapper's stricter contract.
 
-`core.ConnectionConfig.from_json` accepts a config whose `Structures` key is
-absent (it is one of the free-form `extra` keys; `_import_config_libs` simply
-no-ops). That is correct for core -- a byte-oriented deployment genuinely needs
-no message layouts. It is wrong for GSim: without registered layouts the
-Messages panel has nothing to list and the Inspector has no schema to render a
-form from, so the connection would be created and then be useless.
+Core itself requires a `Structures` list for every socket link and checks each
+peer's name and unit code against it when the connection is built.
 
-So `Structures` is **mandatory here**, at the API edge, and core stays
-unchanged. Same for per-peer `unitCode`, which core already requires -- stated
-explicitly so the modal can show a field-level error instead of surfacing a
+`Structures` and per-peer `unitCode` are mandatory here too, at the API edge,
+stated explicitly so the modal can show a field-level error instead of surfacing a
 `ValueError` string from deep in `from_json`.
 """
 from __future__ import annotations

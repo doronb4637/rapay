@@ -10,14 +10,14 @@ import pytest
 from core.connections.config import ConnectionConfig
 from core.connections.framing import pack_message
 from core.connections.multicast import MulticastConnection
-from core.tests._messages import TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
 
 
 def _tcp(side, *ports):
     return {
         "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": side,
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {f"Peer{i}": {"port": port, "unitCode": TEXT_UNIT_CODE + i}
+        "connections": {f"Peer{i}": {"port": port, "unitCode": TEXT_UNIT_CODE + i, "Structures": [MESSAGES]}
                         for i, port in enumerate(ports)},
     }
 
@@ -26,7 +26,7 @@ def _udp_server(port):
     return {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }
 
 
@@ -143,9 +143,9 @@ def test_a_retrying_tcp_client_reconnects_after_its_peer_drops(manager, free_por
 
 def test_a_multicast_receiver_joins_its_group():
     config = ConnectionConfig.from_json({
-        "protocol": "multicast", "unitCode": 1, "side": "receiver",
+        "protocol": "multicast", "unitCode": 100, "side": "receiver",
         "ip": "239.1.2.3", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": 0, "unitCode": 2}},
+        "connections": {"Peer": {"port": 0, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     connection = MulticastConnection(config)
     try:

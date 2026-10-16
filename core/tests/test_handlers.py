@@ -6,7 +6,7 @@ import pytest
 
 from core.connections.handlers import UnitHandler, install_handler, route
 from core.connections.manager import ConnectionManager
-from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2, Text_200_2
 
 
 # --------------------------------------------------------------------------- #
@@ -145,19 +145,20 @@ def test_install_handler_registers_every_route_as_a_callback(manager, free_port)
         def on_one(self, message):
             received.append(("one", bytes(message.data)))
 
-        @route(opCode=2)
+        @route(Text_200_2)       # a class selector: the layout itself
         def on_two(self, message):
+            assert type(message) is Text_200_2
             received.append(("two", bytes(message.data)))
 
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }, handler_class=Handler)
     client = manager.create("client", {
         "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": 100}},
+        "connections": {"Local": {"port": free_port, "unitCode": 100, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
@@ -184,7 +185,7 @@ def test_install_handler_unknown_unit_code_raises_and_leaves_manager_clean(manag
         manager.create("server", {
             "protocol": "udp", "unitCode": 100, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-            "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+            "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         }, handler_class=Orphan)
 
     with pytest.raises(KeyError):
@@ -202,7 +203,7 @@ def test_install_handler_route_occupies_slot_like_ordinary_callback(manager, fre
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }, handler_class=Handler)
     server.start()
 
@@ -231,18 +232,18 @@ def test_install_handler_on_composite(manager, free_ports):
         "transport": {
             "protocol": "udp", "unitCode": 100, "side": "client",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "send_only",
-            "connections": {"Peer": {"port": port_send, "unitCode": TEXT_UNIT_CODE_2}},
+            "connections": {"Peer2": {"port": port_send, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
         },
         "receive": {
             "protocol": "udp", "unitCode": 100, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "receive_only",
-            "connections": {"Peer": {"port": port_recv, "unitCode": TEXT_UNIT_CODE_2}},
+            "connections": {"Peer2": {"port": port_recv, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
         },
     }, handler_class=Handler)
     peer = manager.create("peer", {
         "protocol": "udp", "unitCode": TEXT_UNIT_CODE_2, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Composite": {"port": port_recv, "unitCode": 100}},
+        "connections": {"Local": {"port": port_recv, "unitCode": 100, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 

@@ -185,7 +185,7 @@ def describe_field(field: BaseField, name: str | None = None) -> dict[str, Any]:
 
 
 def describe_message(message_class: type, unit_code: int, op_code: int) -> dict[str, Any]:
-    """Full form schema for one registered (unitCode, opCode) message."""
+    """Full form schema for one (unitCode, opCode) message."""
     return {
         "unit_code": unit_code,
         "op_code": op_code,

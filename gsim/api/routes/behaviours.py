@@ -81,7 +81,7 @@ def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, 
         # mean different layouts on two links. Building the real message here is
         # also the validation -- a payload that could never encode fails now.
         prepared = prepare_message(record.own_unit_code, request.op_code,
-                                   record.structures_for(request.unit_name),
+                                   record.interface_for(request.unit_name),
                                    request.payload)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -160,7 +160,7 @@ def _check_trigger_fields(record: Any, request: BehaviourRequest,
         return
 
     # The INCOMING side is keyed by the SENDER's unit code -- a received message
-    # is decoded under `parse_irs(their_code, ...)`, so asking under our own
+    # is decoded under `the link interface under their code`, so asking under our own
     # would find the wrong layout or none. `trigger_unit_name` defaults to the
     # unit we answer, which is the ordinary request/response case.
     peers = record.peers()
@@ -172,7 +172,7 @@ def _check_trigger_fields(record: Any, request: BehaviourRequest,
         )
     try:
         incoming = message_schema(peers[source_unit], request.trigger_op_code,
-                                  record.structures_for(source_unit))
+                                  record.interface_for(source_unit))
     except KeyError as exc:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -181,7 +181,7 @@ def _check_trigger_fields(record: Any, request: BehaviourRequest,
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     outgoing = message_schema(record.own_unit_code, request.op_code,
-                              record.structures_for(request.unit_name))
+                              record.interface_for(request.unit_name))
     incoming_targets = {t["path"]: t for t in field_targets(incoming)}
     outgoing_targets = {t["path"]: t for t in field_targets(outgoing)}
 

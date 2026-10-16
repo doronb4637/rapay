@@ -1,48 +1,44 @@
 """
-Per-link IRS end to end: the bug this whole mechanism exists to fix.
+Per-link IRS end to end: every connection holds its own interface per link.
 
 One process, one unit code, two peers, two structures files that both define
-the SAME opcode under our own code with DIFFERENT layouts. Before per-link
-structures, the second file's import erased the first and every message to both
-peers encoded with whichever one happened to load last -- silently, with no
-error anywhere.
+the SAME opcode under our own code with DIFFERENT layouts. With a global
+registry the second file erased the first; now each link only ever sees its
+own file, and the config's unit names are checked against it.
 
 The files are written to `tmp_path` rather than added under `IRS/Structures`
 because the collision only matters when two genuinely independent files are in
-play, and generating them here keeps the conflicting opcode out of every other
-test's registry.
+play.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
-from core.IRS.irs_parser import IRSAmbiguousError, IRSDataError
+from core.IRS.irs_parser import IRSAmbiguousError, IRSNotFoundError
 from core.connections.config import ConnectionConfig
-from core.tools.general import import_modules, resolve_module_name
+from core.tools.general import resolve_module_name
 
-OUR_CODE = 230              # this file's own range
+OUR_CODE = 230
 PEER_A_CODE = 231
 PEER_B_CODE = 232
 SHARED_OPCODE = 940
 
-#: Both files claim (OUR_CODE, SHARED_OPCODE) -- with different field layouts.
-#: That is exactly the shape that used to silently overwrite.
+#: Both files define (OUR_CODE, SHARED_OPCODE) -- with different field layouts.
 _FILE = """
-from core.IRS import *
-from core.IRS.REGISTRY import register_message
-from core.IRS.core import OperationCode
+from IRS import *
 
-@OperationCode({opcode})
+Us = {ours}
+{peer} = {theirs}
+
+@Definition(unitCode=Us, opCode={opcode})
 class {cls}(Message):
 {fields}
 
-register_message(unitCode={ours}, message={cls})
-
-@OperationCode({opcode})
+@Definition(unitCode={peer}, opCode={opcode})
 class {cls}Reply(Message):
     ack: int = Byte
-
-register_message(unitCode={theirs}, message={cls}Reply)
 """
 
 
@@ -50,28 +46,29 @@ register_message(unitCode={theirs}, message={cls}Reply)
 def link_structures(tmp_path):
     """Two independent structures files, returned as (raw path, namespace)."""
     written = []
-    for cls, fields, theirs in (
-        ("AlphaTrack", "    track_id: int = UInt16\n    heading: int = UInt16", PEER_A_CODE),
-        ("BetaStatus", "    status: int = Byte", PEER_B_CODE),
+    for cls, fields, peer, theirs in (
+        ("AlphaTrack", "    track_id: int = UInt16\n    heading: int = UInt16", "PeerA", PEER_A_CODE),
+        ("BetaStatus", "    status: int = Byte", "PeerB", PEER_B_CODE),
     ):
         path = tmp_path / f"{cls.lower()}_link.py"
-        path.write_text(_FILE.format(cls=cls, fields=fields, ours=OUR_CODE,
+        path.write_text(_FILE.format(cls=cls, fields=fields, ours=OUR_CODE, peer=peer,
                                      theirs=theirs, opcode=SHARED_OPCODE))
         written.append((str(path), resolve_module_name(str(path))))
     return written
 
 
-def _config(ports, structures_a=None, structures_b=None, connection_level=None):
-    peer_a = {"port": ports[0], "unitCode": PEER_A_CODE}
+def _config(ports, structures_a=None, structures_b=None, connection_level=None,
+            own_code=OUR_CODE, code_a=PEER_A_CODE, name_a="PeerA"):
+    peer_a = {"port": ports[0], "unitCode": code_a}
     peer_b = {"port": ports[1], "unitCode": PEER_B_CODE}
     if structures_a:
-        peer_a["Structures"] = [structures_a]
+        peer_a["Structures"] = structures_a if isinstance(structures_a, list) else [structures_a]
     if structures_b:
         peer_b["Structures"] = [structures_b]
     config = {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "unitCode": OUR_CODE,
-        "connections": {"PeerA": peer_a, "PeerB": peer_b},
+        "unitCode": own_code,
+        "connections": {name_a: peer_a, "PeerB": peer_b},
     }
     if connection_level:
         config["Structures"] = [connection_level]
@@ -79,65 +76,70 @@ def _config(ports, structures_a=None, structures_b=None, connection_level=None):
 
 
 # --------------------------------------------------------------------------- #
-# The fix
+# Each link sees only its own file
 # --------------------------------------------------------------------------- #
-def test_two_peers_with_their_own_structures_encode_their_own_layouts(
+def test_two_peers_with_their_own_structures_send_their_own_layouts(
     manager, free_ports, link_structures
 ):
-    """Each link encodes with ITS file, even though both files register the
-    same opcode under our single unit code."""
+    """Same opcode, same sender code -- only the destination's file differs."""
     (path_a, ns_a), (path_b, ns_b) = link_structures
     connection = manager.create("multi", _config(free_ports(2), path_a, path_b))
 
-    assert connection.config.connections["PeerA"].structures == (ns_a,)
-    assert connection.config.connections["PeerB"].structures == (ns_b,)
+    alpha_class = connection.interface_for("PeerA").message_class(OUR_CODE, SHARED_OPCODE)
+    beta_class = connection.interface_for("PeerB").message_class(OUR_CODE, SHARED_OPCODE)
+    assert (alpha_class.__name__, alpha_class.__module__) == ("AlphaTrack", ns_a)
+    assert (beta_class.__name__, beta_class.__module__) == ("BetaStatus", ns_b)
 
     # AlphaTrack is two UInt16s (4 bytes); BetaStatus is one Byte (1 byte).
-    # Same opcode, same sender code -- only the destination differs.
-    alpha = connection._encode(SHARED_OPCODE, {"track_id": 7, "heading": 270}, "PeerA")
-    beta = connection._encode(SHARED_OPCODE, {"status": 3}, "PeerB")
-    assert len(alpha) == 4, alpha
-    assert len(beta) == 1, beta
+    assert len(connection._encode(SHARED_OPCODE, alpha_class(track_id=7, heading=270), "PeerA")) == 4
+    assert len(connection._encode(SHARED_OPCODE, beta_class(status=3), "PeerB")) == 1
 
 
-def test_each_link_decodes_with_its_own_layout(manager, free_ports, link_structures):
-    """The receive side of the same split: a peer's own code selects its file."""
+def test_each_link_decodes_with_the_class_its_route_was_claimed_with(
+    manager, free_ports, link_structures
+):
     (path_a, _), (path_b, _) = link_structures
     connection = manager.create("multi", _config(free_ports(2), path_a, path_b))
 
-    a_reply = connection._decode(PEER_A_CODE, SHARED_OPCODE, b"\x01", "PeerA")
-    b_reply = connection._decode(PEER_B_CODE, SHARED_OPCODE, b"\x01", "PeerB")
-    assert type(a_reply).__name__ == "AlphaTrackReply"
-    assert type(b_reply).__name__ == "BetaStatusReply"
+    route_a, class_a = connection._claim_route("PeerA", SHARED_OPCODE)
+    route_b, class_b = connection._claim_route("PeerB", SHARED_OPCODE)
+    assert route_a == (PEER_A_CODE, SHARED_OPCODE) and route_b == (PEER_B_CODE, SHARED_OPCODE)
+    assert type(connection._decode(class_a, b"\x01")).__name__ == "AlphaTrackReply"
+    assert type(connection._decode(class_b, b"\x01")).__name__ == "BetaStatusReply"
 
 
-def test_manager_imports_every_per_unit_structures_list(manager, free_ports, link_structures):
-    """`_import_config_libs` reads the union, not just a connection-level key --
-    otherwise a per-unit config would import nothing at all."""
+def test_a_class_selector_must_be_the_links_own_layout(manager, free_ports, link_structures):
+    (path_a, _), (path_b, _) = link_structures
+    connection = manager.create("multi", _config(free_ports(2), path_a, path_b))
+    alpha_reply = connection._claim_route("PeerA", SHARED_OPCODE)[1]
+
+    assert connection._claim_route("PeerA", alpha_reply)[1] is alpha_reply
+    with pytest.raises(ValueError, match="not by 'PeerB'"):
+        connection._claim_route("PeerB", alpha_reply)
+
+
+def test_an_opcode_the_link_does_not_define_is_refused_at_subscribe(
+    manager, free_ports, link_structures
+):
+    (path_a, _), (path_b, _) = link_structures
+    connection = manager.create("multi", _config(free_ports(2), path_a, path_b))
+    with pytest.raises(IRSNotFoundError, match="known opcodes"):
+        connection.receive_message(SHARED_OPCODE + 1, unit_name="PeerA", timeout=0.1)
+
+
+def test_every_per_unit_structures_file_is_loaded(manager, free_ports, link_structures):
     (path_a, ns_a), (path_b, ns_b) = link_structures
-    config = ConnectionConfig.from_json(_config(free_ports(2), path_a, path_b))
-    assert config.all_structures_raw == (path_a, path_b)
-
     manager.create("multi", _config(free_ports(2), path_a, path_b))
-    import sys
     assert ns_a in sys.modules and ns_b in sys.modules
 
 
-# --------------------------------------------------------------------------- #
-# What happens without per-link declarations
-# --------------------------------------------------------------------------- #
-def test_unscoped_encode_of_a_duplicated_route_raises_instead_of_guessing(
+def test_two_files_on_one_link_that_disagree_about_a_route_are_refused(
     manager, free_ports, link_structures
 ):
-    """Drop the per-unit declarations and the route is genuinely ambiguous.
-    It now fails loudly at the send rather than encoding the wrong layout."""
+    """Merging is never shadowing: one link cannot mean two layouts by one route."""
     (path_a, _), (path_b, _) = link_structures
-    import_modules([path_a, path_b])        # both loaded, neither link declared
-
-    connection = manager.create("multi", _config(free_ports(2)))
-    with pytest.raises(IRSDataError) as excinfo:
-        connection._encode(SHARED_OPCODE, {"track_id": 7, "heading": 270}, "PeerA")
-    assert isinstance(excinfo.value.__cause__, IRSAmbiguousError)
+    with pytest.raises(IRSAmbiguousError, match=f"opCode={SHARED_OPCODE}"):
+        manager.create("multi", _config(free_ports(2), [path_a, path_b], path_b))
 
 
 def test_connection_level_structures_with_two_units_is_rejected(free_ports, link_structures):
@@ -146,3 +148,26 @@ def test_connection_level_structures_with_two_units_is_rejected(free_ports, link
     (path_a, _), _ = link_structures
     with pytest.raises(ValueError, match="exactly one unit"):
         ConnectionConfig.from_json(_config(free_ports(2), connection_level=path_a))
+
+
+# --------------------------------------------------------------------------- #
+# The config's unit names are the structures file's unit names
+# --------------------------------------------------------------------------- #
+def test_a_unit_code_that_disagrees_with_the_file_is_refused(manager, free_ports, link_structures):
+    (path_a, _), (path_b, _) = link_structures
+    with pytest.raises(ValueError, match=rf"\['PeerA'\]\['unitCode'\] = 99, but .* defines PeerA = {PEER_A_CODE}"):
+        manager.create("multi", _config(free_ports(2), path_a, path_b, code_a=99))
+    with pytest.raises(KeyError):
+        manager.get("multi")
+
+
+def test_a_unit_name_the_file_does_not_define_is_refused(manager, free_ports, link_structures):
+    (path_a, _), (path_b, _) = link_structures
+    with pytest.raises(ValueError, match="defines no unit named 'Alpha'"):
+        manager.create("multi", _config(free_ports(2), path_a, path_b, name_a="Alpha"))
+
+
+def test_our_own_code_must_be_a_unit_of_every_link(manager, free_ports, link_structures):
+    (path_a, _), (path_b, _) = link_structures
+    with pytest.raises(ValueError, match=r"config\['unitCode'\] = 77 is not a unit of"):
+        manager.create("multi", _config(free_ports(2), path_a, path_b, own_code=77))

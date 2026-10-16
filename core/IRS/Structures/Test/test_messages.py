@@ -1,28 +1,18 @@
 """
-The IRS message set used by connections/test_framework.py.
-
-Deliberately small -- two flat messages, one per direction -- because what the
-connection tests have to prove is that the framework hands payloads to IRS and
-gets objects back, not that IRS can express complicated layouts.
+A small two-unit IRS used by the test suite's structures-loading tests.
 
 Both messages share ONE opcode and differ only in which unit sends them. That
-is the point: `parse_irs` selects a layout by the SENDER's unit code, so a
-TrackAck arriving on opcode 60 can only have been chosen by the server's code
-(22) and a TrackReport on the same opcode only by the client's (21).
-
-Importing this module is what registers the layouts -- `register_message` runs
-at module level. The test configs name it under "libs_path", so
-`ConnectionManager.create()` imports it (via `tools.general.import_modules`)
-before the connection object exists.
+is the point: a link looks a layout up by the SENDER's unit code, so a TrackAck
+arriving on opcode 60 can only have come from the server (22) and a TrackReport
+on the same opcode only from the client (21).
 """
 from enum import IntEnum
 
-from IRS.core import *
-from IRS.REGISTRY import register_message
+from IRS import *
 
-#: The two peers in test_framework.test_irs_parser_roundtrip.
-CLIENT_UNIT_CODE = 21
-SERVER_UNIT_CODE = 22
+#: The two peers of this link.
+CLIENT_UNIT_CODE = Client = 21
+SERVER_UNIT_CODE = Server = 22
 #: One opcode, both directions -- see the module docstring.
 TRACK_OPCODE = 60
 
@@ -33,7 +23,8 @@ class E_TrackKind(IntEnum):
     AIR = 0x01
     SURFACE = 0x02
 
-@OperationCode(TRACK_OPCODE)
+
+@Definition(unitCode=CLIENT_UNIT_CODE, opCode=TRACK_OPCODE)
 class TrackReport(Message):
     """Client -> server. 5 bytes on the wire: uint16, uint8, uint16."""
     trackId: int = UInt16
@@ -41,37 +32,8 @@ class TrackReport(Message):
     heading: int = UInt16
 
 
-register_message(
-    unitCode=CLIENT_UNIT_CODE,
-    message=TrackReport
-)
-
-@OperationCode(TRACK_OPCODE)
+@Definition(unitCode=SERVER_UNIT_CODE, opCode=TRACK_OPCODE)
 class TrackAck(Message):
     """Server -> client. 3 bytes on the wire: uint16, uint8."""
     trackId: int = UInt16
     accepted: int = Byte
-
-
-register_message(
-    unitCode=SERVER_UNIT_CODE,
-    message=TrackAck
-)
-
-
-class Text(Message):
-    """Opaque byte payload, consuming whatever the frame carries."""
-    data: list[int] = [Byte, None]
-
-
-#: The transport tests care that bytes arrived, not what they mean -- but
-#: receive_message() rejects unregistered routes, so each still needs a layout.
-TEXT_ROUTES = (
-    (1, 10), (1, 11), (3, 20), (4, 21), (5, 22), (5, 77), (6, 23), (6, 99), (6, 100),
-    (7, 1), (7, 3), (8, 2), (11, 60), (12, 70), (13, 80), (13, 81), (14, 82),
-    (61, 30), (61, 31), (62, 30), (120, 40), (121, 41),
-)
-
-for _unitCode, _opCode in TEXT_ROUTES:
-    Text._opCode = _opCode
-    register_message(unitCode=_unitCode, message=Text)

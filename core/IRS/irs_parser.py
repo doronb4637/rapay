@@ -1,10 +1,28 @@
+"""
+A link's IRS interface: the units and message layouts ONE structures file (or
+the few a link lists together) defines.
+
+There is no process-wide registry. A structures file declares its units as
+module-level int constants (`DTU = 0x02`) and tags each message with
+`@Definition(unitCode=..., opCode=...)`; `Interface.from_module` reads both off
+the imported module. Whoever owns a link -- a `Connection` -- holds its own
+`Interface`, so two links whose files reuse one (unitCode, opCode) never see
+each other's layouts.
+"""
+
 import logging
+from dataclasses import dataclass, field
+from types import ModuleType
+from typing import Mapping
 
 from .buffers import BinaryReader
-from .REGISTRY import *
+from .core import Message, is_definition
 from .annotations import *
 
 logger = logging.getLogger("parser")
+
+Route = tuple[UnitCode, int]
+
 
 """ Exception's """
 class IRSNotFoundError(Exception):
@@ -17,186 +35,90 @@ class IRSDataError(Exception):
 
 
 class IRSAmbiguousError(Exception):
-    """Raised when a lookup matches a route defined by more than one structures
-    module and was given no scope to choose between them.
+    """Raised when the structures files one link combines give one route, or
+    one unit name, two different meanings.
 
     Deliberately NOT a subclass of IRSNotFoundError
     """
 
 
-""" Private Helpers"""
-def _normalise_scope(namespace: NamespaceScope | None) -> tuple[Namespace, ...]:
-    """Normalize the provided namespace scope into a tuple."""
-    if namespace is None:
-        return ()
-    if isinstance(namespace, str):
-        return (namespace,)
-    return tuple(namespace)
+@dataclass(frozen=True)
+class Interface:
+    """What one link can say: its units by name and its layouts by route."""
+    namespaces: tuple[Namespace, ...]
+    units: Mapping[str, UnitCode] = field(default_factory=dict)
+    messages: Mapping[Route, IrsMessage] = field(default_factory=dict)
 
+    @classmethod
+    def from_module(cls, module: ModuleType) -> 'Interface':
+        """Every public module-level int is a unit; every `@Definition`'d
+        message reachable from the module's globals is a layout (imported ones
+        included, so a file may share messages with a sibling)."""
+        units: dict[str, UnitCode] = {}
+        messages: dict[Route, IrsMessage] = {}
+        for name, value in vars(module).items():
+            if name.startswith("_"):
+                continue
+            if isinstance(value, int) and not isinstance(value, bool):
+                units[name] = value
+            elif is_definition(value):
+                _add_message(messages, value, module.__name__)
+        return cls((module.__name__,), units, messages)
 
-def _unit_messages(namespace: Namespace, unitCode: UnitCode) -> dict[OpCode, IrsMessage] | None:
-    """Return the message layouts for a unit code within a namespace, resolving pair aliases.
-    Note:
-        The alias resolution is strictly whole-unit
+    @classmethod
+    def merge(cls, *interfaces: 'Interface') -> 'Interface':
+        """One link built from several structures files. A route or unit name
+        two of them define differently is refused, not shadowed."""
+        namespaces: list[Namespace] = []
+        units: dict[str, UnitCode] = {}
+        unit_source: dict[str, str] = {}
+        messages: dict[Route, IrsMessage] = {}
+        for interface in interfaces:
+            source = ", ".join(interface.namespaces)
+            namespaces.extend(interface.namespaces)
+            for name, code in interface.units.items():
+                if units.get(name, code) != code:
+                    raise IRSAmbiguousError(f"unit {name!r} is {units[name]} in {unit_source[name]} but {code} in {source}")
+                units[name] = code
+                unit_source.setdefault(name, source)
+            for message_class in interface.messages.values():
+                _add_message(messages, message_class, source)
+        return cls(tuple(namespaces), units, messages)
 
-    Args:
-        namespace (Namespace): The namespace catalog to search within.
-        unitCode (UnitCode): The specific unit code whose layouts are requested.
+    def message_class(self, unitCode: UnitCode, opCode: int) -> IrsMessage:
+        """The layout `unitCode` sends under `opCode`.
 
-    Returns:
-        dict[OpCode, IrsMessage] | None: A dictionary mapping operation codes to
-            their corresponding message layouts. Returns None if the unit code is
-            not found and has no registered alias in this namespace.
-    """
-    specification = get_specification(namespace)
-    messages = specification.get(unitCode)
-    if messages is not None:
-        return messages
-    paired_unitCode = PAIR_REGISTRY.get(namespace, {}).get(unitCode)
-    return specification.get(paired_unitCode)
-
-
-def _scope_or_all(scope: tuple[Namespace, ...]) -> tuple[Namespace, ...]:
-    if scope:
-        return scope
-    return tuple(STRUCTURE_REGISTRY)
-
-
-def _scope_suffix(scope: tuple[Namespace, ...]) -> str:
-    return f" [structures: {', '.join(scope)}]" if scope else ""
-
-
-def _get_message_class(unitCode: UnitCode, opCode: OpCode,
-                       namespace: NamespaceScope | None = None) -> IrsMessage | None:
-    """Finds the message class.
-    Args:
-        unitCode (int):Code representing Sending-Unit/Our-Unit.
-        opCode (int): The message code.
-        namespace: the Specification module(s)-(DLL files) this link uses. Omit to search every
-            registered module.
-
-    Returns:
-        IrsMessage: The uninitialized message class,
-        or None when the unit message structure exists but the message
-        is not found.
-    Raises:
-        IRSNotFoundError: when the unit message specification doesn't exists, or
-            when `namespace` names a module that registered nothing.
-        IRSAmbiguousError: when two specification modules define this route and
-            none was named to choose between them.
-    """
-    if not namespace:
-        scope = get_registered_namespaces()
-    else:
-        scope = _normalise_scope(namespace)
-        unknown = [name for name in scope if name not in STRUCTURE_REGISTRY]
-        if unknown:
-            raise IRSNotFoundError(
-                f"Structures module(s) {unknown} registered no messages! "
-                f"known modules: {sorted(STRUCTURE_REGISTRY)}")
-
-    matched: dict[Namespace, IrsMessage] = {}
-    unit_known = False
-    for name in scope:
-        messages = _unit_messages(name, unitCode)
-        if messages is None:
-            continue
-        unit_known = True
-        message_class = messages.get(opCode)
+        Raises:
+            IRSNotFoundError: this link defines no such route.
+        """
+        message_class = self.messages.get((unitCode, opCode))
         if message_class is not None:
-            matched[name] = message_class
-    if not unit_known:
+            return message_class
+        known = sorted(op for unit, op in self.messages if unit == unitCode)
         raise IRSNotFoundError(
-            f"Unit: {unitCode}, Was not found! in unit messages{_scope_suffix(scope)}")
-    # The same message is defined via two namespaces.
-    if len(set(matched.values())) > 1:
+            f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode} "
+            f"[structures: {', '.join(self.namespaces)}]; known opcodes: {known}")
+
+    def routes(self, unitCode: UnitCode) -> list[tuple[int, IrsMessage]]:
+        """Every (opCode, message class) `unitCode` sends on this link, by opcode."""
+        return sorted(((op, message_class) for (unit, op), message_class in self.messages.items()
+                       if unit == unitCode), key=lambda route: route[0])
+
+    def unit_codes(self) -> list[UnitCode]:
+        """Every unit code this link names or sends from."""
+        return sorted({*self.units.values(), *(unit for unit, _op in self.messages)})
+
+
+def _add_message(messages: dict[Route, IrsMessage], message_class: IrsMessage, source: str) -> None:
+    route = (message_class._unitCode, message_class._opCode)
+    existing = messages.get(route)
+    if existing is not None and existing is not message_class:
         raise IRSAmbiguousError(
-            f"(unitCode={unitCode}, opCode={opCode}) is defined by {len(matched)} specification files. "
-            f"modules: {', '.join(sorted(matched))}.\n[*] A specification file describes ONE link, "
-            f"so say which one this link uses: add \"Specification\" inside that unit's "
-            f"connections[<name>] entry.")
-    return next(iter(matched.values()), None)
+            f"(unitCode={route[0]}, opCode={route[1]}) is both {existing.__name__} and "
+            f"{message_class.__name__} [structures: {source}]")
+    messages[route] = message_class
 
 
-""" API functions for IRS"""
-def get_message_class(unitCode: UnitCode, opCode: OpCode,
-                      namespace: NamespaceScope | None = None) -> IrsMessage | None:
-    """The public form of `_get_message_class`"""
-    return _get_message_class(unitCode, opCode, namespace)
-
-
-def validate_irs(unitCode: UnitCode, opCode: OpCode,
-                 namespace: NamespaceScope | None = None) -> None:
-    """Validates the existence of the IRS.
-    Raises:
-        IRSNotFoundError: If the IRS does not exist.
-        IRSAmbiguousError: If two structures modules define it and none was named."""
-    check_unit_message_structure = _get_message_class(unitCode, opCode, namespace)
-    if check_unit_message_structure is not None:
-        return None
-    raise IRSNotFoundError(
-        f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode}"
-        f"{_scope_suffix(_normalise_scope(namespace))}")
-
-
-def is_irs_exist(unitCode: UnitCode, opCode: OpCode,
-                 namespace: NamespaceScope | None = None) -> bool:
-    """ Returns whether the message is registered or not.
-    Raises:
-        IRSAmbiguousError: when two specification files define this (UnitCode, OpCode)
-    """
-    try:
-        return _get_message_class(unitCode, opCode, namespace) is not None
-    except IRSNotFoundError:
-        return False
-
-
-def irs_to_bytes(unitCode: UnitCode, opCode: OpCode, message: IrsMessage | dict,
-                 namespace: NamespaceScope | None = None) -> bytes:
-    if isinstance(message, dict):
-        message_class = _get_message_class(unitCode, opCode, namespace)
-        if message_class is not None:
-            message = message_class.from_dict(message)
-        else:
-            raise IRSNotFoundError(
-                f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode}"
-                f"{_scope_suffix(_normalise_scope(namespace))}")
-    return message.to_bytes()
-
-
-def parse_irs(unitCode: UnitCode, opCode: OpCode, payload: bytes,
-              namespace: NamespaceScope | None = None) -> tuple[str, IrsMessage] | None:
-    message_class = _get_message_class(unitCode, opCode, namespace)
-    if message_class is not None:
-        return message_class.__name__, message_class.from_bytes(BinaryReader(payload))
-    raise IRSNotFoundError(
-        f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode}"
-        f"{_scope_suffix(_normalise_scope(namespace))}")
-
-
-""" Defined for Gsim will be changed in time."""
-""" Introspection -- listing must never raise on ambiguity, only resolution does """
-def list_routes(unitCode: UnitCode,
-                namespace: NamespaceScope | None = None) -> list[tuple[OpCode, IrsMessage, Namespace]]:
-    """Every (opCode, message class, namespace) `unitCode` has a layout for.
-
-    Two modules defining one opcode differently yield two entries here rather
-    than an error: a UI listing what a link can send has to show the conflict,
-    not refuse to render.
-    """
-    routes: list[tuple[OpCode, IrsMessage, Namespace]] = []
-    for name in _scope_or_all(_normalise_scope(namespace)):
-        messages = _unit_messages(name, unitCode)
-        if not messages:
-            continue
-        routes.extend((opCode, message_class, name) for opCode, message_class in messages.items())
-    return sorted(routes, key=lambda route: (route[0], route[2]))
-
-
-def known_unit_codes(namespace: NamespaceScope | None = None) -> list[UnitCode]:
-    """Every unit code with at least one registered layout, aliases included."""
-    codes: set[UnitCode] = set()
-    for name in _scope_or_all(_normalise_scope(namespace)):
-        codes.update(STRUCTURE_REGISTRY.get(name, {}))
-        codes.update(PAIR_REGISTRY.get(name, {}))
-    return sorted(codes)
+def parse(message_class: IrsMessage, payload: bytes) -> Message:
+    """Wire payload -> an instance of the layout the route was subscribed with."""
+    return message_class.from_bytes(BinaryReader(payload))

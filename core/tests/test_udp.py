@@ -7,19 +7,19 @@ import time
 
 import pytest
 
-from core.tests._messages import TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 def test_unit_name_optional_with_a_single_connected_unit(manager, free_port):
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
         "protocol": "udp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
@@ -36,8 +36,8 @@ def test_unit_name_required_with_multiple_units(manager, free_ports):
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
-            "A": {"port": port_a, "unitCode": TEXT_UNIT_CODE},
-            "B": {"port": port_b, "unitCode": TEXT_UNIT_CODE_2},
+            "A": {"port": port_a, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]},
+            "B": {"port": port_b, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]},
         },
     })
     server.start()
@@ -56,12 +56,12 @@ def test_send_only_mode_cannot_receive_and_receive_only_cannot_send(manager, fre
     sender = manager.create("sender", {
         "protocol": "udp", "unitCode": 100, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "send_only",
-        "connections": {"Peer": {"port": port_send, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": port_send, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     receiver = manager.create("receiver", {
         "protocol": "udp", "unitCode": 101, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "receive_only",
-        "connections": {"Peer": {"port": port_recv, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": port_recv, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
@@ -77,7 +77,7 @@ def test_invalid_mode_rejected_at_construction(manager, free_port):
         manager.create("c", {
             "protocol": "udp", "unitCode": 100, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "sideways",
-            "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+            "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         })
 
 
@@ -85,7 +85,7 @@ def test_server_learns_peer_address_from_first_datagram(manager, free_port):
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     server.start()
     assert "Peer" not in server.active_units
@@ -93,7 +93,7 @@ def test_server_learns_peer_address_from_first_datagram(manager, free_port):
     client = manager.create("client", {
         "protocol": "udp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client.start()
     client.send_message(b"hello", 1)
@@ -108,7 +108,7 @@ def test_server_send_before_any_inbound_datagram_raises(manager, free_port):
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     server.start()
     with pytest.raises(ConnectionError):
@@ -121,12 +121,12 @@ def test_malformed_datagram_is_dropped_not_fatal(manager, free_port):
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
         "protocol": "udp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
@@ -149,7 +149,7 @@ def test_connection_not_started_raises_on_send(manager, free_port):
     connection = manager.create("c", {
         "protocol": "udp", "unitCode": 100, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     # Never started -- no transport exists yet.
     with pytest.raises(Exception):

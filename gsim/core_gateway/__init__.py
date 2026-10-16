@@ -8,7 +8,7 @@ swappable and greppable from one directory.
 
     bootstrap.py   puts <repo-root> on sys.path (must import first)
     schema.py      IRS message class -> JSON form schema
-    registry.py    namespace-scoped read-only view of the IRS registry
+    registry.py    read-only view of a link's IRS interface
     payloads.py    form payload -> a built IRS message, ready to encode
     filters.py     which RECEIVED messages are worth logging at all
     runtime.py     GSim's connection registry, logs, and thread bridge
@@ -24,7 +24,8 @@ from .filters import ACTIONS, EQUALITY_OPERATORS, MODES, OPERATORS, FilterSet
 from .payloads import Prepared, prepare_message
 from .registry import (
     IRSAmbiguousError, IRSDataError, IRSNotFoundError,
-    field_targets, known_unit_codes, list_messages, message_schema, resolve_route,
+    field_targets, interface_of_module, known_unit_codes, list_messages, message_schema,
+    resolve_route,
 )
 from .runtime import GSimRuntime, get_runtime
 
@@ -35,7 +36,7 @@ __all__ = [
     "BEHAVIOUR_TRIGGERS",
     "Prepared", "prepare_message",
     "IRSAmbiguousError", "IRSDataError", "IRSNotFoundError",
-    "field_targets", "known_unit_codes", "list_messages", "message_schema",
-    "resolve_route",
+    "field_targets", "interface_of_module", "known_unit_codes", "list_messages",
+    "message_schema", "resolve_route",
     "GSimRuntime", "get_runtime",
 ]

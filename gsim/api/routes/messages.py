@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, status
 from gsim.api.models import SendMessageRequest
 from gsim.core_gateway import (
     IRSAmbiguousError,
+    interface_of_module,
     IRSDataError,
     IRSNotFoundError,
     get_runtime,
@@ -57,16 +58,18 @@ def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -
     """Form schema for an explicit (unitCode, opCode).
 
     The Inspector needs this for RECEIVED messages: a message is decoded with
-    the SENDER's unit code (`parse_irs(their_code, ...)`), so rendering it
+    the SENDER's unit code (`the link interface under their code`), so rendering it
     against our own code would find the wrong layout -- or none at all.
 
-    `namespace` names the structures module the entry was decoded with. It is
-    required whenever two modules define the same route, which is why every log
-    entry carries it: (unitCode, opCode) alone stopped being a unique key the
-    moment structures became per-link.
+    `namespace` names the structures module the entry's class came from, which
+    every log entry carries: (unitCode, opCode) alone is not a unique key once
+    every link has its own structures.
     """
+    if not namespace:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            detail="namespace is required: the structures module the message came from")
     try:
-        return message_schema(unit_code, op_code, [namespace] if namespace else None)
+        return message_schema(unit_code, op_code, interface_of_module(namespace))
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
@@ -77,16 +80,20 @@ def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -
 def connection_messages(connection_name: str, unit_name: str | None = None) -> list[dict[str, Any]]:
     """Every message this connection is permitted to SEND to `unit_name`.
 
-    Queries with OUR unit code, because that is the code `irs_to_bytes` is
-    called with on the way out (`Connection._encode` passes
-    `self._own_unit_code`) -- but scoped to the DESTINATION's structures,
-    because our own code is identical for every peer and therefore cannot say
-    which link's layouts an opcode belongs to. Omitting `unit_name` lists every
+    Queries with OUR unit code, because only messages `@Definition`'d as ours
+    may be sent -- but from the DESTINATION's link interface, because our own
+    code is identical for every peer and therefore cannot say which link's
+    layouts an opcode belongs to. Omitting `unit_name` lists every
     peer's messages, each row tagged with its namespace.
     """
     record = _record(connection_name)
-    structures = record.structures_for(unit_name) if unit_name else None
-    return list_messages(record.own_unit_code, structures)
+    try:
+        interface = record.interface_for(unit_name)
+    except KeyError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except IRSAmbiguousError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return list_messages(record.own_unit_code, interface)
 
 
 @router.get("/incoming")
@@ -94,9 +101,8 @@ def connection_incoming(connection_name: str, unit_name: str | None = None) -> l
     """Every message this connection can RECEIVE, per peer.
 
     The mirror of `/messages` above, and genuinely a different query rather than
-    the same one re-labelled: outbound is keyed by OUR unit code (the one
-    `irs_to_bytes` is called with), inbound by THEIRS (the one `parse_irs`
-    decodes under). Asking the outbound question about inbound traffic finds the
+    the same one re-labelled: outbound is keyed by OUR unit code, inbound by
+    THEIRS. Asking the outbound question about inbound traffic finds the
     wrong layouts, or none.
 
     This is the same lookup `runtime._install_receive_handlers` performs to
@@ -118,7 +124,7 @@ def connection_incoming(connection_name: str, unit_name: str | None = None) -> l
         # dialog has to key its rules the same way.
         {**summary, "unit_name": peer_name}
         for peer_name, peer_code in peers.items()
-        for summary in list_messages(peer_code, record.structures_for(peer_name))
+        for summary in list_messages(peer_code, record.interface_for(peer_name))
     ]
 
 
@@ -127,9 +133,8 @@ def message_form_schema(connection_name: str, op_code: int,
                         unit_name: str | None = None) -> dict[str, Any]:
     """The recursive form schema the Inspector renders, for one destination."""
     record = _record(connection_name)
-    structures = record.structures_for(unit_name) if unit_name else None
     try:
-        return message_schema(record.own_unit_code, op_code, structures)
+        return message_schema(record.own_unit_code, op_code, record.interface_for(unit_name))
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
@@ -149,7 +154,7 @@ def send_message(connection_name: str, request: SendMessageRequest) -> dict[str,
         return get_runtime().send(connection_name, request.unit_name, request.op_code,
                                   request.payload)
     except KeyError as exc:
-        # No layout registered for this route -- the request named an opcode this
+        # No layout for this route -- the request named an opcode this
         # link's structures do not define.
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:

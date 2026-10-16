@@ -373,13 +373,12 @@ class DdsConnection(Connection):
             unit_name = speakers[0]
         return super()._resolve_route(unit_name, key)
 
-    def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
+    def _route_class(self, unit_name: UnitName, selector: OpCode, route_key: RouteKey) -> None:
         """
-        DDS registers no IRS layouts, so the base `validate_irs` could never
-        pass here. The question it asks is still the right one -- "could this
-        route ever deliver?" -- so it is asked of the Interface: a topic this
-        unit does not subscribe, or a unit that does not publish it, is a
-        subscription that would block forever.
+        Samples arrive typed, so there is no class to parse with -- but "could
+        this route ever deliver?" is still the right question, asked of the DDS
+        Interface: a topic this unit does not subscribe, or a unit that does not
+        publish it, is a subscription that would block forever.
         """
         _unit_code, key = route_key
         spec = self._dds.topic_for(key)

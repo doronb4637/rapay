@@ -10,15 +10,13 @@ depends on nothing else in this repo and because that is the only spelling that
 survives copying `IRS/` out on its own.
 
 Left alone, those two spellings are two different top-level names, so Python
-builds two INDEPENDENT module objects: two `STRUCTURE_REGISTRY` dicts, two
+builds two INDEPENDENT module objects: two `Message` base classes, two
 `MessageMeta` metaclasses, two `Field`/`BitField` classes. That failure is
 close to undebuggable, because nothing about it looks like an import problem:
 
-  * a structures file prints a fully populated `STRUCTURE_REGISTRY` at its own
-    end, while `irs_parser._get_message_class` reads an empty `{}` and raises
-    `IRSNotFoundError`. The namespace KEY is correct in both -- `register_message`
-    captures the module's real `__name__` via `sys._getframe`, which is the same
-    string either way. Only the dict it landed in differs.
+  * a structures file's messages subclass the OTHER copy's `Message`, so
+    `is_definition` -- and with it `Interface.from_module` -- finds no layouts
+    in a file that plainly defines them.
   * every `isinstance(field, Field)` check downstream misses, because the
     message's fields are instances of the other copy's classes. GSim's schema
     builder degrades to "No widget for this IRS field type" for every field of
@@ -35,10 +33,10 @@ objects that already exist under `core.IRS`, both eagerly for the package
 itself and lazily, via a `sys.meta_path` finder, for every submodule.
 
 The finder is the load-bearing half. Aliasing only `sys.modules["IRS"]` looks
-sufficient and is not: `from IRS.REGISTRY import register_message` would then
-find the aliased package, walk its `__path__` straight back into `core/IRS/`,
-and EXECUTE `REGISTRY.py` a second time under the name `IRS.REGISTRY` -- the
-identical two-registries bug wearing a different name. Nor is an eager loop
+sufficient and is not: `from IRS.core import Message` would then find the
+aliased package, walk its `__path__` straight back into `core/IRS/`, and
+EXECUTE `core.py` a second time under the name `IRS.core` -- the identical
+two-copies bug wearing a different name. Nor is an eager loop
 over already-imported submodules enough: `core/IRS/__init__.py` does not import
 `irs_parser`, and `IRS.Structures.<pkg>.<file>` does not exist until a config
 names it, so the mapping has to stay live rather than be snapshotted once.
@@ -96,11 +94,10 @@ class _AliasFinder(MetaPathFinder, Loader):
         """Already executed by `create_module`; only undo the machinery's damage.
 
         `_init_module_attrs` leaves `__name__` alone (it only fills attributes
-        that are still `None`) -- which is the one that matters, since
-        `REGISTRY._getting_struct_name` reads it to key the registry. But it
-        assigns `__spec__`/`__loader__` unconditionally, and this is the very
-        module object the REAL name is bound to, so it would be left claiming to
-        be `IRS.REGISTRY` when it is `core.IRS.REGISTRY` -- misdirecting
+        that are still `None`). But it assigns `__spec__`/`__loader__`
+        unconditionally, and this is the very module object the REAL name is
+        bound to, so it would be left claiming to be `IRS.core` when it is
+        `core.IRS.core` -- misdirecting
         `importlib.reload` and pickling. Put the originals back.
         """
         original = self._originals.pop(id(module), None)
@@ -139,8 +136,8 @@ def install() -> None:
         )
         raise ImportError(
             f"a second {_ALIAS_ROOT!r} module is already imported, which would give "
-            f"this process two independent IRS registries and two sets of field "
-            f"classes -- messages would register where nothing reads them, and "
+            f"this process two independent sets of IRS message and field classes -- "
+            f"structures files would define layouts nothing recognises, and "
             f"every isinstance() check against an IRS type would miss.\n"
             f"  already imported {_ALIAS_ROOT}: {existing_file}\n"
             f"  this one ({__name__.rpartition('.')[0]}): {this_file}\n"

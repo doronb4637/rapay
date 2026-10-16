@@ -12,6 +12,7 @@ import asyncio
 import pytest
 
 from core.connections._routes import RouteTable
+from core.tests._messages import Text_200_1 as LAYOUT
 
 ROUTE_A = (7, 1)
 ROUTE_B = (7, 2)
@@ -39,6 +40,12 @@ def noop(_message) -> None:
     ...
 
 
+def owner(table, route):
+    """Just the owner half of `owner_of`'s (owner, message class)."""
+    owned = table.owner_of(route)
+    return None if owned is None else owned[0]
+
+
 # --------------------------------------------------------------------------- #
 # Ownership
 # --------------------------------------------------------------------------- #
@@ -47,18 +54,25 @@ def test_a_fresh_route_has_no_owner(table):
 
 
 def test_claiming_a_route_makes_its_future_the_owner(table, loop):
-    future = table.claim(ROUTE_A, loop)
-    assert table.owner_of(ROUTE_A) is future
+    future = table.claim(ROUTE_A, LAYOUT, loop)
+    assert owner(table, ROUTE_A) is future
 
 
 def test_a_registered_callback_is_the_owner(table):
-    table.register_callback(ROUTE_A, noop)
-    assert table.owner_of(ROUTE_A) is noop
+    table.register_callback(ROUTE_A, noop, LAYOUT)
+    assert owner(table, ROUTE_A) is noop
+
+
+def test_a_route_parses_with_the_class_it_was_claimed_with(table, loop):
+    future = table.claim(ROUTE_A, LAYOUT, loop)
+    assert table.owner_of(ROUTE_A) == (future, LAYOUT)
+    table.register_callback(ROUTE_B, noop, None)
+    assert table.owner_of(ROUTE_B) == (noop, None)
 
 
 def test_a_done_future_stops_being_the_owner(table, loop):
     """The slot is only held while the receive is actually in flight."""
-    future = table.claim(ROUTE_A, loop)
+    future = table.claim(ROUTE_A, LAYOUT, loop)
     future.cancel()
     assert table.owner_of(ROUTE_A) is None
 
@@ -67,40 +81,40 @@ def test_a_done_future_stops_being_the_owner(table, loop):
 # The rule: a route is polled or handled, never both
 # --------------------------------------------------------------------------- #
 def test_a_second_claim_on_a_live_route_is_refused(table, loop):
-    table.claim(ROUTE_A, loop)
+    table.claim(ROUTE_A, LAYOUT, loop)
     with pytest.raises(RuntimeError, match="only one receive_message"):
-        table.claim(ROUTE_A, loop)
+        table.claim(ROUTE_A, LAYOUT, loop)
 
 
 def test_claiming_over_a_callback_is_refused(table, loop):
-    table.register_callback(ROUTE_A, noop)
+    table.register_callback(ROUTE_A, noop, LAYOUT)
     with pytest.raises(RuntimeError, match="already has an on-receive callback"):
-        table.claim(ROUTE_A, loop)
+        table.claim(ROUTE_A, LAYOUT, loop)
 
 
 def test_registering_a_callback_over_a_live_claim_is_refused(table, loop):
-    table.claim(ROUTE_A, loop)
+    table.claim(ROUTE_A, LAYOUT, loop)
     with pytest.raises(RuntimeError, match="cannot be polled and handled at once"):
-        table.register_callback(ROUTE_A, noop)
+        table.register_callback(ROUTE_A, noop, LAYOUT)
 
 
 def test_a_second_callback_on_one_route_is_refused(table):
-    table.register_callback(ROUTE_A, noop)
+    table.register_callback(ROUTE_A, noop, LAYOUT)
     with pytest.raises(RuntimeError, match="already has an on-receive callback"):
-        table.register_callback(ROUTE_A, noop)
+        table.register_callback(ROUTE_A, noop, LAYOUT)
 
 
 def test_a_settled_claim_frees_the_route_for_a_callback(table, loop):
-    future = table.claim(ROUTE_A, loop)
+    future = table.claim(ROUTE_A, LAYOUT, loop)
     table.settle(ROUTE_A, future)
-    table.register_callback(ROUTE_A, noop)  # must not raise
-    assert table.owner_of(ROUTE_A) is noop
+    table.register_callback(ROUTE_A, noop, LAYOUT)  # must not raise
+    assert owner(table, ROUTE_A) is noop
 
 
 def test_routes_are_independent(table, loop):
-    table.claim(ROUTE_A, loop)
-    table.register_callback(ROUTE_B, noop)  # different route, no interference
-    assert table.owner_of(ROUTE_B) is noop
+    table.claim(ROUTE_A, LAYOUT, loop)
+    table.register_callback(ROUTE_B, noop, LAYOUT)  # different route, no interference
+    assert owner(table, ROUTE_B) is noop
 
 
 # --------------------------------------------------------------------------- #
@@ -110,24 +124,24 @@ def test_settle_removes_only_our_own_future(table, loop):
     """An abandoned call reaching `settle` late must not evict the subscriber
     that has since taken the slot -- that would strand them exactly as this
     whole rule exists to prevent."""
-    first = table.claim(ROUTE_A, loop)
+    first = table.claim(ROUTE_A, LAYOUT, loop)
     table.settle(ROUTE_A, first)
-    second = table.claim(ROUTE_A, loop)
+    second = table.claim(ROUTE_A, LAYOUT, loop)
 
     table.settle(ROUTE_A, first)  # the late arrival
 
-    assert table.owner_of(ROUTE_A) is second
+    assert owner(table, ROUTE_A) is second
 
 
 def test_release_frees_the_route_and_cancels_the_future(table, loop):
-    future = table.claim(ROUTE_A, loop)
+    future = table.claim(ROUTE_A, LAYOUT, loop)
     table.release(ROUTE_A, future)
     assert future.cancelled()
     assert table.owner_of(ROUTE_A) is None
 
 
 def test_release_leaves_an_already_settled_future_alone(table, loop):
-    future = table.claim(ROUTE_A, loop)
+    future = table.claim(ROUTE_A, LAYOUT, loop)
     future.set_result("delivered")
     table.release(ROUTE_A, future)
     assert future.result() == "delivered"
@@ -151,7 +165,7 @@ def test_unregister_connect_reports_whether_there_was_one(table):
 
 
 def test_unregister_callback_reports_whether_there_was_one(table):
-    table.register_callback(ROUTE_A, noop)
+    table.register_callback(ROUTE_A, noop, LAYOUT)
     assert table.unregister_callback(ROUTE_A) is True
     assert table.unregister_callback(ROUTE_A) is False
 
@@ -160,27 +174,27 @@ def test_unregister_callback_reports_whether_there_was_one(table):
 # Per-unit teardown
 # --------------------------------------------------------------------------- #
 def test_drop_unit_fails_parked_receives_for_that_unit_only(table, loop):
-    doomed = table.claim(ROUTE_A, loop)
-    survivor = table.claim(OTHER_UNIT_ROUTE, loop)
+    doomed = table.claim(ROUTE_A, LAYOUT, loop)
+    survivor = table.claim(OTHER_UNIT_ROUTE, LAYOUT, loop)
     reason = ConnectionError("unit 'Peer' disconnected: echo timeout")
 
     table.drop_unit(7, reason)
 
     assert doomed.exception() is reason
     assert not survivor.done()
-    assert table.owner_of(OTHER_UNIT_ROUTE) is survivor
+    assert owner(table, OTHER_UNIT_ROUTE) is survivor
 
 
 def test_drop_unit_removes_callbacks_for_that_unit_only(table):
-    table.register_callback(ROUTE_A, noop)
-    table.register_callback(ROUTE_B, noop)
-    table.register_callback(OTHER_UNIT_ROUTE, noop)
+    table.register_callback(ROUTE_A, noop, LAYOUT)
+    table.register_callback(ROUTE_B, noop, LAYOUT)
+    table.register_callback(OTHER_UNIT_ROUTE, noop, LAYOUT)
 
     table.drop_unit(7, ConnectionError("gone"))
 
     assert table.owner_of(ROUTE_A) is None
     assert table.owner_of(ROUTE_B) is None
-    assert table.owner_of(OTHER_UNIT_ROUTE) is noop
+    assert owner(table, OTHER_UNIT_ROUTE) is noop
 
 
 def test_drop_unit_keeps_the_connect_callback(table):
@@ -193,7 +207,7 @@ def test_drop_unit_keeps_the_connect_callback(table):
 def test_drop_unit_with_an_unknown_code_is_a_no_op(table, loop):
     """`Connection` looks the code up and may get None for a unit it never had
     one for; nothing should match, and nothing should blow up."""
-    future = table.claim(ROUTE_A, loop)
+    future = table.claim(ROUTE_A, LAYOUT, loop)
     table.drop_unit(None, ConnectionError("gone"))
     assert not future.done()
 
@@ -202,8 +216,8 @@ def test_drop_unit_with_an_unknown_code_is_a_no_op(table, loop):
 # Connection teardown
 # --------------------------------------------------------------------------- #
 def test_fail_all_subscriptions_releases_every_parked_receive(table, loop):
-    first = table.claim(ROUTE_A, loop)
-    second = table.claim(OTHER_UNIT_ROUTE, loop)
+    first = table.claim(ROUTE_A, LAYOUT, loop)
+    second = table.claim(OTHER_UNIT_ROUTE, LAYOUT, loop)
     reason = ConnectionError("closed")
 
     table.fail_all_subscriptions(reason)
@@ -214,7 +228,7 @@ def test_fail_all_subscriptions_releases_every_parked_receive(table, loop):
 
 
 def test_fail_all_subscriptions_leaves_a_delivered_future_alone(table, loop):
-    future = table.claim(ROUTE_A, loop)
+    future = table.claim(ROUTE_A, LAYOUT, loop)
     future.set_result("delivered")
     table.fail_all_subscriptions(ConnectionError("closed"))
     assert future.result() == "delivered"

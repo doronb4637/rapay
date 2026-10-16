@@ -8,14 +8,14 @@ import pytest
 from core.connections.config import TransportProtocol
 from core.connections.manager import ConnectionManager
 from core.connections.udp import UdpConnection
-from core.tests._messages import TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
 
 
 def _udp_config(port, **overrides):
     cfg = {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }
     cfg.update(overrides)
     return cfg
@@ -99,12 +99,12 @@ def test_create_composite_registers_only_the_composite(manager, free_ports):
         "transport": {
             "protocol": "udp", "unitCode": 100, "side": "client",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "send_only",
-            "connections": {"Peer": {"port": port_send, "unitCode": TEXT_UNIT_CODE}},
+            "connections": {"Peer": {"port": port_send, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         },
         "receive": {
             "protocol": "udp", "unitCode": 100, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "receive_only",
-            "connections": {"Peer": {"port": port_recv, "unitCode": TEXT_UNIT_CODE}},
+            "connections": {"Peer": {"port": port_recv, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         },
     })
     assert manager.get("beacon") is composite
@@ -124,25 +124,35 @@ def test_a_failed_create_composite_registers_nothing(manager, free_ports):
               "local_ip": "127.0.0.1"}
     with pytest.raises(ValueError, match="more than one send-capable"):
         manager.create_composite("beacon", {
-            "a": {**duplex, "connections": {"Peer": {"port": port_a, "unitCode": TEXT_UNIT_CODE}}},
-            "b": {**duplex, "connections": {"Peer": {"port": port_b, "unitCode": TEXT_UNIT_CODE}}},
+            "a": {**duplex, "connections": {"Peer": {"port": port_a, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}}},
+            "b": {**duplex, "connections": {"Peer": {"port": port_b, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}}},
         })
     assert manager._connections == {}
 
 
 # --------------------------------------------------------------------------- #
-# _import_config_libs / "Structures": a path, or a module name imported as-is
+# "Structures": a path, or a module name imported as-is
 # --------------------------------------------------------------------------- #
 #: The structures modules this repo ships inside a real package, so they can be
-#: named the dotted way. Nothing is prefixed onto an entry any more -- a dotted
-#: entry IS the module name.
+#: named the dotted way. Nothing is prefixed onto an entry -- a dotted entry IS
+#: the module name.
 TEST_MESSAGES = "core.IRS.Structures.Test.test_messages"
-TIFUL_MESSAGES = "core.IRS.Structures.Tiful.tiful_to_dtu"
 
 
-def test_structures_key_is_a_noop_when_absent(manager, free_port):
-    # No exception, no import side effect -- just proves absence is fine.
-    manager.create("c", _udp_config(free_port))
+def _track_config(port, structures):
+    """We are test_messages' Client (21), talking to its Server (22)."""
+    return {
+        "protocol": "udp", "unitCode": 21, "side": "server",
+        "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"Server": {"port": port, "unitCode": 22, "Structures": structures}},
+    }
+
+
+def test_a_link_without_structures_is_refused(manager, free_port):
+    config = _track_config(free_port, [])
+    with pytest.raises(ValueError, match="has no 'Structures'"):
+        manager.create("c", config)
+    assert manager._connections == {}
 
 
 def test_a_dotted_structures_entry_is_imported_verbatim(manager, free_port):
@@ -155,7 +165,7 @@ def test_a_dotted_structures_entry_is_imported_verbatim(manager, free_port):
     was importable all along. A dotted entry is now an ordinary import.
     """
     sys.modules.pop(TEST_MESSAGES, None)
-    manager.create("c", _udp_config(free_port, Structures=[TEST_MESSAGES]))
+    manager.create("c", _track_config(free_port, [TEST_MESSAGES]))
     assert TEST_MESSAGES in sys.modules
 
 
@@ -163,34 +173,27 @@ def test_a_dotted_entry_that_is_not_importable_names_the_entry(manager, free_por
     """The error a user can act on: what they wrote, not a package name
     invented three layers down."""
     with pytest.raises(ModuleNotFoundError, match=r"Nope\.messages"):
-        manager.create("c", _udp_config(free_port, Structures=["Nope.messages"]))
+        manager.create("c", _track_config(free_port, ["Nope.messages"]))
 
 
-def test_structures_import_happens_before_the_connection_object_is_instantiated(manager, free_port):
+def test_the_link_interface_is_ready_when_create_returns(manager, free_port):
     """So a config can never come up unable to receive messages it declares
-    layouts for -- `_import_config_libs` runs strictly before `impl_cls(...)`
-    in `create()`."""
-    from core.IRS.REGISTRY import get_specification
-    from core.IRS.Structures.Test.test_messages import CLIENT_UNIT_CODE, TRACK_OPCODE
+    layouts for."""
+    from core.IRS.Structures.Test.test_messages import (CLIENT_UNIT_CODE, SERVER_UNIT_CODE,
+                                                         TRACK_OPCODE, TrackAck, TrackReport)
 
-    connection = manager.create("c", _udp_config(
-        free_port, Structures=[TEST_MESSAGES]
-    ))
-    # If import ran, the layout is already registered by the time we get the
-    # connection object back -- no separate "warm up" step needed. Asserted
-    # inside the module's own namespace, which is what the config named.
-    registered = get_specification(TEST_MESSAGES)
-    assert TRACK_OPCODE in registered[CLIENT_UNIT_CODE]
-    assert connection is not None
+    connection = manager.create("c", _track_config(free_port, [TEST_MESSAGES]))
+    interface = connection.interface_for("Server")
+    assert interface.message_class(CLIENT_UNIT_CODE, TRACK_OPCODE) is TrackReport
+    assert interface.message_class(SERVER_UNIT_CODE, TRACK_OPCODE) is TrackAck
 
 
 # --------------------------------------------------------------------------- #
-# Namespace resolution: what a config declares must equal what gets registered
+# Module naming: what a config declares must equal what gets imported
 # --------------------------------------------------------------------------- #
-def test_import_modules_returns_the_namespace_resolve_module_name_predicts():
-    """The anti-drift guarantee the whole per-link design rests on: config
-    resolution and the actual import go through one function, so a link can
-    never be scoped to a namespace nothing registered under."""
+def test_import_modules_loads_the_module_resolve_module_name_predicts():
+    """Config resolution and the actual import go through one function, so a
+    link's declared namespace is always the module it really loaded."""
     import importlib
     from pathlib import Path
 
@@ -198,27 +201,24 @@ def test_import_modules_returns_the_namespace_resolve_module_name_predicts():
 
     module_file = str(Path(importlib.import_module(TEST_MESSAGES).__file__).resolve())
     spellings = [TEST_MESSAGES, module_file]
-    assert import_modules(spellings) == [resolve_module_name(s) for s in spellings]
+    names = [module.__name__ for module in import_modules(spellings)]
+    assert names == [resolve_module_name(s) for s in spellings]
     # A dotted entry keeps its own name; a path gets a synthetic one derived
-    # from the path. Two spellings of one file are two namespaces -- on purpose:
+    # from the path. Two spellings of one file are two modules -- on purpose:
     # collapsing them is what used to require a folder to be special.
-    assert import_modules(spellings)[0] == TEST_MESSAGES
+    assert names[0] == TEST_MESSAGES
 
 
 def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
     """The file named is the file that runs -- location decides nothing.
 
-    Resolution used to branch on WHERE a file sat, and then -- once that was
-    fixed -- still NAMED every picked file as a member of a structures package
-    inside the app. Both tie a file the user keeps wherever they like to a
-    folder this repo has to keep alive, and both fail the same way the moment
-    it moves: `No module named '<that package>'` for a file sitting right there
-    on disk. The namespace is derived from the path itself now, under a
-    synthetic root that is nothing on disk and is never searched for.
+    The namespace is derived from the path itself, under a synthetic root that
+    is nothing on disk and is never searched for, so a file kept anywhere loads
+    without this repo keeping any folder alive for it.
     """
     from pathlib import Path
 
-    from core.IRS.REGISTRY import get_specification
+    from core.IRS.irs_parser import Interface
     from core.tools.general import import_modules, resolve_module_name
     import core.IRS.Structures.Test.test_messages as module
     from core.IRS.Structures.Test.test_messages import CLIENT_UNIT_CODE, TRACK_OPCODE
@@ -228,17 +228,16 @@ def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
     # <root>.<real folder chain>.<stem> -- nothing in it names a real package.
     assert name.startswith("irs_structures."), name
     assert name.endswith(".test_messages"), name
-    # ...and it really is imported from the file, registering under that name.
-    assert import_modules([by_path]) == [name]
-    assert TRACK_OPCODE in get_specification(name)[CLIENT_UNIT_CODE]
+    [loaded] = import_modules([by_path])
+    assert loaded.__name__ == name
+    interface = Interface.from_module(loaded)
+    assert interface.message_class(CLIENT_UNIT_CODE, TRACK_OPCODE).__name__ == "TrackReport"
 
 
 def test_a_structures_path_that_does_not_exist_names_the_missing_file(tmp_path):
     """The likeliest bad entry is a config written on another machine: a
     structures path is absolute and absolute paths are not portable. Absent must
     read as absent, not as a file that failed to import."""
-    import pytest
-
     from core.tools.general import import_modules
 
     missing = tmp_path / "gone" / "messages.py"
@@ -246,20 +245,26 @@ def test_a_structures_path_that_does_not_exist_names_the_missing_file(tmp_path):
         import_modules([str(missing)])
 
 
+def test_a_file_with_no_definition_is_not_a_structures_file(tmp_path):
+    from core.tools.general import import_modules
+
+    path = tmp_path / "empty_messages.py"
+    path.write_text("from IRS import *\nUnit = 1\n")
+    with pytest.raises(ImportError, match="defines no @Definition message"):
+        import_modules([str(path)])
+
+
 def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):
     """`sys.modules[path.stem]` used to collapse both onto one entry, so the
     second import silently erased the first."""
-    from core.IRS.REGISTRY import get_specification
+    from core.IRS.irs_parser import Interface
     from core.tools.general import import_modules
 
     body = (
-        "from core.IRS import *\n"
-        "from core.IRS.REGISTRY import register_message\n"
-        "from core.IRS.core import OperationCode\n"
-        "@OperationCode(950)\n"
+        "from IRS import *\n"
+        "@Definition(unitCode=24{n}, opCode=950)\n"
         "class M{n}(Message):\n"
         "    v: int = UInt16\n"
-        "register_message(unitCode=24{n}, message=M{n})\n"
     )
     paths = []
     for n in (1, 2):
@@ -269,20 +274,7 @@ def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):
         target.write_text(body.format(n=n))
         paths.append(str(target))
 
-    namespaces = import_modules(paths)
-    assert namespaces[0] != namespaces[1], namespaces
-    assert get_specification(namespaces[0])[241][950].__name__ == "M1"
-    assert get_specification(namespaces[1])[242][950].__name__ == "M2"
-
-
-def test_import_config_libs_imports_every_per_unit_list(manager, free_ports):
-    """Reads the union across units, not just a connection-level key."""
-    config = _udp_config(free_ports(1)[0], connections={
-        "A": {"port": free_ports(1)[0], "unitCode": TEXT_UNIT_CODE,
-              "Structures": [TEST_MESSAGES]},
-        "B": {"port": free_ports(1)[0], "unitCode": TEXT_UNIT_CODE + 1,
-              "Structures": [TIFUL_MESSAGES]},
-    })
-    manager.create("c", config)
-    assert TEST_MESSAGES in sys.modules
-    assert TIFUL_MESSAGES in sys.modules
+    first, second = import_modules(paths)
+    assert first.__name__ != second.__name__
+    assert Interface.from_module(first).message_class(241, 950).__name__ == "M1"
+    assert Interface.from_module(second).message_class(242, 950).__name__ == "M2"

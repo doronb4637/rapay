@@ -15,19 +15,23 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Coroutine, Iterable, Protocol
 
-from core.annotations import IrsMessage, Namespace, OpCode, UnitCode
-from core.IRS.irs_parser import IRSDataError, irs_to_bytes, parse_irs, validate_irs
-from core.tools.general import extract_opcode, import_modules
+from core.annotations import IrsMessage, OpCode, UnitCode
+from core.IRS import Message, is_definition
+from core.IRS.irs_parser import Interface, IRSDataError, parse
+from core.tools.general import extract_opcode
 
 from ._echo import UnitEchoSupervisor
-from ._routes import (ConnectCallback, MessageKey, ReceiveCallback, RouteKey, RouteTable,
-                      UnitName, describe_key)
-from .config import ConnectionConfig, EchoSettings
+from ._routes import (ConnectCallback, MessageClass, MessageKey, Owner, ReceiveCallback, RouteKey,
+                      RouteTable, UnitName, describe_key)
+from .config import ConnectionConfig, EchoSettings, load_interfaces
 from .framing import pack_message
 
 logger = logging.getLogger("connmgr")
 
 TriggerFunction = Callable[[], Any]
+#: What a send takes: a `@Definition` message instance (it carries its own
+#: route), raw bytes with an explicit opcode, or -- on DDS -- a typed sample.
+Outbound = Message | bytes
 ConnectedTarget = int | UnitName | Iterable[UnitName]
 #: A periodic schedule's key. The unit is None for a DDS broadcast, which has no
 #: single destination.
@@ -44,14 +48,15 @@ class Unit(Protocol):
     def active_units(self) -> set[str]: ...
     def start(self, retry: bool = False) -> None: ...
     def close(self, timeout: float | int | None = 5.0) -> None: ...
-    def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
+    def send_message(self, data: Outbound, opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
     def receive_message(self, opcode: OpCode, unit_name: str | None = None,
                         timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage: ...
     def handle_on_receive(self, opcode: OpCode, callback_func: ReceiveCallback, unit_name: str | None = None) -> None: ...
     def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool: ...
     def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None: ...
     def stop_on_connect(self, unit_name: str | None = None) -> bool: ...
-    def periodic_sending(self, data: IrsMessage | dict[str, Any], interval: int | float,
+    def interface_for(self, unit_name: str | None = None) -> Interface: ...
+    def periodic_sending(self, data: Outbound, interval: int | float,
                          opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
     def stop_periodic(self, opcode: OpCode,
                       unit_name: str | None = None) -> bool: ...
@@ -166,11 +171,10 @@ class Connection(ABC):
 
     def __init__(self, config: ConnectionConfig) -> None:
         self.config = config
-        # Imported here, not by the manager, so a connection built directly
-        # still has its message layouts registered.
-        if config.all_structures_raw:
-            logger.info("importing message libraries %s", list(config.all_structures_raw))
-            import_modules(list(config.all_structures_raw))
+        # Loaded here, not by the manager, so a connection built directly still
+        # knows its links -- and a config naming units its structures don't
+        # define fails before any socket opens.
+        self._interfaces: dict[UnitName, Interface] = load_interfaces(config)
         self._loop_thread = get_event_loop_thread()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._started = False
@@ -189,8 +193,6 @@ class Connection(ABC):
         self._echo: EchoSettings = config.echo
         self._unit_echo: dict[UnitName, EchoSettings] = config.unit_echoes
         self._echo_supervisor: UnitEchoSupervisor = UnitEchoSupervisor(self)
-        self._structures: tuple[Namespace, ...] = config.structures
-        self._unit_structures: dict[UnitName, tuple[Namespace, ...]] = config.unit_structures
         atexit.register(self.close)
 
     # ------------------------------------------------------------------ #
@@ -232,13 +234,25 @@ class Connection(ABC):
 
     def _send_key(self, data: Any, opCode: OpCode | None) -> MessageKey:
         """
-        The key an outbound `data` goes out under. An IRS message carries its own
-        opcode, so `opCode` is optional for it and, if given, must agree; a dict
-        or bytes has none, so it is required. DDS derives the key from the sample.
+        The key an outbound `data` goes out under. A message carries its own
+        route from `@Definition`, so `opCode` is optional for it and, if given,
+        must agree -- and its unit must be US, since the header is stamped with
+        our code. Bytes carry nothing, so `opCode` is required (as it is with no
+        data at all, for `stop_periodic`). DDS derives the key from the sample.
         """
-        own = getattr(data, "_opCode", None)  # not truthiness: opcode 0 is valid
-        if own is None:
+        if data is None or isinstance(data, (bytes, bytearray, memoryview)):
             return self._message_key(opCode)
+        if not isinstance(data, Message):
+            raise TypeError(
+                f"send_message takes a @Definition message instance or bytes, got {type(data).__name__}")
+        message_class = type(data)
+        if not is_definition(message_class):
+            raise TypeError(f"{message_class.__name__} has no @Definition(unitCode=..., opCode=...)")
+        if message_class._unitCode != self._own_unit_code:
+            raise ValueError(
+                f"{message_class.__name__} is sent by unit {message_class._unitCode}, but this "
+                f"connection is unit {self._own_unit_code}")
+        own = message_class._opCode
         if opCode is not None and self._message_key(opCode) != own:
             raise ValueError(
                 f"the message is opcode {own}, but the call names opcode {self._message_key(opCode)}")
@@ -379,10 +393,13 @@ class Connection(ABC):
     def _echo_for(self, unit_name: UnitName) -> EchoSettings:
         return self._unit_echo.get(unit_name, self._echo)
 
-    def _structures_for(self, unit_name: UnitName) -> tuple[Namespace, ...]:
-        """The structures namespaces scoping this unit's layouts. Empty means
-        unscoped: every registered module is searched."""
-        return self._unit_structures.get(unit_name, self._structures)
+    def interface_for(self, unit_name: str | None = None) -> Interface:
+        """The IRS interface of the link to `unit_name` (omittable with one unit)."""
+        unit = self._resolve_unit(unit_name)
+        interface = self._interfaces.get(unit)
+        if interface is None:
+            raise ValueError(f"{self.config.protocol.value} connections have no IRS interface")
+        return interface
 
     async def _disconnect_unit(self, unit_name: str, reason: str = "echo timeout") -> None:
         """
@@ -416,13 +433,13 @@ class Connection(ABC):
         """
         if self._closing or self._echo_supervisor.consume(unit_name, key):
             return
-        unit_code = self._unit_code_for(unit_name)
-        route_key: RouteKey = (unit_code, key)
-        owner = self._routes.owner_of(route_key)
-        if owner is None:
+        route_key: RouteKey = (self._unit_code_for(unit_name), key)
+        owned = self._routes.owner_of(route_key)
+        if owned is None:
             return
+        owner, message_class = owned
         try:
-            message = self._decode(unit_code, key, payload, unit_name)
+            message = self._decode(message_class, payload)
         except Exception as exc:
             logger.exception(
                 "dropping a message IRS could not parse (unit=%s, %s): %s",
@@ -430,8 +447,7 @@ class Connection(ABC):
             return
         self._deliver(owner, route_key, message, unit_name, key)
 
-    def _deliver(self, owner: asyncio.Future[IrsMessage] | ReceiveCallback,
-                 route_key: RouteKey, message: IrsMessage,
+    def _deliver(self, owner: Owner, route_key: RouteKey, message: IrsMessage,
                  unit_name: str, key: MessageKey) -> None:
         """Release a parked `receive_message()` (freeing its route), or run the
         standing callback on an executor thread (keeping it)."""
@@ -445,19 +461,25 @@ class Connection(ABC):
     # Codec hooks -- native payloads by default; FramedConnection adds IRS
     # ------------------------------------------------------------------ #
     @abstractmethod
-    def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
+    def _route_class(self, unit_name: UnitName, selector: OpCode, route_key: RouteKey) -> MessageClass:
         """
-        Raise if this connection could never deliver `route_key` -- subscribing
-        to a message we don't define is our bug, and must not become a
-        `receive_message` that never returns.
+        The class `route_key`'s payloads are parsed with, raising if this
+        connection could never deliver it -- subscribing to a message we don't
+        define is our bug, and must not become a `receive_message` that never
+        returns.
         """
         ...
+
+    def _claim_route(self, unit_name: str | None, selector: OpCode) -> tuple[RouteKey, MessageClass]:
+        """A caller's (unit, selector) -> the route to own and its parse class."""
+        unit, route_key = self._resolve_route(unit_name, self._message_key(selector))
+        return route_key, self._route_class(unit, selector, route_key)
 
     def _encode(self, key: MessageKey, message: Any, unit_name: UnitName | None) -> Any:
         """Application message -> wire payload."""
         return message
 
-    def _decode(self, unit_code: UnitCode, key: MessageKey, payload: Any, unit_name: UnitName) -> Any:
+    def _decode(self, message_class: MessageClass, payload: Any) -> Any:
         """Wire payload -> application message."""
         return payload
 
@@ -506,12 +528,12 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None,
+    def send_message(self, data: Outbound, opcode: OpCode | None = None,
                      unit_name: str | None = None) -> None:
         """
-        Encode `data` via IRS (bytes pass through) and send it to `unit_name`,
-        which may be omitted when only one unit is configured. `opcode` is
-        required on framed links; on DDS the sample names its own topic.
+        Send `data` to `unit_name`, which may be omitted when only one unit is
+        configured. A `@Definition` message goes out under its own opcode;
+        bytes pass through and need `opcode`. On DDS the sample names its topic.
         """
         key = self._send_key(data, opcode)
         unit = self._send_unit(unit_name, key)
@@ -581,7 +603,9 @@ class Connection(ABC):
     def receive_message(self, opcode: OpCode, unit_name: str | None = None,
         timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage:
         """
-        Block until a message on (unit, opcode) arrives and return it, decoded.
+        Block until a message on (unit, opcode) arrives and return it, parsed
+        with the route's class. `opcode` is the message class itself or its
+        int/"0x.." opcode, resolved against that unit's structures.
 
         Nothing is buffered: only an in-flight call receives, and only one may be
         in flight per route. `trigger_function` runs after the route is claimed,
@@ -591,11 +615,9 @@ class Connection(ABC):
         Raises `TimeoutError` on timeout and `ConnectionError` if the unit drops
         or the connection closes while waiting.
         """
-        key = self._message_key(opcode)
-        unit, route_key = self._resolve_route(unit_name, key)
-        self._validate_route(unit, route_key)
+        route_key, message_class = self._claim_route(unit_name, opcode)
         future: asyncio.Future[IrsMessage] = self._loop_thread.call_on_loop(
-            self._routes.claim, route_key, self._loop_thread.loop
+            self._routes.claim, route_key, message_class, self._loop_thread.loop
         )
         if trigger_function is not None:
             try:
@@ -622,10 +644,9 @@ class Connection(ABC):
         """
         if not callable(callback_func):
             raise TypeError(f"callback_func must be callable, got {callback_func!r}")
-        key = self._message_key(opcode)
-        unit, route_key = self._resolve_route(unit_name, key)
-        self._validate_route(unit, route_key)
-        self._loop_thread.call_on_loop(self._routes.register_callback, route_key, callback_func)
+        route_key, message_class = self._claim_route(unit_name, opcode)
+        self._loop_thread.call_on_loop(
+            self._routes.register_callback, route_key, callback_func, message_class)
 
     def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         """Remove the route's standing callback. True if there was one; a call
@@ -659,7 +680,7 @@ class Connection(ABC):
 
     def periodic_sending(
         self,
-        data: IrsMessage | dict[str, Any],
+        data: Outbound,
         interval: int | float,
         opcode: OpCode | None = None,
         unit_name: str | None = None,
@@ -765,34 +786,38 @@ class FramedConnection(Connection):
         """Header (stamped with OUR unit code) + payload."""
         return pack_message(self._own_unit_code, opcode, data)
 
-    def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
-        validate_irs(*route_key, self._structures_for(unit_name))
+    def _route_class(self, unit_name: UnitName, selector: OpCode, route_key: RouteKey) -> IrsMessage:
+        """The layout THEIR unit code sends on this opcode, from this link's own
+        structures. A class selector must be exactly that layout."""
+        unit_code, opcode = route_key
+        if is_definition(selector) and selector._unitCode != unit_code:
+            raise ValueError(
+                f"{selector.__name__} is sent by unit {selector._unitCode}, not by "
+                f"{unit_name!r} (unit {unit_code})")
+        message_class = self._interfaces[unit_name].message_class(unit_code, opcode)
+        if is_definition(selector) and selector is not message_class:
+            same_name = selector.__qualname__ == message_class.__qualname__
+            raise ValueError(
+                f"{selector.__module__}.{selector.__qualname__} is not part of the link to "
+                f"{unit_name!r}: its structures define {message_class.__module__}."
+                f"{message_class.__qualname__} on this route"
+                + (" -- the same file imported twice under two names; import the message the "
+                   "way the config names the file, or take it from interface_for()" if same_name else ""))
+        return message_class
 
-    def _encode(self, opcode: OpCode, message: IrsMessage | bytes, unit_name: UnitName) -> bytes:
-        """
-        Stamped with OUR unit code. `unit_name` selects the layout: our code is
-        the same for every peer, so only the destination's structures can tell
-        two links apart. Bytes pass through.
-        """
+    def _encode(self, opcode: OpCode, message: Message | bytes, unit_name: UnitName) -> bytes:
+        """The message's own layout; bytes pass through. Stamped with OUR unit
+        code by `_frame`, which `_send_key` already checked the message is."""
         if isinstance(message, (bytes, bytearray, memoryview)):
             return message
-        structures = self._structures_for(unit_name)
         try:
-            return irs_to_bytes(self._own_unit_code, opcode, message, structures)
+            return message.to_bytes()
         except Exception as exc:
-            raise IRSDataError(
-                f"irs_to_bytes(unitCode={self._own_unit_code}, opCode={opcode}, "
-                f"structures={list(structures) or 'any'}) failed: {exc}"
-            ) from exc
+            raise IRSDataError(f"{type(message).__name__}.to_bytes() failed: {exc}") from exc
 
-    def _decode(self, unit_code: UnitCode, opcode: OpCode, payload: bytes, unit_name: UnitName) -> IrsMessage:
-        """Parsed with THEIR unit code and this link's structures."""
-        structures = self._structures_for(unit_name)
+    def _decode(self, message_class: IrsMessage, payload: bytes) -> Message:
+        """Parsed with the class the route was claimed with."""
         try:
-            _name, message = parse_irs(unit_code, opcode, payload, structures)
+            return parse(message_class, payload)
         except Exception as exc:
-            raise IRSDataError(
-                f"parse_irs(unitCode={unit_code}, opCode={opcode}, "
-                f"structures={list(structures) or 'any'}) failed: {exc}"
-            ) from exc
-        return message
+            raise IRSDataError(f"{message_class.__name__}.from_bytes() failed: {exc}") from exc

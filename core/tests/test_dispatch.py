@@ -11,7 +11,7 @@ import pytest
 
 from core.connections.framing import pack_message
 
-from core.tests._messages import (PING_OPCODE, PING_UNIT_CODE, TEXT_UNIT_CODE,
+from core.tests._messages import (MESSAGES, E_Kind, Ping, PING_OPCODE, PING_UNIT_CODE, TEXT_UNIT_CODE,
                                   TEXT_UNIT_CODE_2)
 
 
@@ -29,13 +29,13 @@ def _pair(manager, port, server_unit_code=100, client_unit_code=101,
     server = manager.create("server", {
         "protocol": "udp", "unitCode": server_unit_code, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": port, "unitCode": peer_unit_code}},
+        "connections": {"Peer": {"port": port, "unitCode": peer_unit_code, "Structures": [MESSAGES]}},
         **extra,
     })
     client = manager.create("client", {
         "protocol": "udp", "unitCode": client_unit_code, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": port, "unitCode": peer_unit_code}},
+        "connections": {"Peer": {"port": port, "unitCode": peer_unit_code, "Structures": [MESSAGES]}},
     })
     manager.start_all()
     return server, client
@@ -50,6 +50,47 @@ def test_message_sent_before_anyone_subscribes_is_dropped(manager, free_port):
     time.sleep(0.2)
     with pytest.raises(TimeoutError):
         server.receive_message(1, unit_name="Peer", timeout=0.3)
+
+
+def _ping_pair(manager, port):
+    """`server` hears unit "Server" (210, which sends Ping); `sender` IS 210."""
+    server = manager.create("server", {
+        "protocol": "udp", "unitCode": 100, "side": "server",
+        "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"Server": {"port": port, "unitCode": PING_UNIT_CODE, "Structures": [MESSAGES]}},
+    })
+    sender = manager.create("sender", {
+        "protocol": "udp", "unitCode": PING_UNIT_CODE, "side": "client",
+        "ip": "127.0.0.1", "local_ip": "127.0.0.1",
+        "connections": {"Local": {"port": port, "unitCode": 100, "Structures": [MESSAGES]}},
+    })
+    manager.start_all()
+    return server, sender
+
+
+def test_a_class_selector_receives_an_instance_of_that_class(manager, free_port):
+    """The route stores the class it was claimed with and parses with it --
+    no lookup between the wire and the caller."""
+    server, sender = _ping_pair(manager, free_port)
+    message = server.receive_message(
+        Ping, unit_name="Server", timeout=3,
+        trigger_function=lambda: sender.send_message(Ping(seq=1, kind=E_Kind.B, value=2)))
+    assert type(message) is Ping
+    assert (message.seq, message.kind, message.value) == (1, E_Kind.B, 2)
+
+
+def test_an_int_selector_resolves_to_the_links_class(manager, free_port):
+    server, sender = _ping_pair(manager, free_port)
+    message = server.receive_message(
+        PING_OPCODE, unit_name="Server", timeout=3,
+        trigger_function=lambda: sender.send_message(Ping(seq=3, kind=E_Kind.A, value=4)))
+    assert type(message) is Ping
+
+
+def test_a_class_another_unit_sends_is_refused_as_a_selector(manager, free_port):
+    server, client = _pair(manager, free_port)
+    with pytest.raises(ValueError, match="sent by unit 210, not by 'Peer'"):
+        server.receive_message(Ping, unit_name="Peer", timeout=0.1)
 
 
 def test_receive_message_delivers_matching_opcode_and_unit(manager, free_port):
@@ -229,19 +270,19 @@ def test_malformed_payload_is_dropped_and_the_receive_stays_parked(manager, free
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         # PING_UNIT_CODE: opcode 21 is registered as Ping, whose body is 5 bytes.
-        "connections": {"Peer": {"port": free_port, "unitCode": PING_UNIT_CODE}},
+        "connections": {"Server": {"port": free_port, "unitCode": PING_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     sender = manager.create("sender", {
         "protocol": "udp", "unitCode": PING_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Server": {"port": free_port, "unitCode": PING_UNIT_CODE}},
+        "connections": {"Server": {"port": free_port, "unitCode": PING_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
     t_result = {}
     def _run():
         try:
-            t_result["value"] = server.receive_message(PING_OPCODE, unit_name="Peer", timeout=5)
+            t_result["value"] = server.receive_message(PING_OPCODE, unit_name="Server", timeout=5)
         except BaseException as exc:
             t_result["exc"] = exc
     t = threading.Thread(target=_run, daemon=True)
@@ -258,7 +299,7 @@ def test_malformed_payload_is_dropped_and_the_receive_stays_parked(manager, free
 
     # The route still belongs to that caller, so the next VALID message on it
     # is what returns.
-    sender.send_message({"seq": 7, "kind": 1, "value": 9}, PING_OPCODE)
+    sender.send_message(Ping(seq=7, kind=E_Kind.A, value=9))
     t.join(timeout=3)
     assert "exc" not in t_result, t_result
     message = t_result["value"]
@@ -304,8 +345,8 @@ def _two_unit_server(manager, ports):
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
-            "PeerA": {"port": ports[0], "unitCode": TEXT_UNIT_CODE},
-            "PeerB": {"port": ports[1], "unitCode": TEXT_UNIT_CODE_2},
+            "PeerA": {"port": ports[0], "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]},
+            "PeerB": {"port": ports[1], "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]},
         },
     })
 

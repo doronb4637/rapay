@@ -17,14 +17,14 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 
 ### The one rule: `core/` is never modified
 - No edits, monkey-patches or reaching into private attributes (e.g. `ConnectionManager._connections`). If `core` genuinely needs a change, ask the user first.
-- Four authorised exceptions so far, none a precedent: per-link namespaced IRS layouts; `core/IRS/_alias.py` plus `tools.general._assert_registered`; `fill()` and codec fixes (`core/IRS/{core,fields,bitfields}.py`, `core/tests/test_irs_fill.py`); `tools.general` loading a structures path from the path given.
+- Five authorised exceptions so far, none a precedent: per-link namespaced IRS layouts; the global-registry removal (`@Definition`, per-connection `Interface`, `Connection.interface_for`); `core/IRS/_alias.py` plus `tools.general._assert_is_structure`; `fill()` and codec fixes (`core/IRS/{core,fields,bitfields}.py`, `core/tests/test_irs_fill.py`); `tools.general` loading a structures path from the path given.
 - All `core` imports live in `gsim/core_gateway/`. `gsim/api/` and `gsim/web/` call only its public functions (`get_runtime()`, `list_messages()`, `message_schema()`, `build_payload()`, ...).
 - `core_gateway/bootstrap.py` is imported first and puts the repo root (not `core/`) on `sys.path`. `CORE_ROOT` is only a filesystem path for `CONFIGS_DIR`.
 - `gsim/api/models.py` is where GSim may be stricter than `core` (Pydantic contract). It is not a licence to parse `core` internals.
 
 ### Stack and layout
 - Backend: FastAPI + WebSocket (`gsim/api/`), desktop launcher in `gsim/__main__.py`, path logic in `gsim/paths.py`. Frontend: React 18, Vite 5, Tailwind v4 (CSS-first, no `tailwind.config.js`), lucide-react in `gsim/web/`.
-- `core_gateway/` modules: `schema.py` (IRS class -> JSON form schema), `registry.py` (read-only namespaced registry view), `payloads.py` (form payload -> IRS message), `behaviours.py`, `filters.py`, `fieldpath.py`, `delay.py`, `timing.py`, `runtime.py` (connection registry, logs, thread bridge).
+- `core_gateway/` modules: `schema.py` (IRS class -> JSON form schema), `registry.py` (read-only view of a link's IRS `Interface`), `payloads.py` (form payload -> IRS message), `behaviours.py`, `filters.py`, `fieldpath.py`, `delay.py`, `timing.py`, `runtime.py` (connection registry, logs, thread bridge).
 - Routes (`gsim/api/routes/`): `connections`, `messages`, `behaviours`, `filters`, `events` (WebSocket), `files`.
 
 ### Threading
@@ -33,7 +33,7 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 
 ### Schema and payloads
 - `schema.py` introspects `Message._fields_` into `scalar`/`enum`/`struct`/`bitfield`/`array` kinds. Array length decides the kind: `None` is dynamic, a `str` is counted (sibling field), an `int` is fixed.
-- `payloads.prepare_message` resolves the route via `registry.resolve_route`, applies a small pre-pass, then `from_dict(...).fill()`. `runtime.send()` and `PUT /behaviours` are its only callers. IRS's `fill()` owns defaults; do not reintroduce a second defaults table.
+- `payloads.prepare_message` resolves the route via `registry.resolve_route` against the link's `Interface` (`record.interface_for(unit_name)`, straight from core's connection), applies a small pre-pass, then `from_dict(...).fill()`. `runtime.send()` and `PUT /behaviours` are its only callers. IRS's `fill()` owns defaults; do not reintroduce a second defaults table.
 - The pre-pass owns three things: drop blank `""` inputs, pad/truncate fixed arrays to size, and derive counted-array counts from the list (never from the form).
 - An enum with no `0` member is left unset (`None`). A non-zero value no member defines still raises. Bitfield enum bits decode to `None` with a deduped warning instead.
 - Hand `send_message` a built message, not a dict, so the route lookup and `from_dict` are not repeated.
@@ -54,7 +54,7 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 - `index.html` is served `no-store` (`_WebFiles` in `api/app.py`) so a stale shell cannot pin old asset hashes.
 
 ### API contract
-- `ConnectionCreate.structures` is `min_length=1` (mandatory at the API edge; `core` itself accepts none). `_check_consistency` front-runs duplicate peer unit codes and an invalid `side` for the protocol.
+- `ConnectionCreate.structures` is `min_length=1` (core requires it too and checks peer names/codes against it; the API edge gives the modal field-level errors). `_check_consistency` front-runs duplicate peer unit codes and an invalid `side` for the protocol.
 - `to_core_config()` always passes a dict to `ConnectionManager.create()`, never a config name string.
 - Create/edit modal narrows core on purpose: remote IP hidden for listening endpoints (pinned to `"0.0.0.0"`; Multicast keeps it as the group address), `Structures` always on the peer except multicast, and per-peer echo fields are explicit on `PeerSpec`.
 - Save/Load round-trips the whole connection list. Import (`POST /api/connections/import`) bypasses `ConnectionCreate` and passes the raw config to `runtime.create()` so protocol-specific `extra` keys survive. Loading replaces all existing connections after one confirm.

@@ -16,7 +16,7 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - `framing.py`: `(UnitCode, OpCode, DataLength)` little-endian header. `base.py`: event-loop bridge, `Connection` ABC, `FramedConnection`, per-unit state, the `Unit` Protocol.
 - `_routes.py`: `RouteTable`; a route has exactly one owner (subscription XOR callback). `_echo.py`: per-unit heartbeat supervisor. `handlers.py`: declarative `UnitHandler`, `@route`, `@on_connect`.
 - `tcp.py`, `udp.py`, `multicast.py`, `dds.py`, `dds_config.py`, `composite.py`, `manager.py` (factory plus `shutdown_all()`).
-- `connections` owns transports, routing and lifecycle. It does not own the payload codec (`IRS.irs_parser.irs_to_bytes`/`parse_irs`) or helpers (`tools.general`, `tools.file_functions`).
+- `connections` owns transports, routing and lifecycle. It does not own the payload codec (`Message.to_bytes`, `IRS.irs_parser.parse`) or the per-link `Interface`, or helpers (`tools.general`, `tools.file_functions`).
 - `tools` answers what an opcode or unit code is *written as*; this package answers what it must *fit into*. Coercion is `tools`'; range checks stay here.
 
 ### Sync/async boundary
@@ -26,25 +26,26 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 
 ### Framing and codec
 - `FramedConnection` mixes framing into TCP/UDP/Multicast. `DdsConnection` never touches `framing.py`; it passes typed samples through.
-- `_encode` calls `irs_to_bytes` with **our** unit code; `_decode` calls `parse_irs` with the **sender's** code. Raw `bytes` pass through; `parse_irs` returning `None` delivers raw bytes.
+- `_encode` is the message's own `to_bytes()`; the header carries **our** config `unitCode`. `_decode` parses with the class the route was claimed with (`RouteTable` stores it beside the owner). Raw `bytes` pass through on send.
 - A send that IRS cannot encode raises `IRSDataError`. A receive that IRS cannot parse is logged with the traceback and dropped; one bad frame never costs the read loop, the link or a parked `receive_message()`.
-- DDS answers the "could this connection ever deliver this route?" question through the abstract `Connection._validate_route()`. Every subclass must implement it.
+- The abstract `Connection._route_class()` answers "could this connection ever deliver this route, and with which class?". Framed links ask the unit's `Interface`; DDS asks its DDS Interface and returns `None` (samples arrive typed).
 
 ### Structures are per-link
-- A structures file describes one link, usually both directions. Multicast is the exception. `IRS.REGISTRY` keys by namespace (the structures module's `__name__`) first, so two peers sharing our own unit code cannot overwrite each other.
-- `Structures` is declared per unit and resolved at load (`resolve_structures`, same default/override shape as `EchoSettings.resolve`, resolved as a group). Every IRS call takes that scope, read through `_structures_for(unit_name)`.
+- There is no global registry. A structures file describes one link, usually both directions (multicast is the exception): units are its public module-level ints (`DTU = 0x02`), layouts its `@Definition(unitCode=, opCode=)` messages. `IRS.irs_parser.Interface.from_module` reads both.
+- `Structures` is mandatory on tcp/udp/multicast: declared per unit and resolved at load (`resolve_structures`, same default/override shape as `EchoSettings.resolve`, resolved as a group). A unit left with none is a `from_json` `ValueError`; DDS refuses the key.
 - A connection-level `Structures` is legal only with exactly one unit, or on multicast; `from_json` rejects it otherwise.
-- An empty scope means unscoped (all modules searched). An unscoped lookup matching two modules raises `IRSAmbiguousError`, which must not subclass `IRSNotFoundError`.
-- `PAIR_REGISTRY` is a whole-unit alias, namespaced the same way. A unit with its own layouts is never redirected.
-- `tools.general.resolve_module_name` is the single source of the namespace, shared by `ConnectionConfig` and `import_modules`. A `.py` path is always loaded from that path.
+- `config.load_interfaces` (called by `Connection.__init__`) imports each unit's files and merges them into that unit's `Interface`; two files giving one route or unit name two meanings raise `IRSAmbiguousError`, which must not subclass `IRSNotFoundError`. Read it through `interface_for(unit_name)`.
+- `config.validate_interfaces` then requires every `connections[name]` to be a unit of its own file under the same name and code, and our top-level `unitCode` to be one of that file's units.
+- `tools.general.resolve_module_name` is the single source of a file's module name, shared by `ConnectionConfig` and `import_modules`. A `.py` path is always loaded from that path. Application code must use the same module object as the config (same spelling), or class selectors are refused as foreign.
 
 ### Unit routing
-- Top-level `unitCode` is OUR code (required, uint8): stamped into every header and passed to `irs_to_bytes`.
-- `connections[name].unitCode` is THEIR code (required, range- and collision-checked; ports unique too): it keys subscriptions/callbacks/periodic tasks and is passed to `parse_irs`.
+- Top-level `unitCode` is OUR code (required, uint8): stamped into every header, and every message we send must be `@Definition`'d with it.
+- `connections[name].unitCode` is THEIR code (required, range- and collision-checked; ports unique too): it keys subscriptions/callbacks/periodic tasks and selects the sender's layouts in the unit's `Interface`.
 - Inbound routing comes from the transport, not the header. `ConnectionConfig` is `frozen=True, slots=True`; mutating it would desync `Connection`'s caches.
 
 ### Sending and receiving
-- `opcode` is optional on send only when `data` is an `IrsMessage` carrying its own (an explicit one must agree, else `ValueError`); required for dict/bytes (`TypeError`). Same for `periodic_sending`.
+- A send takes a `@Definition` message instance (its opcode is its own; an explicit one must agree, else `ValueError`; its `unitCode` must be ours, else `ValueError`) or bytes with an explicit opcode. Dicts and undecorated messages are a `TypeError`. Same for `periodic_sending`.
+- A receive selector (`receive_message`, `handle_on_receive`, `@route`) is the message class or an int/"0x.." opcode, resolved once at subscribe time against the unit's `Interface`; a class must be exactly that link's layout for THEIR unit code.
 - `unit_name` may be omitted only when exactly one unit is connected. `receive_message()` matches both opcode and resolved unit.
 - The selector is turned into a route key by `_message_key`, `_send_key` and `_send_unit`. DDS overrides all three (selector = topic class, sample or name) and `_resolve_route`.
 - Subscribe-or-drop: no buffering. `_dispatch_incoming` consumes echoes first, then hands the message to the route owner; if none exists the message is discarded.
@@ -101,5 +102,5 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - Config shapes (units, echo, Structures): `core/tests/test_config.py`, `core/tests/test_echo.py`, `core/tests/test_irs_scope.py`.
 - Handlers: `core/connections/handlers.py`, `core/tests/test_handlers.py`, `core/tests/test_on_connect.py`.
 - Receive/trigger patterns: `core/tests/test_dispatch.py`, `core/tests/test_tcp.py`. Periodic sending: `core/tests/test_periodic.py`. Composites: `core/tests/test_composite.py`.
-- Registry and signatures: `core/IRS/REGISTRY.py`, `core/connections/base.py`.
+- Interfaces and signatures: `core/IRS/irs_parser.py`, `core/connections/base.py`, `core/tests/test_interface.py`.
 - DDS: `core/tests/test_dds.py`, `core/DDS/Interfaces/Example/example_interface.py`.

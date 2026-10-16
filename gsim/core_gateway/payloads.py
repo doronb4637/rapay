@@ -28,14 +28,14 @@ An enum with no `0` member is left explicitly unset (`None`) rather than guessed
 """
 from __future__ import annotations
 
-from typing import Any, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 from . import bootstrap  # noqa: F401  -- must precede every `core` import
 
 from core.IRS.bitfields import BitField
 from core.IRS.core import ArrayField, Structure
 
-from .registry import resolve_route
+from .registry import Interface, resolve_route
 
 
 class Prepared(NamedTuple):
@@ -46,15 +46,15 @@ class Prepared(NamedTuple):
     payload: dict[str, Any]      # its canonical `to_dict()` form, for the log
 
 
-def prepare_message(unit_code: int, op_code: int, namespaces: Sequence[str] | None,
+def prepare_message(unit_code: int, op_code: int, interface: Interface,
                     raw: dict[str, Any] | None) -> Prepared:
     """Resolve the route once, then build and complete the message.
 
-    Raises `KeyError` / `IRSAmbiguousError` for an unresolvable route (see
+    Raises `KeyError` for a route the link does not define (see
     `registry.resolve_route`) and `ValueError` for a value IRS refuses, such as a
     number that names no member of an enum.
     """
-    message_class, namespace = resolve_route(unit_code, op_code, namespaces)
+    message_class, namespace = resolve_route(unit_code, op_code, interface)
     message = message_class.from_dict(_prepare(message_class._fields_, raw)).fill()
     return Prepared(message, message_class.__name__, namespace, message.to_dict())
 

@@ -3,6 +3,10 @@
 exactly one thing does. The key is the opcode on IRS-framed links and the topic
 name on DDS; this module only ever hashes and compares it.
 
+Every route also holds the message class it was claimed with, so an inbound
+payload is parsed by exactly the layout its owner asked for -- there is no
+registry to look one up in. DDS stores None: its samples arrive already typed.
+
 `Connection` hands each inbound message to that route's owner: a parked
 `receive_message()` future if one is in flight, else a standing
 `handle_on_receive()` callback, else nobody -- in which case the message is
@@ -27,12 +31,15 @@ from typing import Any, Callable
 from core.annotations import IrsMessage, OpCode, UnitCode
 
 UnitName = str
-#: What names a message on a link: its opcode on IRS-framed links, its topic
-#: name on DDS (which puts no opcode on the wire -- the topic IS the message).
+# OpCode(IRS) | str == topic_name(DDS)
 MessageKey = OpCode | str
 RouteKey = tuple[UnitCode, MessageKey]
 ReceiveCallback = Callable[[IrsMessage], Any]
 ConnectCallback = Callable[[UnitName], Any]
+#: The layout a route's payloads are parsed with; None where the transport
+#: delivers typed samples (DDS).
+MessageClass = IrsMessage | None
+Owner = asyncio.Future[IrsMessage] | ReceiveCallback
 
 
 def describe_key(key: MessageKey) -> str:
@@ -52,29 +59,31 @@ class RouteTable:
     __slots__ = ("_subscriptions", "_callbacks", "_connect_callbacks")
 
     def __init__(self) -> None:
-        self._subscriptions: dict[RouteKey, asyncio.Future[IrsMessage]] = {}
-        self._callbacks: dict[RouteKey, ReceiveCallback] = {}
+        self._subscriptions: dict[RouteKey, tuple[asyncio.Future[IrsMessage], MessageClass]] = {}
+        self._callbacks: dict[RouteKey, tuple[ReceiveCallback, MessageClass]] = {}
         self._connect_callbacks: dict[UnitName, ConnectCallback] = {}
 
     # ------------------------------------------------------------------ #
     # Delivery
     # ------------------------------------------------------------------ #
-    def owner_of(self, route: RouteKey) -> asyncio.Future[IrsMessage] | ReceiveCallback | None:
-        """Who this route currently belongs to, or None if nobody does.
+    def owner_of(self, route: RouteKey) -> tuple[Owner, MessageClass] | None:
+        """Who this route currently belongs to and the class it parses with, or
+        None if nobody owns it.
 
         A parked `receive_message()` outranks a standing callback, though the
         two can never coexist -- the priority only matters for the instant
         between a future being satisfied and its slot being released.
         """
-        future = self._subscriptions.get(route)
-        if future is not None and not future.done():
-            return future
+        subscription = self._subscriptions.get(route)
+        if subscription is not None and not subscription[0].done():
+            return subscription
         return self._callbacks.get(route)
 
     # ------------------------------------------------------------------ #
     # Subscriptions (one in-flight receive_message per route)
     # ------------------------------------------------------------------ #
-    def claim(self, route: RouteKey, loop: asyncio.AbstractEventLoop) -> asyncio.Future[IrsMessage]:
+    def claim(self, route: RouteKey, message_class: MessageClass,
+              loop: asyncio.AbstractEventLoop) -> asyncio.Future[IrsMessage]:
         """
         Register the future that makes `route` subscribed, and return it
         without awaiting.
@@ -95,7 +104,7 @@ class RouteTable:
                 f"call stop_on_receive() before receive_message()"
             )
         existing = self._subscriptions.get(route)
-        if existing is not None and not existing.done():
+        if existing is not None and not existing[0].done():
             # One subscriber per route, by design. Silently replacing the
             # earlier future would strand that caller forever, so say so.
             raise RuntimeError(
@@ -103,7 +112,7 @@ class RouteTable:
                 f"only one receive_message() may be in flight per route"
             )
         future: asyncio.Future[IrsMessage] = loop.create_future()
-        self._subscriptions[route] = future
+        self._subscriptions[route] = (future, message_class)
         return future
 
     def settle(self, route: RouteKey, future: asyncio.Future[IrsMessage]) -> None:
@@ -114,7 +123,8 @@ class RouteTable:
         subscriber may already own the slot, and evicting theirs would strand
         them exactly as this whole rule exists to prevent.
         """
-        if self._subscriptions.get(route) is future:
+        existing = self._subscriptions.get(route)
+        if existing is not None and existing[0] is future:
             del self._subscriptions[route]
 
     def release(self, route: RouteKey, future: asyncio.Future[IrsMessage]) -> None:
@@ -127,9 +137,10 @@ class RouteTable:
     # ------------------------------------------------------------------ #
     # Standing on-receive callbacks
     # ------------------------------------------------------------------ #
-    def register_callback(self, route: RouteKey, callback: ReceiveCallback) -> None:
+    def register_callback(self, route: RouteKey, callback: ReceiveCallback,
+                          message_class: MessageClass) -> None:
         existing = self._subscriptions.get(route)
-        if existing is not None and not existing.done():
+        if existing is not None and not existing[0].done():
             raise RuntimeError(
                 f"route {_describe(route)} has a receive_message() in flight; "
                 f"a route cannot be polled and handled at once"
@@ -139,7 +150,7 @@ class RouteTable:
                 f"route {_describe(route)} already has an on-receive callback; "
                 f"call stop_on_receive() first"
             )
-        self._callbacks[route] = callback
+        self._callbacks[route] = (callback, message_class)
 
     def unregister_callback(self, route: RouteKey) -> bool:
         """True if there was one to remove. A callback already running is left
@@ -178,7 +189,7 @@ class RouteTable:
         in which case nothing matches and nothing is dropped.
         """
         for route in [key for key in self._subscriptions if key[0] == unit_code]:
-            future = self._subscriptions.pop(route)
+            future, _message_class = self._subscriptions.pop(route)
             if not future.done():
                 future.set_exception(reason)
         for route in [key for key in self._callbacks if key[0] == unit_code]:
@@ -188,7 +199,7 @@ class RouteTable:
         """Fail every parked `receive_message()` with `reason` (connection
         teardown). Called last, once sockets and tasks are gone, so the caller
         wakes to a connection that is fully down."""
-        for future in self._subscriptions.values():
+        for future, _message_class in self._subscriptions.values():
             if not future.done():
                 future.set_exception(reason)
         self._subscriptions.clear()

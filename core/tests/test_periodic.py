@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from core.tests._messages import TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
 
 #: Long enough that a sender left running by mistake fires several more times
 #: within a test's observation window; short enough to keep the suite quick.
@@ -42,12 +42,12 @@ def _pair(manager, port):
     server = manager.create("server", {
         "protocol": "udp", "unitCode": 100, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
         "protocol": "udp", "unitCode": 101, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
     return server, client

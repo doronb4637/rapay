@@ -59,13 +59,13 @@ def set_filter(connection_name: str, request: FilterRequest) -> dict[str, Any]:
             detail=f"unknown connected unit {request.unit_name!r}; known: {sorted(peers)}",
         )
     # Queried with the PEER's unit code, not ours: a received message is decoded
-    # under the sender's code (`parse_irs(their_code, ...)`), so asking under our
+    # under the sender's code (`the link interface under their code`), so asking under our
     # own would find the wrong layout or none at all. Scoped to that peer's
     # structures for the usual reason -- one opcode can mean two layouts on two
     # links of the same connection.
     peer_code = peers[request.unit_name]
     try:
-        schema = message_schema(peer_code, request.op_code, record.structures_for(request.unit_name))
+        schema = message_schema(peer_code, request.op_code, record.interface_for(request.unit_name))
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:

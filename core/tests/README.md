@@ -59,7 +59,10 @@ anything in this suite or in `connections` itself. Stick to the `.venv`.
 | file | covers |
 | --- | --- |
 | `conftest.py` | `manager` (auto-`shutdown_all()`), `free_port`/`free_ports`, `receive_in_background` |
-| `_messages.py` | This suite's own registered IRS layouts (unit codes 200-219 -- never overlaps `IRS.Structures.Test.test_messages`'s 1-162) |
+| `_messages.py` | This suite's structures file (`MESSAGES`): the unit names every test config uses, one `@Definition`'d Text layout per (unit, opcode), and `Ping` |
+| `test_interface.py` | `@Definition` and `IRS.irs_parser.Interface`: reading a module, merging files, lookups -- pure |
+| `test_irs_scope.py` | Per-link interfaces end to end, and the config-vs-structures unit name/code validation |
+| `test_send_key.py` | What a send may carry: `@Definition` messages of our own unit, or bytes with an opcode |
 | `test_framing.py` | Pure header pack/unpack, no I/O |
 | `test_config.py` | `ConnectionConfig.from_json` validation/coercion, `EchoSettings` resolution -- pure, no event loop |
 | `test_routes.py` | `RouteTable`: route ownership, subscription-XOR-callback exclusivity, per-unit and whole-connection teardown -- pure, synchronous |
@@ -90,10 +93,8 @@ anything in this suite or in `connections` itself. Stick to the `.venv`.
   connect and disarmed by disconnect -- could be asked directly instead of
   inferred from whether a live socket pair survived. Anything provable there
   belongs there; the socket-level files stay for what genuinely needs a wire.
-- Two connections that both name the same logical peer (e.g. a UDP server and
-  its client, both calling it `"Peer"`) must declare the **same** `unitCode`
-  for that entry -- IRS selects a message layout by that value, not by
-  physical direction, so both ends have to agree on it even though each side
-  also has its own distinct top-level `unitCode` (what it stamps into
-  outgoing headers). Get this wrong and `validate_irs`/`parse_irs` raises
-  `IRSNotFoundError` on whichever side actually tries to decode.
+- Every test link names `"Structures": [MESSAGES]`, and its unit names must
+  be unit constants in `_messages.py` with the same code (`"Peer"` is 200,
+  `"Peer2"`/`"Tracker"` 201, `"Server"` 210, our own codes `Local*` 100-102).
+  A new unit name in a test means a new constant there; a mismatch is a
+  `ValueError` at `create()`, which is the validation working as intended.

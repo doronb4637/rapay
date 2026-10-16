@@ -4,7 +4,7 @@ High-performance binary parsing/serialization engine. Moves all reflection and s
 
 ## Core Commands
 
-- Tests: `.venv/Scripts/python.exe -m pytest core/tests/test_irs_fill.py core/tests/test_endianness.py core/tests/test_irs_scope.py core/tests/test_registry_namespaces.py`, or the full suite from the repo root.
+- Tests: `.venv/Scripts/python.exe -m pytest core/tests/test_irs_fill.py core/tests/test_endianness.py core/tests/test_irs_scope.py core/tests/test_interface.py`, or the full suite from the repo root.
 - Before committing an import change, run the IRS boundary greps from the root `CLAUDE.md`.
 
 ## Architecture & Tech Stack
@@ -14,7 +14,7 @@ High-performance binary parsing/serialization engine. Moves all reflection and s
 - `bitfields`: `BitField`/`BitFieldMeta`, driven by `@baseType(size, endian)`. Annotations become bitwise properties over one internal `_value`; no C-struct bitfields.
 - `core`: `Structure`, `Message`, `ArrayField`. `MessageMeta` turns annotations into the `_fields_` tuple. Arrays are fixed (int length), counted (length names a sibling field) or greedy (`None`).
 - `Structure.__init__(**kwargs)` applies kwargs and fills the rest with defaults, so `to_bytes()` never fails on a fresh object.
-- Registry is namespaced per structures module (one file = one link); see `core/connections/CLAUDE.md` for the scoping rules.
+- No registry. `@Definition(unitCode=, opCode=)` binds a message to its route; `irs_parser.Interface` reads one structures module's units (public module-level ints) and layouts. Its owner (a connection) holds it per link; see `core/connections/CLAUDE.md`.
 - Byte order is a property of a whole specification, declared once per structures file as a module-level `ENDIAN` constant. No declaration means little endian.
 - `@baseType(n)` inherits the file's `ENDIAN`; a second argument overrides it for one type. A type keeps the byte order of the file that *defined* it.
 - Endianness resolves in `IRS.constants.module_endian()` at class-creation time. An `ENDIAN` that is neither `'<'` nor `'>'` raises at import.

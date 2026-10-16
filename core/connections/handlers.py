@@ -1,7 +1,7 @@
 """
 Class-based handlers: sugar over `handle_on_receive` / `handle_on_connect`.
 
-`@route(opCode)` -- or `@route(Topic)` on DDS -- tags a method;
+`@route(Message)` or `@route(opCode)` -- or `@route(Topic)` on DDS -- tags a method;
 `UnitHandler.__init_subclass__` collects the tags at class-definition time.
 `install_handler` then makes one ordinary `handle_on_receive` call per route
 (and one `handle_on_connect` for an `@on_connect` method), so every existing
@@ -21,7 +21,8 @@ _ON_CONNECT_ATTR = "_is_connect_handler"
 
 
 def route(opCode: OpCode) -> Callable[[_F], _F]:
-    """Tag a `UnitHandler` method with the opcode (or DDS topic) it handles;
+    """Tag a `UnitHandler` method with the message class, opcode or DDS topic
+    it handles (an opcode is resolved against the unit's structures on install);
     `UnitHandler.__init_subclass__` turns the tags into registrations."""
     def _tag(func: _F) -> _F:
         setattr(func, _ROUTE_ATTR, opCode)
@@ -51,7 +52,7 @@ class UnitHandler:
     methods with `@route` / `@on_connect`.
     """
     unitCode: int
-    #: selector (opcode, or DDS topic class) -> method name, built once per subclass.
+    #: selector (message class, opcode, or DDS topic class) -> method name, built once per subclass.
     _routes: dict[OpCode, str]
     #: name of the `@on_connect`-tagged method, or None if the subclass has
     #: none. Built once per subclass, alongside `_routes`.

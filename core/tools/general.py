@@ -4,8 +4,10 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
+from types import ModuleType
 
 from core.annotations import *
+from core.IRS import is_definition
 from core.tools.file_functions import resolve_project_path
 
 # A structures file is user data kept anywhere on disk, so a path entry is
@@ -26,7 +28,7 @@ def names_a_file(lib: str) -> bool:
 
 
 def resolve_module_name(lib: str) -> str:
-    """The `__name__` `lib` will register under once imported. Imports nothing.
+    """The `__name__` `lib` will be imported under. Imports nothing.
 
     `import_modules` and `ConnectionConfig` both go through this, so a config's
     declared namespace and the registered one cannot drift.
@@ -58,14 +60,14 @@ def _module_name_for_file(resolved: Path) -> str:
     return f"{_SYNTHETIC_ROOT}.{packages}.{_sanitize(resolved.stem)}"
 
 
-def import_modules(libs: list[str] | str) -> list[str]:
-    """Import each lib so it registers its message types; return each namespace."""
+def import_modules(libs: list[str] | str) -> list[ModuleType]:
+    """Import each structures lib and return its module."""
     if isinstance(libs, str):
         libs = [libs]
     return [_import_one(lib) for lib in libs]
 
 
-def _import_one(lib: str) -> str:
+def _import_one(lib: str) -> ModuleType:
     if names_a_file(lib):
         path = resolve_project_path(lib)
         name = _module_name_for_file(path)
@@ -73,8 +75,9 @@ def _import_one(lib: str) -> str:
     else:
         name = lib
         _import_dotted(lib)
-    _assert_registered(lib, name)
-    return name
+    module = sys.modules[name]
+    _assert_is_structure(lib, module)
+    return module
 
 
 def _import_dotted(lib: str) -> None:
@@ -91,23 +94,18 @@ def _import_dotted(lib: str) -> None:
         ) from exc
 
 
-def _assert_registered(lib: str, name: str) -> None:
-    """Fail here, naming the file, rather than later against an empty registry."""
-    # Local import: core.connections imports this module and needn't load the registry.
-    from core.IRS.REGISTRY import PAIR_REGISTRY, STRUCTURE_REGISTRY
-
-    if name in STRUCTURE_REGISTRY or name in PAIR_REGISTRY:
+def _assert_is_structure(lib: str, module: ModuleType) -> None:
+    """Fail here, naming the file, rather than later with every route missing."""
+    if any(is_definition(value) for value in vars(module).values()):
         return
     # Both import paths short-circuit on sys.modules, so a retry after a fix
     # would otherwise never re-execute.
-    sys.modules.pop(name, None)
+    sys.modules.pop(module.__name__, None)
     raise ImportError(
-        f"structures module {lib!r} imported as {name!r} but registered no "
-        f"messages under that namespace. Either it calls no register_message/"
-        f"register_pair, or it passes an explicit namespace= that does not "
-        f"match, or it reached a DIFFERENT IRS module object than the one being "
-        f"read here (see core/IRS/_alias.py). Known namespaces: "
-        f"{sorted(set(STRUCTURE_REGISTRY) | set(PAIR_REGISTRY)) or 'none'}."
+        f"structures module {lib!r} imported as {module.__name__!r} but defines no "
+        f"@Definition message. Either it tags none, or it reached a DIFFERENT IRS "
+        f"module object than core's (see core/IRS/_alias.py), so its classes are "
+        f"not core.IRS.Message subclasses."
     )
 
 
@@ -154,7 +152,7 @@ def _import_from_file(path: Path, module_name: str) -> None:
                 f"rename one of their containing folders or filenames so a "
                 f"config cannot end up scoped to the wrong one."
             )
-        return          # already loaded; re-executing would re-register everything
+        return          # already loaded; re-executing would mint new message classes
     if not path.is_file():
         # Likeliest cause: a config written on another machine. Without this the
         # error surfaces from exec_module and reads as a broken file.

@@ -9,13 +9,6 @@ from .bitfields import BitField, baseType
 from .fields import BaseField, Field, EnumField
 from .constants import *
 
-def OperationCode(opCode: int):
-    """ add _opCode variable to the message class"""
-    def wrapper(msg: type[Message]) -> type[Message]:
-        msg._opCode = opCode
-        return msg
-    return wrapper
-
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)
 
@@ -208,3 +201,16 @@ class Message(Structure):
         if is_root: return bytes(writer)
 
 
+def Definition(unitCode: int, opCode: int):
+    """Bind a message class to its one route: the unit that SENDS it and its opcode."""
+    def wrapper(msg: type[Message]) -> type[Message]:
+        msg._unitCode = unitCode
+        msg._opCode = opCode
+        return msg
+    return wrapper
+
+
+def is_definition(obj: Any) -> bool:
+    """Whether `obj` is a message class carrying its OWN `@Definition` -- an
+    undecorated subclass of one inherits the attributes but not the route."""
+    return isinstance(obj, type) and issubclass(obj, Message) and "_opCode" in vars(obj)

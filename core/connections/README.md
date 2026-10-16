@@ -26,15 +26,16 @@ connection_framework/
 Transports, routing and lifecycle live here. The payload codec and the
 project's generic helpers do not, and are imported from their own packages:
 
-- **`IRS`** -- `irs_to_bytes` / `parse_irs`, used by `base.Connection._encode`
-  and `._decode`.
+- **`IRS`** -- `@Definition` messages encode themselves (`to_bytes`);
+  `irs_parser.Interface` is one link's units and layouts, and `irs_parser.parse`
+  decodes with the class a route was claimed with.
 - **`tools.general`** -- `extract_opcode` / `validated_opcode` normalise every
   opcode entering the framework (`Connection._message_key`, and
   `config._as_opcode`); `validated_unitcode` does the same for both kinds of
   unit code in `config._as_unit_code`; `import_modules` loads a config's
-  `Structures` message libraries in `Connection.__init__`, which is what
-  populates `IRS.REGISTRY` however the connection was built, and
-  `resolve_module_name` names the namespace each one registers under.
+  `Structures` files in `config.load_interfaces` (called from
+  `Connection.__init__`, so every connection has its interfaces however it was
+  built), and `resolve_module_name` names the module each one loads as.
 - **`tools.file_functions.read_unit_config`** -- turns a unit configuration
   *name* into its JSON, so `mgr.create("radar", "TcpServer")` reads
   `config/Units/TcpServer.json` and this package never builds a config path
@@ -72,39 +73,34 @@ DataLength) rather than re-parsing the format string on every call.
 
 The header stays this framework's business -- TCP needs `DataLength` to find
 message boundaries at all -- and everything after it belongs to the `IRS`
-package. `FramedConnection` overrides the codec hooks (`_encode`, `_decode`),
-which turns on the codec at both boundaries:
+package. There is no global registry: every message class carries its own route
+(`@Definition(unitCode=..., opCode=...)`), and every link has its own
+`Interface` (§3a).
 
 ```python
-connection.send_message(Track(track_id=7, label="alpha"), opCode=60)
-unit, track = connection.receive_message(60, timeout=3)  # -> a Track object
+connection.send_message(Track(track_id=7, heading=90))          # opcode from @Definition
+track = connection.receive_message(TrackAck, timeout=3)          # -> a TrackAck object
+track = connection.receive_message(0x3C, timeout=3)              # same, resolved via the link
 ```
 
-- **Outbound** (`send_message`, `periodic_sending`): `FramedConnection._encode` calls
-  `irs_to_bytes(own_unit_code, opcode, message)` -- **our** code, per §3 --
-  before the result is framed and transmitted. Raw `bytes` are taken as
-  already-encoded and pass through untouched, which is how a caller that
-  assembles its own payload, and the config-supplied echo payload, still work
-  unchanged. `periodic_sending` encodes once, when the schedule is created, so
-  a message that can never be encoded fails in the caller's thread instead of
-  logging forever in the background.
-- **Inbound** (`receive_message`, `handle_on_receive`): `FramedConnection._decode`
-  calls `parse_irs(their_unit_code, opcode, payload)` -- the **sender's** code,
-  since that is what says how the bytes are laid out -- and the resulting
-  message object is what the caller receives. Decoding happens in
-  `_dispatch_incoming` *after* a route owner is found, so a message nobody
-  subscribed to is dropped without paying to parse it.
-- **Both directions wrap the parser in `try`/`except` and re-raise as
-  `IRSDataError`**, naming the unit code and opcode that failed, so a parser
-  bug never surfaces as a bare `KeyError` from somewhere inside the framework.
+- **Outbound** (`send_message`, `periodic_sending`): the message must be
+  `@Definition`'d with **our** unit code (§3) -- anything else is a
+  `ValueError`, a dict or undecorated message a `TypeError`. It goes out under
+  its own opcode, encoded by its own `to_bytes()`; nothing is looked up. Raw
+  `bytes` pass through with an explicit opcode. `periodic_sending` encodes once,
+  when the schedule is created.
+- **Inbound** (`receive_message`, `handle_on_receive`, `@route`): the selector
+  is the message class or its opcode. It is resolved once, at subscribe time,
+  against the unit's `Interface` under the **sender's** code, and the route
+  stores the resulting class beside its owner. `_dispatch_incoming` parses with
+  that class *after* finding the owner, so a message nobody subscribed to is
+  dropped without paying to parse it.
+- **Both directions re-raise codec failures as `IRSDataError`**, naming the
+  class that failed.
 - **Failure is per-message, never per-connection.** On receive that
-  `IRSDataError` is caught one level up, logged as a warning, and that single
-  message is discarded; the read loop keeps running and the next valid message
-  arrives normally.
-- `parse_irs` returning `None` -- the state of the shipped template -- means
-  "no conversion available", and the raw bytes are delivered as-is. A 2-tuple
-  is unwrapped to its second element, since `parse_irs` returns
-  `(message_name, message_object)` and the object is what the caller wants.
+  `IRSDataError` is caught one level up, logged, and that single message is
+  discarded; the read loop keeps running and a parked `receive_message()` keeps
+  waiting for a valid one.
 
 `DdsConnection` keeps `Connection`'s pass-through hooks: its payloads are typed
 DDS samples.
@@ -125,14 +121,14 @@ whole point:
 The **top-level `"unitCode"` is our own** -- who this process is on the wire.
 It is **required** (`ConnectionConfig.from_json` raises `ValueError` without
 it, because there is no sane default for "who am I"), range-checked as a uint8,
-and it is the value stamped into the header of every message we send and passed
-to `irs_to_bytes` when encoding one. A peer reading our message learns who sent
+and it is the value stamped into the header of every message we send -- and the
+`unitCode` every message we send must be `@Definition`'d with. A peer reading our message learns who sent
 it; stamping the *destination's* code there would tell them only what they
 already knew.
 
 Each **`"connections"[name]["unitCode"]` is theirs** -- the remote unit's
-identity. That is what every routing table keys on, and what `parse_irs` is
-handed when decoding something that unit sent us.
+identity. That is what every routing table keys on, and what selects that unit's
+layouts in its link `Interface` when decoding something it sent us.
 
 So in a correctly configured pair, one side's own `unitCode` equals the code
 the other side lists for it, and the same number is used to encode a message
@@ -153,69 +149,76 @@ the same reason. Lookups: `config.connections[name]` (the `UnitEndpoint`),
 hands it to read loops on the event-loop thread, so mutating it afterwards
 would leave those caches describing a configuration that no longer exists.
 
-## 3a. Structures: connection-level default, per-unit override
+## 3a. Structures: every link names its interface
 
-`Structures` names the IRS message-layout module(s) a link uses -- a Python
-dotted name (`"Radar.radar_link"`) or a real filesystem path to a `.py` file
-under `IRS/Structures`, either way resolved to the same namespace by
-`tools.general.resolve_module_name`. It can be set at two levels in one
-config, and both can be present at once:
+`Structures` names the IRS structures file(s) a link speaks -- a Python dotted
+name (`"Radar.radar_link"`) or a real filesystem path to a `.py` file kept
+anywhere, either way named by `tools.general.resolve_module_name`. It is
+**mandatory** on tcp/udp/multicast: a unit that ends up with no list is a
+`ValueError` at load, since without a global registry it could neither send
+nor receive. It can be set at two levels:
 
 ```json
 "unitCode": 22,
-"Structures": ["Shared.default_link"],
 "connections": {
   "RadarUnit":   {"port": 2000, "unitCode": 7, "Structures": ["Radar.radar_link"]},
-  "TrackerUnit": {"port": 2001, "unitCode": 8}
+  "TrackerUnit": {"port": 2001, "unitCode": 8, "Structures": ["Tracker.tracker_link"]}
 }
 ```
 
-- The **connection-level** `"Structures"` (top-level, beside `"unitCode"`) is
-  the default for every peer that doesn't name its own.
-- Each **`connections[name]["Structures"]`** overrides that one peer
-  specifically.
+- Each **`connections[name]["Structures"]`** is that one link's list.
+- A **connection-level** `"Structures"` (top-level, beside `"unitCode"`) is
+  only legal with exactly one configured unit, or on multicast (one sender
+  fanning out to many receivers over a single shared IRS); otherwise
+  `ConnectionConfig.from_json` raises `ValueError`.
 
-Above, `RadarUnit` uses `Radar.radar_link`; `TrackerUnit` has no override, so
-it falls back to the connection-level `Shared.default_link`.
+A structures file declares its units as module-level ints and its layouts with
+`@Definition`:
 
-Two rules keep this from becoming ambiguous:
+```python
+from IRS import *
 
-- **The connection-level form is only legal with exactly one configured
-  unit, or on multicast** (one sender fanning out to many receivers over a
-  single shared IRS). With two or more unicast peers it would scope all of
-  them into one namespace -- the exact collision namespacing exists to
-  prevent -- so `ConnectionConfig.from_json` raises `ValueError` at load
-  time rather than letting it happen silently.
-- **An empty scope means unscoped, not "no layouts."** A peer naming no
-  `Structures` at either level searches every module `IRS.REGISTRY` knows,
-  and a lookup matching two different modules raises `IRSAmbiguousError`
-  naming both, rather than silently picking whichever imported last.
+Tiful = 0x01
+DTU = 0x02
 
-Resolution happens once, in `ConnectionConfig.from_json`
-(`resolve_structures`), and is cached per peer as `UnitEndpoint.structures`;
-`Connection` reads it through `self._structures_for(unit_name)`. Every IRS
-call this package makes -- `irs_to_bytes`/`parse_irs` in `_encode`/`_decode`,
-and the eager `validate_irs` that `receive_message`/`handle_on_receive` run
-at registration time -- is scoped to that peer's resolved namespace, never to
-the whole registry.
+@Definition(unitCode=Tiful, opCode=0x0012)
+class GeneralFlag(Message):
+    Flag: E_Flag
+    value: int = Byte
+```
+
+When the connection is built, `config.load_interfaces` imports each unit's
+files into that unit's `Interface` (several files are merged; two giving one
+route or unit name different meanings raise `IRSAmbiguousError`), and
+`config.validate_interfaces` checks the config against them:
+
+- every `connections[name]` must be a unit of its own file **under the same
+  name and code** -- `"DTU": {"unitCode": 3}` against `DTU = 0x02` fails;
+- our own top-level `unitCode` must be one of that file's units too.
+
+`Connection.interface_for(unit_name)` returns a link's `Interface`. Application
+code that passes a message *class* as a selector must import it as the same
+module object the config loaded (same spelling), or the class is refused as
+foreign to the link.
 
 ## 4. opcode: mandatory on send, subscription key on receive
 
 Every message now carries an `opcode`, and the API is:
 
 ```python
-connection.send_message(data: IrsMessage | bytes, opcode: int | None = None, unit_name: str | None = None) -> None
-connection.receive_message(opcode: int, unit_name: str | None = None,
+connection.send_message(data: Message | bytes, opcode: int | None = None, unit_name: str | None = None) -> None
+connection.receive_message(opcode: int | type[Message], unit_name: str | None = None,
                             timeout: float | int | None = None,
                             trigger_function: Callable[[], Any] | None = None) -> IrsMessage
-connection.handle_on_receive(opcode: int, callback_func: Callable[[bytes], Any],
+connection.handle_on_receive(opcode: int | type[Message], callback_func: Callable[[Message], Any],
                              unit_name: str | None = None) -> None
 connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-Every message declares what kind of message it is: on a framed link `opcode`
-is required everywhere, and omitting it is a `TypeError`. It may be an int, a
-`"0x.."` string, or an IRS message class/object carrying `_opCode`. `unit_name` stays
+Every message declares what kind of message it is: on a framed link a send's
+opcode comes from the message's `@Definition` (an explicit one must agree), and
+bytes need it given. On receive, `opcode` is an int, a `"0x.."` string, or the
+`@Definition`'d message class itself. `unit_name` stays
 optional wherever exactly one unit is connected (auto-resolved from
 `config.connections`); otherwise it's required and validated, with strict
 unit filtering: a `receive_message()` call only ever returns a message
@@ -378,7 +381,7 @@ route -- an ordinary §5b callback, not a new dispatch path. It gets every
 existing rule for free: mutual exclusion with a live `receive_message()` on
 the same route, executor-thread execution (so a route method calls
 `self.unitConnection.send_message(...)` synchronously, no `async`/`await`),
-eager `validate_irs()`, and exceptions logged and swallowed rather than
+eager resolution against the link's `Interface`, and exceptions logged and swallowed rather than
 killing the read loop.
 
 ## 5e. Sending on connect: `handle_on_connect`

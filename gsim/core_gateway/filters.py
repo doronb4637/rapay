@@ -139,7 +139,7 @@ class MessageFilter:
     id: str
     connection_name: str
     unit_name: str          # the SENDER's configured name, as the Received log shows it
-    unit_code: int          # THEIR unit code -- the one the layout is registered under
+    unit_code: int          # THEIR unit code -- the sender the layout is defined for
     op_code: int
     message_name: str
     namespace: str | None

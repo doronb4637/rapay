@@ -135,10 +135,9 @@ exists rather than passing form output straight through:
    every send, and the UI renders the counter read-only so it cannot be desynced
    by hand.
 
-What GSim does *not* have to do: convert the form dict into an IRS object.
-`irs_to_bytes` accepts a plain dict and calls `message_class.from_dict()`
-itself, and `Connection._encode` passes any non-`bytes` straight to it — so the
-Inspector's state *is* the payload.
+Core sends only `@Definition` message instances (or bytes), so
+`payloads.prepare_message` builds the message from the form dict with the
+link's own class (`from_dict(...).fill()`) and hands core that object.
 
 ### 'Edit' rebuilds, it does not mutate
 
@@ -161,11 +160,12 @@ One connection can serve several peers, each named in `connections`. Core's
 callbacks are invoked as `callback(message)` with no route context, so
 `runtime._install_receive_handlers` registers one handler per `(peer, opCode)`
 and closes over the peer's **configured name** — which is exactly what the
-Received log must display. The opCode set for each peer comes from the GLOBAL
-REGISTRY keyed by that peer's unit code, the same lookup `parse_irs` performs,
-so every registered route is one core will accept.
+Received log must display. The opCode set for each peer comes from that link's
+`Interface` (`Connection.interface_for(peer)`) keyed by the peer's unit code, the
+same lookup core resolves the opcode against, so every registered route is one
+core will accept.
 
-A log entry also carries the `unit_code` its layout is registered under — ours
+A log entry also carries the `unit_code` of the message's sender — ours
 on send, the peer's on receive — because the Inspector must fetch the schema
 under the sender's code to render an inbound message correctly.
 

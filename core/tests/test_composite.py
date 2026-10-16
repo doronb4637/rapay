@@ -8,7 +8,7 @@ import pytest
 
 from core.connections.composite import CompositeUnit
 from core.connections.manager import ConnectionManager
-from core.tests._messages import TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
 
 
 def _member(protocol_mode, port, own_code=TEXT_UNIT_CODE, peer_code=TEXT_UNIT_CODE, side="client"):
@@ -22,7 +22,7 @@ def _member(protocol_mode, port, own_code=TEXT_UNIT_CODE, peer_code=TEXT_UNIT_CO
     return {
         "protocol": "udp", "unitCode": own_code, "side": side,
         "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": protocol_mode,
-        "connections": {"Peer": {"port": port, "unitCode": peer_code}},
+        "connections": {"Peer": {"port": port, "unitCode": peer_code, "Structures": [MESSAGES]}},
     }
 
 
@@ -35,7 +35,7 @@ def test_composite_combines_send_only_and_receive_only_members(manager, free_por
     peer = manager.create("peer", {
         "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Beacon": {"port": port_recv, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Beacon": {"port": port_recv, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
@@ -55,7 +55,7 @@ def test_composite_send_uses_the_send_capable_member(manager, free_ports):
     peer = manager.create("peer", {
         "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Beacon": {"port": port_send, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Beacon": {"port": port_send, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
 
@@ -117,7 +117,7 @@ def test_composite_active_units_is_union_of_members(manager, free_ports):
     peer_sender = manager.create("peer_sender", {
         "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "connections": {"Beacon": {"port": port_recv, "unitCode": TEXT_UNIT_CODE}},
+        "connections": {"Beacon": {"port": port_recv, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
     peer_sender.send_message(b"warm-up", 1)  # lets the receive member learn its peer
