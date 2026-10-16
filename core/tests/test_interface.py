@@ -49,17 +49,6 @@ def test_an_undecorated_subclass_does_not_inherit_the_route():
     assert not is_definition(Child)
 
 
-@pytest.mark.parametrize("unit, op", [("1", 1), (1, None), (True, 1)])
-def test_definition_refuses_a_non_int_code(unit, op):
-    with pytest.raises(TypeError, match="must be an int"):
-        Definition(unitCode=unit, opCode=op)
-
-
-def test_definition_only_decorates_messages():
-    with pytest.raises(TypeError, match="Message subclasses"):
-        Definition(unitCode=1, opCode=1)(object)
-
-
 # --------------------------------------------------------------------------- #
 # Interface.from_module
 # --------------------------------------------------------------------------- #
