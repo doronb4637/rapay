@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import logging
 import struct
-from enum import IntEnum, EnumMeta
+from enum import IntEnum, EnumMeta, Enum
 from typing import Any, Callable, TypeVar
 
-from IRS.bitfields import T_Enum
+from IRS import BitField
 from .buffers import BinaryReader, BinaryWriter, get_packer
 from .fields import BaseField
 from .constants import *
@@ -23,13 +25,13 @@ def _warn_once(enum_class: type[IntEnum], field_name: str, value: int) -> None:
         enum_class.__qualname__, field_name, value, enum_class.__qualname__)
 
 
-def baseType(byte_size: int, imposed_endian: str = None) -> T_Enum | BitFieldMeta:
+def baseType(byte_size: int, imposed_endian: str = None) -> T_Enum | BitField:
     """Give an IntEnum or BitField its wire size and byte order.
 
     `endian` defaults to whatever the declaring module declared (`ENDIAN = bigEndian`
     at the top of a structures file).
     """
-    def wrapper(cls: T_Enum | BitFieldMeta) -> T_Enum | BitFieldMeta:
+    def wrapper(cls: T_Enum | BitFieldMeta) -> T_Enum | BitField:
         if imposed_endian is None:
             endian = module_endian(cls.__module__)
         else:
