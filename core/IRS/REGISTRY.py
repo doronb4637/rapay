@@ -31,6 +31,14 @@ STRUCTURE_REGISTRY: dict[Namespace, dict[UnitCode, dict[OpCode, IrsMessage]]] = 
 PAIR_REGISTRY: dict[Namespace, dict[UnitCode, UnitCode]] = {}
 
 
+def short_name(namespace: Namespace) -> str:
+    """`<parent folder>.<file>` of a namespace, for error messages.
+
+    The full namespace of a path-picked file embeds its whole directory chain.
+    """
+    return ".".join(namespace.split(".")[-2:])
+
+
 def _getting_struct_name(depth: int = 2) -> Namespace:
     """Return the calling <Structure>.py name.
 

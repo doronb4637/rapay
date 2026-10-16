@@ -94,7 +94,7 @@ def _import_dotted(lib: str) -> None:
 def _assert_registered(lib: str, name: str) -> None:
     """Fail here, naming the file, rather than later against an empty registry."""
     # Local import: core.connections imports this module and needn't load the registry.
-    from core.IRS.REGISTRY import PAIR_REGISTRY, STRUCTURE_REGISTRY
+    from core.IRS.REGISTRY import PAIR_REGISTRY, STRUCTURE_REGISTRY, short_name
 
     if name in STRUCTURE_REGISTRY or name in PAIR_REGISTRY:
         return
@@ -102,12 +102,12 @@ def _assert_registered(lib: str, name: str) -> None:
     # would otherwise never re-execute.
     sys.modules.pop(name, None)
     raise ImportError(
-        f"structures module {lib!r} imported as {name!r} but registered no "
+        f"structures module {lib!r} (namespace {short_name(name)!r}) registered no "
         f"messages under that namespace. Either it calls no register_message/"
         f"register_pair, or it passes an explicit namespace= that does not "
         f"match, or it reached a DIFFERENT IRS module object than the one being "
         f"read here (see core/IRS/_alias.py). Known namespaces: "
-        f"{sorted(set(STRUCTURE_REGISTRY) | set(PAIR_REGISTRY)) or 'none'}."
+        f"{sorted(map(short_name, set(STRUCTURE_REGISTRY) | set(PAIR_REGISTRY))) or 'none'}."
     )
 
 

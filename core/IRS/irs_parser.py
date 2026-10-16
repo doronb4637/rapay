@@ -63,7 +63,7 @@ def _scope_or_all(scope: tuple[Namespace, ...]) -> tuple[Namespace, ...]:
 
 
 def _scope_suffix(scope: tuple[Namespace, ...]) -> str:
-    return f" [structures: {', '.join(scope)}]" if scope else ""
+    return f" [structures: {', '.join(map(short_name, scope))}]" if scope else ""
 
 
 def _get_message_class(unitCode: UnitCode, opCode: OpCode,
@@ -92,8 +92,8 @@ def _get_message_class(unitCode: UnitCode, opCode: OpCode,
         unknown = [name for name in scope if name not in STRUCTURE_REGISTRY]
         if unknown:
             raise IRSNotFoundError(
-                f"Structures module(s) {unknown} registered no messages! "
-                f"known modules: {sorted(STRUCTURE_REGISTRY)}")
+                f"Structures module(s) {list(map(short_name, unknown))} registered no messages! "
+                f"known modules: {sorted(map(short_name, STRUCTURE_REGISTRY))}")
 
     matched: dict[Namespace, IrsMessage] = {}
     unit_known = False
@@ -112,7 +112,7 @@ def _get_message_class(unitCode: UnitCode, opCode: OpCode,
     if len(set(matched.values())) > 1:
         raise IRSAmbiguousError(
             f"(unitCode={unitCode}, opCode={opCode}) is defined by {len(matched)} specification files. "
-            f"modules: {', '.join(sorted(matched))}.\n[*] A specification file describes ONE link, "
+            f"modules: {', '.join(sorted(map(short_name, matched)))}.\n[*] A specification file describes ONE link, "
             f"so say which one this link uses: add \"Specification\" inside that unit's "
             f"connections[<name>] entry.")
     return next(iter(matched.values()), None)
