@@ -5,7 +5,6 @@ import struct
 from enum import IntEnum, EnumMeta, Enum
 from typing import Any, Callable, TypeVar
 
-from IRS import BitField
 from .buffers import BinaryReader, BinaryWriter, get_packer
 from .fields import BaseField
 from .constants import *
