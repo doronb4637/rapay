@@ -1,14 +1,15 @@
 import logging
 import struct
 from enum import IntEnum, EnumMeta
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
+from IRS.bitfields import T_Enum
 from .buffers import BinaryReader, BinaryWriter, get_packer
 from .fields import BaseField
 from .constants import *
 
 logger = logging.getLogger("IRS.bitfields")
-
+T_Enum = TypeVar("T_Enum", bound=type[Enum])
 _warned_bits: set[tuple[str, str, int]] = set()
 
 
@@ -22,13 +23,13 @@ def _warn_once(enum_class: type[IntEnum], field_name: str, value: int) -> None:
         enum_class.__qualname__, field_name, value, enum_class.__qualname__)
 
 
-def baseType(byte_size: int, imposed_endian: str = None) -> Callable[[type], type]:
+def baseType(byte_size: int, imposed_endian: str = None) -> T_Enum | BitFieldMeta:
     """Give an IntEnum or BitField its wire size and byte order.
 
     `endian` defaults to whatever the declaring module declared (`ENDIAN = bigEndian`
     at the top of a structures file).
     """
-    def wrapper(cls: EnumMeta | BitFieldMeta) -> EnumMeta | BitFieldMeta:
+    def wrapper(cls: T_Enum | BitFieldMeta) -> T_Enum | BitFieldMeta:
         if imposed_endian is None:
             endian = module_endian(cls.__module__)
         else:
