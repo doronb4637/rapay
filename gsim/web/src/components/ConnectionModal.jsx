@@ -11,6 +11,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, FolderOpen, Loader2, Plus, Save, Trash2, X } from 'lucide-react';
 import { Badge, Button, Field, IconButton, Input, PathInput, Select, cx, sideLabel } from './ui';
 import FilePickerModal from './FilePickerModal';
+import { api } from '../api';
+import { hex } from '../lib/format';
 
 //: Only present inside the pywebview desktop shell -- `--server`/browser mode
 //: has no native file dialog, so the Browse button hides rather than errors.
@@ -22,8 +24,10 @@ const SIDES = {
   tcp: ['server', 'client'],
   udp: ['server', 'client'],
   multicast: ['receiver', 'sender'],
-  dds: ['subscriber', 'publisher'],
 };
+// DDS has no side: a node is one unit of a DDS Interface, and what it
+// publishes and subscribes is the Interface's to say.
+const PROTOCOLS = [...Object.keys(SIDES), 'dds'];
 
 // Echo is a point-to-point heartbeat; core arms it per connected peer. It has
 // no meaning for the fan-out protocols, so the section is hidden for them
@@ -44,7 +48,6 @@ const sharedStructures = (form) => FANS_OUT.has(form.protocol);
 // out in the submitted config either way (core requires the key); it is just
 // pinned to a harmless default instead of asked of the user.
 const remoteIpVisible = (form) => {
-  if (form.protocol === 'dds') return false;
   if (form.protocol === 'multicast') return true;   // the group address, needed by both sides
   return form.side === 'client';
 };
@@ -63,7 +66,11 @@ const BLANK = {
   // required field, because 0 is a legal value the user never chose.
   unitCode: '', peers: [{ ...BLANK_PEER }], structures: [''],
   echo_opcode: '', echo_interval: '', echo_timeout: '',
+  // DDS. Blank domain/QoS are filled with core's defaults once fetched.
+  dds_interface: '', unit: '', domain_id: '', qos_file: '', qos_profile: '',
 };
+
+const canBrowseQos = () => typeof window !== 'undefined' && !!window.pywebview?.api?.browse_qos_file;
 
 /**
  * Parse a unit/op code written as decimal ("31") or 0x-prefixed hex ("0x1F").
@@ -156,8 +163,62 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
   // and discard the form mid-edit.
   const pressStartedOnBackdrop = useRef(false);
 
+  const isDds = form.protocol === 'dds';
   const showEcho = ECHO_PROTOCOLS.has(form.protocol);
   const showSharedStructures = sharedStructures(form);
+
+  // DDS: the units the chosen Interface defines, fetched whenever its path
+  // changes, so the unit is picked from a list rather than typed.
+  const [ddsUnits, setDdsUnits] = useState(null);
+  const [ddsError, setDdsError] = useState(null);
+  const [ddsLoading, setDdsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isDds) return undefined;
+    let cancelled = false;
+    api.ddsDefaults().then(
+      (defaults) => !cancelled && setForm((f) => ({
+        ...f,
+        domain_id: f.domain_id === '' ? defaults.domain_id : f.domain_id,
+        qos_file: f.qos_file === '' ? defaults.qos_file : f.qos_file,
+      })),
+      (err) => !cancelled && setError(err.message),
+    );
+    return () => { cancelled = true; };
+  }, [isDds]);
+
+  const ddsInterface = form.dds_interface.trim();
+  useEffect(() => {
+    if (!isDds || !ddsInterface) {
+      setDdsUnits(null);
+      setDdsError(null);
+      return undefined;
+    }
+    let cancelled = false;
+    // Debounced: the path is usually typed or pasted, and each lookup imports
+    // the Interface (and Connext with it).
+    const timer = setTimeout(() => {
+      setDdsLoading(true);
+      api.ddsUnits(ddsInterface).then(
+        (result) => {
+          if (cancelled) return;
+          setDdsUnits(result);
+          setDdsError(null);
+          // Keep a still-valid choice (Edit); otherwise start on the first unit.
+          setForm((f) => (result.units.some((u) => u.name === f.unit)
+            ? f
+            : { ...f, unit: result.units[0]?.name ?? '' }));
+        },
+        (err) => {
+          if (cancelled) return;
+          setDdsUnits(null);
+          setDdsError(err.message);
+        },
+      ).finally(() => !cancelled && setDdsLoading(false));
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [isDds, ddsInterface]);
+  const chosenUnit = ddsUnits?.units.find((u) => u.name === form.unit) ?? null;
 
   useEffect(() => {
     const onKey = (event) => event.key === 'Escape' && onClose();
@@ -173,12 +234,15 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
   }, [canBrowse]);
 
   /** Where a picked path should be written back. `peerIndex === null` targets
-   *  the connection-level list. Held in state while the in-app picker is open,
-   *  since that modal reports its result asynchronously. */
+   *  the connection-level list; `field` targets a single DDS path field. Held
+   *  in state while the in-app picker is open, since that modal reports its
+   *  result asynchronously. */
   const [picking, setPicking] = useState(null);
 
-  const applyStructurePath = (path, { index, peerIndex }) => {
-    if (peerIndex === null) {
+  const applyStructurePath = (path, { index, peerIndex, field }) => {
+    if (field) {
+      set(field, path);
+    } else if (peerIndex === null) {
       set('structures', form.structures.map((s, i) => (i === index ? path : s)));
     } else {
       setPeerStructures(peerIndex, (list) => list.map((s, i) => (i === index ? path : s)));
@@ -193,6 +257,28 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
     try {
       const path = await window.pywebview.api.browse_structures_file();
       if (path) applyStructurePath(path, { index, peerIndex });
+    } catch (err) {
+      setError(err.message ?? String(err));
+    }
+  };
+
+  /** The DDS Interface is a `.py` like a structures file; the QoS file is XML. */
+  const browseForDdsFile = async (field) => {
+    const isQos = field === 'qos_file';
+    const startPath = directoryOf(form[field]);
+    try {
+      if (isQos && canBrowseQos()) {
+        const path = await window.pywebview.api.browse_qos_file(form.qos_file || null);
+        if (path) set(field, path);
+      } else if (!isQos && canBrowse) {
+        const path = await window.pywebview.api.browse_structures_file();
+        if (path) set(field, path);
+      } else {
+        setPicking({
+          field, startPath, suffix: isQos ? '.xml' : '.py',
+          title: isQos ? 'Select a DDS QoS file' : 'Select a DDS Interface',
+        });
+      }
     } catch (err) {
       setError(err.message ?? String(err));
     }
@@ -213,8 +299,37 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
       peers: f.peers.map((peer, i) => (i === index ? { ...peer, [key]: value } : peer)),
     }));
 
+  const submitDds = async () => {
+    if (!form.unit) {
+      return setError(ddsError ?? 'Pick a DDS Interface, then the unit this connection is.');
+    }
+    const domain = String(form.domain_id).trim();
+    if (domain !== '' && !/^\d+$/.test(domain)) {
+      return setError('Domain ID must be a non-negative whole number.');
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit({
+        name: form.name,
+        protocol: 'dds',
+        dds_interface: ddsInterface,
+        unit: form.unit,
+        domain_id: domain === '' ? null : Number(domain),
+        qos_file: String(form.qos_file ?? '').trim() || null,
+        qos_profile: String(form.qos_profile ?? '').trim() || null,
+      });
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async (event) => {
     event.preventDefault();
+    if (isDds) return submitDds();
 
     // Codes accept hex, so they are text inputs -- `required` alone cannot
     // catch "0xZZ". Validate before we let anything reach the API.
@@ -338,12 +453,13 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                     value={form.protocol}
                     onChange={(e) => {
                       set('protocol', e.target.value);
-                      set('side', SIDES[e.target.value][0]);
+                      if (SIDES[e.target.value]) set('side', SIDES[e.target.value][0]);
                     }}
                   >
-                    {Object.keys(SIDES).map((p) => <option key={p} value={p}>{p}</option>)}
+                    {PROTOCOLS.map((p) => <option key={p} value={p}>{p}</option>)}
                   </Select>
                 </Field>
+                {!isDds && (<>
                 <Field label="Side">
                   <Select value={form.side} onChange={(e) => set('side', e.target.value)}>
                     {SIDES[form.protocol].map((s) => (
@@ -358,7 +474,9 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                     onChange={(e) => set('unitCode', maskCode(e.target.value))}
                   />
                 </Field>
+                </>)}
               </div>
+              {!isDds && (
               <div className="flex gap-3">
                 {/* Hidden for a listening endpoint (tcp/udp server, any DDS
                     side): core never reads this address for one, it only
@@ -380,8 +498,79 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                   />
                 </Field>
               </div>
+              )}
             </Section>
 
+            {isDds && (
+              <Section
+                title="DDS"
+                hint="the Interface decides our unit code, our peers and our topics"
+              >
+                <div className="flex items-end gap-2">
+                  <Field label="DDS Interface">
+                    <PathInput
+                      value={form.dds_interface} required placeholder="C:\path\to\dds_interface.py"
+                      onChange={(e) => set('dds_interface', e.target.value)}
+                    />
+                  </Field>
+                  <IconButton
+                    icon={FolderOpen} title="Browse for a DDS Interface"
+                    onClick={() => browseForDdsFile('dds_interface')}
+                  />
+                </div>
+                <Field
+                  label="Unit"
+                  hint={ddsLoading ? 'loading…' : ddsUnits?.system}
+                >
+                  <Select
+                    value={form.unit}
+                    disabled={!ddsUnits}
+                    onChange={(e) => set('unit', e.target.value)}
+                  >
+                    {!ddsUnits && <option value="">— pick an Interface first —</option>}
+                    {ddsUnits?.units.map((u) => (
+                      <option key={u.name} value={u.name}>{u.name} ({hex(u.unit_code, 2)})</option>
+                    ))}
+                  </Select>
+                </Field>
+                {ddsError && (
+                  <p className="font-mono text-[11px] text-rose-300">{ddsError}</p>
+                )}
+                {chosenUnit && (
+                  <p className="font-mono text-[10px] leading-relaxed text-slate-500">
+                    publishes {chosenUnit.publish.join(', ') || '—'}
+                    <br />
+                    subscribes {chosenUnit.subscribe.join(', ') || '—'}
+                  </p>
+                )}
+                <div className="flex items-end gap-2">
+                  <Field label="Domain ID" className="max-w-24">
+                    <Input
+                      value={form.domain_id} inputMode="numeric" placeholder="—"
+                      onChange={(e) => set('domain_id', e.target.value.replace(/[^0-9]/g, ''))}
+                    />
+                  </Field>
+                  <Field label="QoS file">
+                    <PathInput
+                      value={form.qos_file} placeholder="core's default"
+                      onChange={(e) => set('qos_file', e.target.value)}
+                    />
+                  </Field>
+                  <IconButton
+                    icon={FolderOpen} title="Browse for a QoS XML file"
+                    onClick={() => browseForDdsFile('qos_file')}
+                  />
+                </div>
+                <Field label="QoS profile" hint="optional — blank uses the file's default profile">
+                  <Input
+                    value={form.qos_profile} placeholder="Library::Profile"
+                    onChange={(e) => set('qos_profile', e.target.value)}
+                  />
+                </Field>
+              </Section>
+            )}
+
+            {!isDds && (
             <Section
               title="Connected units"
               hint={
@@ -464,6 +653,7 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
                 </div>
               ))}
             </Section>
+            )}
 
             {/* Only shown when ONE list can honestly describe the whole
                 connection: a single link, or multicast where one sender fans
@@ -541,8 +731,8 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
       {picking && (
         <FilePickerModal
           mode="open"
-          title="Select an IRS structures file"
-          suffix=".py"
+          title={picking.title ?? 'Select an IRS structures file'}
+          suffix={picking.suffix ?? '.py'}
           startPath={picking.startPath}
           onPick={(path) => applyStructurePath(path, picking)}
           onClose={() => setPicking(null)}

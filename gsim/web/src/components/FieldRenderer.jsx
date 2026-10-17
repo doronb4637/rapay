@@ -62,6 +62,10 @@ export default function FieldRenderer({
       );
     case 'scalar':
       return <ScalarField node={node} value={value} onChange={onChange} readOnly={readOnly} path={path} />;
+    case 'string':
+      return <StringField node={node} value={value} onChange={onChange} readOnly={readOnly} path={path} />;
+    case 'bool':
+      return <BoolField node={node} value={value} onChange={onChange} readOnly={readOnly} path={path} />;
     default:
       return (
         <Field label={node.name} type="unsupported">
@@ -229,6 +233,68 @@ function ScalarField({ node, value, onChange, readOnly, hint, path = [] }) {
   );
 }
 
+/** A DDS string. `max_length` is the IDL bound; an unbounded string has none. */
+function StringField({ node, value, onChange, readOnly, path = [] }) {
+  const { active, rowProps, focusProps } = useFieldFocus(path);
+  const id = `f-${path.join('-') || node.name}`;
+  const type = node.max_length ? `string<${node.max_length}>` : 'string';
+
+  return (
+    <FieldRow
+      label={node.name}
+      type={type}
+      htmlFor={readOnly ? undefined : id}
+      chars={16}
+      active={active}
+      {...rowProps}
+    >
+      {readOnly ? (
+        <ValueCell text={value ? String(value) : '—'} title={type} />
+      ) : (
+        <Input
+          id={id}
+          value={value ?? ''}
+          maxLength={node.max_length}
+          placeholder="—"
+          className="!px-2 !py-1 !font-sans"
+          {...focusProps}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+    </FieldRow>
+  );
+}
+
+/** A DDS boolean. */
+function BoolField({ node, value, onChange, readOnly, path = [] }) {
+  const { active, rowProps, focusProps } = useFieldFocus(path);
+  const id = `f-${path.join('-') || node.name}`;
+
+  return (
+    <FieldRow
+      label={node.name}
+      type="bool"
+      htmlFor={readOnly ? undefined : id}
+      chars={6}
+      active={active}
+      {...rowProps}
+    >
+      {readOnly ? (
+        <ValueCell text={value ? 'true' : 'false'} title="bool" />
+      ) : (
+        <input
+          id={id}
+          type="checkbox"
+          checked={Boolean(value)}
+          {...focusProps}
+          onChange={(event) => onChange(event.target.checked)}
+          className="h-3.5 w-3.5 cursor-pointer accent-sky-500"
+        />
+      )}
+    </FieldRow>
+  );
+}
+
 /**
  * An enum reaches us as a NUMBER when composing (our own default/edit) but as
  * the member NAME when inspecting a received message -- IRS's
@@ -348,7 +414,7 @@ function StructField({ node, value, onChange, readOnly, depth, indexBadge, extra
  */
 /** A field that renders as one label-and-control row, rather than as a section
  *  with a header and children of its own. Only these pair up two-across. */
-const isLeaf = (field) => field.kind === 'scalar' || field.kind === 'enum';
+const isLeaf = (field) => ['scalar', 'enum', 'string', 'bool'].includes(field.kind);
 
 export function FieldList({ fields, value, onChange, readOnly, depth = 0, path = [] }) {
   const counters = derivedCounters(fields);
@@ -495,9 +561,11 @@ function ArrayField({ node, value, onChange, readOnly, depth, maxItems = null, p
   const meta =
     node.length === 'counted'
       ? `counted by ${node.count_field}${maxItems !== null ? ` · max ${maxItems}` : ''}`
-      : node.length === 'dynamic'
-        ? `fills remaining frame${maxItems !== null ? ` · max ${maxItems}` : ''}`
-        : `fixed ${node.size}`;
+      : node.sequence
+        ? `sequence${maxItems !== null ? ` · max ${maxItems}` : ''}`
+        : node.length === 'dynamic'
+          ? `fills remaining frame${maxItems !== null ? ` · max ${maxItems}` : ''}`
+          : `fixed ${node.size}`;
 
   return (
     <Group
@@ -517,7 +585,9 @@ function ArrayField({ node, value, onChange, readOnly, depth, maxItems = null, p
               full
                 ? node.length === 'counted'
                   ? `Limit reached — ${node.count_field} can only count ${maxItems} items`
-                  : `Limit reached — ${maxItems} items fill the maximum frame`
+                  : node.sequence
+                    ? `Limit reached — the sequence is bounded at ${maxItems}`
+                    : `Limit reached — ${maxItems} items fill the maximum frame`
                 : undefined
             }
             className={cx(

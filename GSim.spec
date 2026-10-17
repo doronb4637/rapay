@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 REPO = Path(SPECPATH)
 
 
@@ -169,7 +171,14 @@ a = Analysis(
     # uvicorn/websockets/webview/pydantic/clr_loader all have hooks in
     # pyinstaller-hooks-contrib, so the dynamic imports they do are already
     # covered; this is only what nothing hooks for us.
-    hiddenimports=['uvicorn.lifespan.on', 'uvicorn.protocols.http.h11_impl'],
+    #
+    # `rti` is the exception: GSim itself imports only `rti.connextdds`, but a
+    # DDS Interface and its topic modules are loaded from .py files at runtime
+    # and import `rti.types` (and through it `rti.idl_impl`), which analysis
+    # cannot see. Every rti module ships, or a DDS connection fails with
+    # "No module named 'rti.types'".
+    hiddenimports=['uvicorn.lifespan.on', 'uvicorn.protocols.http.h11_impl',
+                   *collect_submodules('rti')],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -13,9 +13,9 @@ the whole contract `core.connections.dds_config` reads:
     application builds samples from, however this file itself gets loaded.
 """
 from core.DDS import DdsUnit
-from core.DDS.idl_types.Example.example_topics import Status, Track
+from core.DDS.idl_types.Example.example_topics import SensorReport, Status, Track
 
 SYSTEM = "ExampleSystem"
 
-SensorUnit = DdsUnit(unitCode=0x01, publish=(Track,), subscribe=(Status,))
-ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
+SensorUnit = DdsUnit(unitCode=0x01, publish=(Track, SensorReport), subscribe=(Status,))
+ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track, SensorReport))

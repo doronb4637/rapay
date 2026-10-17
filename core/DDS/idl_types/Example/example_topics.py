@@ -28,6 +28,8 @@ a NESTED struct member must use `field(default_factory=...)`. Writing
 at import time -- loudly, at least.
 """
 from dataclasses import field
+from enum import IntEnum
+from typing import Sequence
 
 import rti.types as idl
 
@@ -64,3 +66,63 @@ class Status:
     A_sourceID: SourceId = field(default_factory=SourceId)
     healthy: bool = True
     message: str = ""
+
+
+@idl.enum
+class SensorMode(IntEnum):
+    IDLE = 0
+    SEARCH = 1
+    TRACK = 2
+    FAULT = 3
+
+
+@idl.struct
+class ReportHeader:
+    seq: idl.uint32 = 0
+    timestamp_us: idl.uint64 = 0
+    mode: SensorMode = SensorMode.IDLE
+
+
+@idl.struct
+class Position:
+    lat_deg: idl.float64 = 0.0
+    lon_deg: idl.float64 = 0.0
+    alt_m: idl.float64 = 0.0
+
+
+@idl.struct
+class Velocity:
+    vx: idl.float32 = 0.0
+    vy: idl.float32 = 0.0
+    vz: idl.float32 = 0.0
+
+
+@idl.struct
+class Detection:
+    detection_id: idl.uint16 = 0
+    snr_db: idl.int16 = 0
+    range_m: idl.float32 = 0.0
+    bearing_deg: idl.float32 = 0.0
+    confirmed: bool = False
+
+
+#: A deliberately large sample (~1000 bytes serialized) mixing every member kind
+#: a form has to render -- enum, nested structs, bools, a bounded string, a
+#: primitive array and an array of structs -- for load-testing a UI against it.
+#: Fixed arrays need `idl.array` plus a factory of that size; an array of
+#: structs takes `idl.list_factory`, since `array_factory` only builds primitives.
+@idl.struct(member_annotations={
+    "label": [idl.bound(32)],
+    "spectrum": [idl.array([128])],
+    "detections": [idl.array([25])],
+})
+class SensorReport:
+    A_sourceID: SourceId = field(default_factory=SourceId)
+    header: ReportHeader = field(default_factory=ReportHeader)
+    position: Position = field(default_factory=Position)
+    velocity: Velocity = field(default_factory=Velocity)
+    tracking: bool = False
+    calibrated: bool = True
+    label: str = ""
+    spectrum: Sequence[idl.float32] = field(default_factory=idl.array_factory(idl.float32, [128]))
+    detections: Sequence[Detection] = field(default_factory=idl.list_factory(Detection, [25]))

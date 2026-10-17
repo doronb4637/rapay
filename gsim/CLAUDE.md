@@ -17,15 +17,15 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 
 ### The one rule: `core/` is never modified
 - No edits, monkey-patches or reaching into private attributes (e.g. `ConnectionManager._connections`). If `core` genuinely needs a change, ask the user first.
-- Four authorised exceptions so far, none a precedent: per-link namespaced IRS layouts; `core/IRS/_alias.py` plus `tools.general._assert_registered`; `fill()` and codec fixes (`core/IRS/{core,fields,bitfields}.py`, `core/tests/test_irs_fill.py`); `tools.general` loading a structures path from the path given.
+- Five authorised exceptions so far, none a precedent: per-link namespaced IRS layouts; `core/IRS/_alias.py` plus `tools.general._assert_registered`; `fill()` and codec fixes (`core/IRS/{core,fields,bitfields}.py`, `core/tests/test_irs_fill.py`); `tools.general` loading a structures path from the path given; the ~1000-byte `SensorReport` example topic (`core/DDS/idl_types/Example/example_topics.py`, `example_interface.py`, `core/tests/test_dds.py`).
 - All `core` imports live in `gsim/core_gateway/`. `gsim/api/` and `gsim/web/` call only its public functions (`get_runtime()`, `list_messages()`, `message_schema()`, `build_payload()`, ...).
 - `core_gateway/bootstrap.py` is imported first and puts the repo root (not `core/`) on `sys.path`. `CORE_ROOT` is only a filesystem path for `CONFIGS_DIR`.
 - `gsim/api/models.py` is where GSim may be stricter than `core` (Pydantic contract). It is not a licence to parse `core` internals.
 
 ### Stack and layout
 - Backend: FastAPI + WebSocket (`gsim/api/`), desktop launcher in `gsim/__main__.py`, path logic in `gsim/paths.py`. Frontend: React 18, Vite 5, Tailwind v4 (CSS-first, no `tailwind.config.js`), lucide-react in `gsim/web/`.
-- `core_gateway/` modules: `schema.py` (IRS class -> JSON form schema), `registry.py` (read-only namespaced registry view), `payloads.py` (form payload -> IRS message), `behaviours.py`, `filters.py`, `fieldpath.py`, `delay.py`, `timing.py`, `runtime.py` (connection registry, logs, thread bridge).
-- Routes (`gsim/api/routes/`): `connections`, `messages`, `behaviours`, `filters`, `events` (WebSocket), `files`.
+- `core_gateway/` modules: `schema.py` (IRS class -> JSON form schema), `registry.py` (read-only namespaced registry view), `payloads.py` (form payload -> IRS message), `dds.py` (DDS topics: listing, form schema, samples), `routekey.py`, `behaviours.py`, `filters.py`, `fieldpath.py`, `delay.py`, `timing.py`, `runtime.py` (connection registry, logs, thread bridge).
+- Routes (`gsim/api/routes/`): `connections`, `messages`, `behaviours`, `filters`, `events` (WebSocket), `files`, `dds`.
 
 ### Threading
 - `core`'s API is blocking, so every core-touching route is plain `def` (runs in Starlette's threadpool). Only the `events.py` WebSocket handler is `async def`, and it does no core work.
@@ -39,8 +39,15 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 - Hand `send_message` a built message, not a dict, so the route lookup and `from_dict` are not repeated.
 - `web/src/lib/schema.js` mirrors `fill()` only so forms start populated; the server re-normalises every payload and `fill()` wins on any disagreement.
 
+### DDS
+- A route key (`op_code` everywhere: gateway, API, UI, behaviour and filter keys) is an IRS opcode `int` or a DDS topic-name `str`, exactly as core's `send_message`/`handle_on_receive` take it. `routekey.route_label` makes `op_code_hex` (hex, or the topic name); the UI's `hex()` passes strings through.
+- `ConnectionRecord` is the protocol seam: routes and the send path call `outgoing`/`incoming`/`outgoing_schema`/`incoming_schema`/`prepare`/`parse_route` and never branch on protocol. Unit code and peers are read from core's parsed config, never the raw dict (a DDS config names neither).
+- `core_gateway/dds.py` is the only GSim module that touches `rti`, and only lazily. Schemas come from `type_support.dynamic_type` (bounds and dimensions live only there); samples go through Connext's JSON codec, so dataclass defaults own absence. Compare `TypeKind`s with `==`: it is unhashable and `in` returns False.
+- DDS schemas add `string` and `bool` kinds, mark sequences `sequence: true`, and set `byte_view: false` (CDR is not the IRS layout the byte ruler mirrors). A DDS log entry's `namespace` is its Interface path.
+- `DdsConnectionCreate.to_core_config` omits `domain_id`/`qos_file` equal to core's defaults, so a saved session does not pin one install's absolute QoS path.
+
 ### Runtime
-- `GSimRuntime` is a process-wide singleton. `_records` is GSim's source of truth; `ConnectionManager` is only a factory plus exit-time `shutdown_all()`.
+- `GSimRuntime` is a process-wide singleton. `_records` is GSim's source of truth; `ConnectionManager` is only a factory plus exit-time `shutdown_all()`. The manager has no removal and refuses any name it has seen, so each connection is registered there under `name#N`.
 - Receive handlers: one callback per `(peer, opcode)`, closing over the peer's configured name (core's callback has no route context). Behaviour dispatch happens before `_log` and regardless of filters.
 - `LogEntry.payload` is always `to_dict()` in both directions. `LogEntry.unit_code` is the code the layout is registered under (ours on send, the peer's on receive); Inspector fetches schemas by it.
 - Both console panes are process-wide, ordered by one global `seq`, with a `connection_name` per row. Per-connection scoping would hide half of every exchange.
@@ -54,7 +61,8 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 - `index.html` is served `no-store` (`_WebFiles` in `api/app.py`) so a stale shell cannot pin old asset hashes.
 
 ### API contract
-- `ConnectionCreate.structures` is `min_length=1` (mandatory at the API edge; `core` itself accepts none). `_check_consistency` front-runs duplicate peer unit codes and an invalid `side` for the protocol.
+- `ConnectionCreate` is a union discriminated on `protocol`: `IrsConnectionCreate` (tcp/udp/multicast) or `DdsConnectionCreate` (`dds_interface`, `unit`, optional `domain_id`/`qos_file`/`qos_profile`).
+- `IrsConnectionCreate.structures` is `min_length=1` (mandatory at the API edge; `core` itself accepts none). `_check_consistency` front-runs duplicate peer unit codes and an invalid `side` for the protocol.
 - `to_core_config()` always passes a dict to `ConnectionManager.create()`, never a config name string.
 - Create/edit modal narrows core on purpose: remote IP hidden for listening endpoints (pinned to `"0.0.0.0"`; Multicast keeps it as the group address), `Structures` always on the peer except multicast, and per-peer echo fields are explicit on `PeerSpec`.
 - Save/Load round-trips the whole connection list. Import (`POST /api/connections/import`) bypasses `ConnectionCreate` and passes the raw config to `runtime.create()` so protocol-specific `extra` keys survive. Loading replaces all existing connections after one confirm.

@@ -34,7 +34,8 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { Badge, Button, Field, IconButton, Input, Select, cx } from './ui';
-import { fieldTargets, operatorsFor, valueControl } from '../lib/fieldTargets';
+import { controlValue, fieldTargets, operatorsFor, valueControl } from '../lib/fieldTargets';
+import { hex } from '../lib/format';
 
 //: Mirrors `MIN_INTERVAL_SECONDS` in core_gateway/behaviours.py. The server is
 //: the real gate; this only turns a rejected request into an inline message.
@@ -247,7 +248,7 @@ export default function BehaviourModal({
           <h2 className="text-sm font-semibold text-slate-100">Behaviour</h2>
           <span className="ml-1 font-mono text-[11px] text-slate-400">{messageName}</span>
           <Badge tone="sky">
-            {`0x${Number(opCode).toString(16).toUpperCase().padStart(4, '0')}`}
+            {hex(opCode)}
           </Badge>
           <span className="font-mono text-[10px] text-slate-500">→ {destination}</span>
           {existing && (
@@ -339,7 +340,10 @@ export default function BehaviourModal({
                       value={draft.triggerOpCode ?? ''}
                       onChange={(event) => setDraft((current) => ({
                         ...current,
-                        triggerOpCode: Number(event.target.value),
+                        // A <select> value is text; keep the row's own key
+                        // (an opcode number, or a DDS topic name).
+                        triggerOpCode: forUnit.find(
+                          (row) => String(row.op_code) === event.target.value)?.op_code ?? null,
                         condition: null,
                         mappings: [],
                       }))}
@@ -388,20 +392,22 @@ export default function BehaviourModal({
                   </Select>
                   {valueControl(conditionTarget).type === 'enum' ? (
                     <Select
-                      value={draft.condition.value ?? ''}
-                      onChange={(event) => editCondition({ value: event.target.value })}
+                      value={String(draft.condition.value ?? '')}
+                      onChange={(event) => editCondition({
+                        value: controlValue(valueControl(conditionTarget), event.target.value),
+                      })}
                       className="!w-28 !py-0.5 !text-[10px]"
                     >
-                      {(conditionTarget?.options ?? []).map((option) => (
+                      {valueControl(conditionTarget).options.map((option) => (
                         <option key={option.name} value={option.name}>{option.name}</option>
                       ))}
                     </Select>
                   ) : (
                     <Input
-                      type="number"
+                      type={valueControl(conditionTarget).type === 'string' ? 'text' : 'number'}
                       value={draft.condition.value ?? ''}
                       onChange={(event) => editCondition({
-                        value: event.target.value === '' ? '' : Number(event.target.value),
+                        value: controlValue(valueControl(conditionTarget), event.target.value),
                       })}
                       className="!w-20 !py-0.5 !text-[10px]"
                     />

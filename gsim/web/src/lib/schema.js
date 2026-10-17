@@ -32,6 +32,11 @@ export function defaultFor(node) {
       return node.length === 'fixed'
         ? Array.from({ length: node.size ?? 0 }, () => defaultFor(node.item))
         : [];
+    // DDS only: IRS has no string or bool field.
+    case 'string':
+      return '';
+    case 'bool':
+      return false;
     default:
       return 0;
   }
@@ -89,6 +94,8 @@ const MAX_PAYLOAD_BYTES = 0xffff;
  */
 export function maxArrayItems(node, fields) {
   if (node.kind !== 'array' || node.length === 'fixed') return null;
+  // A DDS sequence is bounded by its IDL bound (or nothing), never by a frame.
+  if (node.sequence) return node.max_items ?? null;
 
   if (node.length === 'counted') {
     const counter = (fields ?? []).find((f) => f.name === node.count_field);

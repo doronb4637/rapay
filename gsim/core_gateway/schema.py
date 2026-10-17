@@ -197,8 +197,8 @@ def describe_message(message_class: type, unit_code: int, op_code: int) -> dict[
 
 #: Field kinds a filter RULE can compare against. A rule needs a single value to
 #: put on one side of an operator, which a struct, a bitfield-as-a-whole, or an
-#: array does not have.
-_COMPARABLE = frozenset({"scalar", "enum"})
+#: array does not have. `string` and `bool` only ever come from a DDS topic.
+_COMPARABLE = frozenset({"scalar", "enum", "string", "bool"})
 
 
 def field_targets(schema: dict[str, Any]) -> list[dict[str, Any]]:
@@ -233,7 +233,7 @@ def field_targets(schema: dict[str, Any]) -> list[dict[str, Any]]:
             "rule_ok": rule_ok,
         }
         for key in ("dtype", "enum", "options", "min", "max", "numeric", "struct",
-                    "item_label", "length"):
+                    "item_label", "length", "max_length"):
             if key in node:
                 target[key] = node[key]
         targets.append(target)

@@ -27,12 +27,20 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
 
 ## Code Style & Constraints
 
-- Fail loudly at the point of the mistake. Our own bug raises immediately; a third-party fault (bad inbound message) is logged and dropped without killing the link.
-- Comments explain *why* only, and only where non-obvious. No speculative abstraction.
-- IRS structures files spell the import `IRS.x`, never `core.IRS.x`.
-- Everything inside `core` spells IRS as `core.IRS.x`, and uses `from core.annotations import *` for the shared vocabulary.
-- Verify claims about `core` behaviour by running real code against it, not by reading it.
-- Keep each fact in one file; point to the owning file instead of restating it.
+- **Readability & Simplicity Above All:** Write the most direct, flat, and readable code possible. Cleverness, nested abstractions, and premature optimizations are bugs.
+- **Zero-Speculative Abstraction:** Never build helper functions for single-use logic, generalized factories, or future-proofing layers for hypothetical requirements. Write only what is required *today*.
+- **Ruthless Comment Ban:** 
+  - Comments are strictly banned unless explaining a non-obvious architectural constraint, weird external API quirk, or critical performance hack.
+  - **NEVER** comment *what* the code does or restate code in English. If code is hard to read without a comment, refactor the code instead of writing a comment.
+  - Maximum **1 short sentence** per comment when strictly necessary. No multi-line or verbose explanatory paragraphs.
+  - No docstrings for private methods, internal helpers, or obvious structures.
+- **Fail Loudly:** Fail loudly at the point of the mistake. Our own bug raises immediately; a third-party fault (bad inbound message) is logged and dropped without killing the link.
+- **Import Rules:** 
+  - IRS structures files spell the import `IRS.x`, never `core.IRS.x`.
+  - Everything inside `core` spells IRS as `core.IRS.x`, and uses `from core.annotations import *` for the shared vocabulary.
+- **Verification & Organization:**
+  - Verify claims about `core` behaviour by running real code against it, not by reading it.
+  - Keep each fact in one file; point to the owning file instead of restating it.
 
 ## Reference Codebases
 

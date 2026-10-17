@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { Badge, Button, EmptyState, IconButton, Input, Select, StatusDot, cx } from './ui';
-import { fieldTargets, operatorsFor, valueControl } from '../lib/fieldTargets';
+import { controlValue, fieldTargets, operatorsFor, valueControl } from '../lib/fieldTargets';
 import { hexTitle } from '../lib/format';
 
 //: How a message qualifies once the rules have admitted it. Amber throughout
@@ -497,8 +497,10 @@ export default function FilterModal({
                           </Select>
                           {control.type === 'enum' ? (
                             <Select
-                              value={rule.value ?? ''}
-                              onChange={(event) => editRule(index, { value: event.target.value })}
+                              value={String(rule.value ?? '')}
+                              onChange={(event) => editRule(index, {
+                                value: controlValue(control, event.target.value),
+                              })}
                               className="!w-28 !py-0.5 !text-[10px]"
                             >
                               {control.options.map((option) => (
@@ -507,12 +509,12 @@ export default function FilterModal({
                             </Select>
                           ) : (
                             <Input
-                              type="number"
+                              type={control.type === 'string' ? 'text' : 'number'}
                               value={rule.value ?? ''}
                               min={control.min}
                               max={control.max}
                               onChange={(event) => editRule(index, {
-                                value: event.target.value === '' ? '' : Number(event.target.value),
+                                value: controlValue(control, event.target.value),
                               })}
                               className="!w-20 !py-0.5 !text-[10px]"
                             />
