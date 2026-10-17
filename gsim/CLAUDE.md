@@ -23,9 +23,7 @@ GSim (Generic Simulator): FastAPI + WebSocket API and a React/Tailwind desktop U
 - `gsim/api/models.py` is where GSim may be stricter than `core` (Pydantic contract). It is not a licence to parse `core` internals.
 
 ### Stack and layout
-- Backend: FastAPI + WebSocket (`gsim/api/`), desktop launcher in `gsim/__main__.py`, path logic in `gsim/paths.py`. Frontend: React 18, Vite 5, Tailwind v4 (CSS-first, no `tailwind.config.js`), lucide-react in `gsim/web/`.
-- `core_gateway/` modules: `schema.py` (IRS class -> JSON form schema), `registry.py` (read-only namespaced registry view), `payloads.py` (form payload -> IRS message), `dds.py` (DDS topics: listing, form schema, samples), `routekey.py`, `behaviours.py`, `filters.py`, `fieldpath.py`, `delay.py`, `timing.py`, `runtime.py` (connection registry, logs, thread bridge).
-- Routes (`gsim/api/routes/`): `connections`, `messages`, `behaviours`, `filters`, `events` (WebSocket), `files`, `dds`.
+- Tailwind v4 is CSS-first: there is no `tailwind.config.js`.
 
 ### Threading
 - `core`'s API is blocking, so every core-touching route is plain `def` (runs in Starlette's threadpool). Only the `events.py` WebSocket handler is `async def`, and it does no core work.

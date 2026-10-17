@@ -12,10 +12,6 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 ## Architecture & Tech Stack
 
 ### Layout and ownership
-- `config.py`: JSON -> typed, frozen `ConnectionConfig`; unit<->port mapping; echo and structures resolution.
-- `framing.py`: `(UnitCode, OpCode, DataLength)` little-endian header. `base.py`: event-loop bridge, `Connection` ABC, `FramedConnection`, per-unit state, the `Unit` Protocol.
-- `_routes.py`: `RouteTable`; a route has exactly one owner (subscription XOR callback). `_echo.py`: per-unit heartbeat supervisor. `handlers.py`: declarative `UnitHandler`, `@route`, `@on_connect`.
-- `tcp.py`, `udp.py`, `multicast.py`, `dds.py`, `dds_config.py`, `composite.py`, `manager.py` (factory plus `shutdown_all()`).
 - `connections` owns transports, routing and lifecycle. It does not own the payload codec (`IRS.irs_parser.irs_to_bytes`/`parse_irs`) or helpers (`tools.general`, `tools.file_functions`).
 - `tools` answers what an opcode or unit code is *written as*; this package answers what it must *fit into*. Coercion is `tools`'; range checks stay here.
 
