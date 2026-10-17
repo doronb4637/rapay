@@ -47,7 +47,7 @@ while TrackerUnit falls back to the connection-wide 99 -- both at the shared
 1.0s/5.0s timings.
 
 `Structures` is hierarchical in the same shape but with a stricter rule, because
-a structures file defines the IRS for ONE link (see connections/CLAUDE.md 2b):
+a structures file defines the IRS for ONE link:
 each unit names its own, and a connection-level list is only accepted when
 there is exactly one unit to apply it to -- or on multicast, where one sender
 genuinely does fan out to many receivers over a single shared IRS. Anything
@@ -86,7 +86,6 @@ logger = logging.getLogger("connmgr.config")
 DEFAULT_ECHO_INTERVAL: float = 1.0
 DEFAULT_ECHO_TIMEOUT: float = 5.0
 
-#: Every json key defined
 PROTOCOL_KEY = "protocol"
 SIDE_KEY = "side"
 IP_KEY = "ip"
@@ -94,29 +93,20 @@ CONNECTIONS_KEY = "connections"
 PORT_KEY = "port"
 UNIT_CODE_KEYS = ("UnitCode", "unitCode", "unit_code")
 LOCAL_IP_KEYS = ("local_ip", "localIp")
-#: The IRS message layouts a link uses. Accepted at BOTH levels -- inside a
-#: unit's dict in `connections` (that link's own), and at the connection level,
-#: which is only legal when there is one link to be had (see `from_json`).
+#: Accepted per unit and connection-wide; the latter only with one link (see `from_json`).
 STRUCTURES_KEYS = ("Structures", "structures")
 
-#: The symmetric "one opcode, both directions" spelling ONLY -- kept distinct
-#: from ALL_ECHO_OPCODE_KEYS below. `from_extra` looks up `shared` through
-#: this tuple specifically; using the union here would let a lone
-#: recv_echo_opcode/send_echo_opcode get misread as the shared value and leak
-#: into the direction that was never actually configured.
+#: The shared "one opcode, both directions" spelling only: a lone recv/send key
+#: must never be read as the shared value, so `from_extra` cannot use the union below.
 ECHO_OPCODE_KEYS = ("echo_opcode", "EchoOpcode", "echoOpcode")
 RECV_ECHO_OPCODE_KEYS = ("recv_echo_opcode", "RecvEchoOpcode", "recvEchoOpcode")
 SEND_ECHO_OPCODE_KEYS = ("send_echo_opcode", "SendEchoOpcode", "sendEchoOpcode")
-#: All three opcode-key families combined -- for the places that mean "any
-#: spelling of any opcode key", e.g. `resolve()`'s "the opcode keys resolve as
-#: a group" check. NOT a substitute for ECHO_OPCODE_KEYS above.
+#: Any spelling of any opcode key; `resolve()` treats them as one group.
 ALL_ECHO_OPCODE_KEYS: tuple[str, ...] = (*ECHO_OPCODE_KEYS, *RECV_ECHO_OPCODE_KEYS, *SEND_ECHO_OPCODE_KEYS)
 
 ECHO_INTERVAL_KEYS = ("echo_interval", "EchoInterval", "echoInterval")
 ECHO_TIMEOUT_KEYS = ("echo_timeout", "EchoTimeout", "echoTimeout")
-#: There is deliberately no `echo_payload` here. The heartbeat body is always
-#: empty: `UnitEchoSupervisor` sends b"" and nothing ever read a configured
-#: value, so the key was accepted, documented, and silently ignored.
+#: No `echo_payload` key: echo payload is always empty(b"").
 ECHO_TUNING_KEYS: tuple[str, ...] = (*ECHO_INTERVAL_KEYS, *ECHO_TIMEOUT_KEYS)
 
 ECHO_KEYS: frozenset[str] = frozenset(ALL_ECHO_OPCODE_KEYS + ECHO_TUNING_KEYS)
@@ -139,6 +129,7 @@ UNIT_KEYS: frozenset[str] = frozenset({PORT_KEY, *UNIT_CODE_KEYS, *STRUCTURES_KE
 
 
 class TransportProtocol(str, Enum):
+    """The `"protocol"` values a connection config accepts (case-insensitive)."""
     TCP = "tcp"
     UDP = "udp"
     MULTICAST = "multicast"
@@ -172,8 +163,7 @@ _PROTOCOL_KEYS: dict[TransportProtocol, frozenset[str]] = {
 
 
 # --------------------------------------------------------------------------- #
-# Typed coercion helpers for raw JSON. Coercing once, here, lets the rest of
-# the codebase assume real int/float/bytes values and never re-check.
+# Typed coercion helpers: coerce raw JSON once here so nothing downstream re-checks.
 # --------------------------------------------------------------------------- #
 def _lookup(source: Mapping[str, Any], *names: str) -> Any | None:
     """The first non-null value among the accepted spellings of one key."""
@@ -284,10 +274,6 @@ class EchoSettings:
         The echo settings ONE unit actually runs on: its own keys layered over
         the connection-wide block in `extra`.
 
-        A connection multiplexing several units may well be talking to peers that heartbeat
-        on different opcodes -- or to one peer that heartbeats and one that
-        doesn't.
-
         Two levels of granularity, deliberately:
 
           * The three OPCODE keys resolve as a GROUP. A unit naming any of them
@@ -380,9 +366,7 @@ class UnitEndpoint:
 
 
 # --------------------------------------------------------------------------- #
-# The steps of `from_json`, below. Each owns exactly one of this config's
-# failure modes and raises it with the message naming the offending key, so the
-# classmethod itself reads as the order those checks happen in.
+# The steps of `from_json`: each owns one failure mode and names the offending key.
 # --------------------------------------------------------------------------- #
 def _parse_own_unit_code(data: Mapping[str, Any]) -> UnitCode:
     """OUR code -- who this process is on the wire. Required: there is no
@@ -416,8 +400,8 @@ def _parse_side(data: Mapping[str, Any], protocol: TransportProtocol) -> Side:
 
 
 def _warn_unknown_keys(data: Mapping[str, Any], protocol: TransportProtocol) -> None:
-    """Top-level `extra` stays open (see connection.schema.json), but a key
-    nothing reads is almost always a typo, so say so."""
+    """Top-level `extra` stays open (see `core/configs/connection.schema.json`),
+    but a key nothing reads is almost always a typo, so say so."""
     known = {PROTOCOL_KEY, SIDE_KEY, IP_KEY, *LOCAL_IP_KEYS, CONNECTIONS_KEY, *UNIT_CODE_KEYS,
              *STRUCTURES_KEYS, *ECHO_KEYS, SCHEMA_KEY, *_PROTOCOL_KEYS[protocol]}
     unknown = sorted(key for key in data if key not in known)
@@ -456,10 +440,8 @@ def _reject_topics(data: Mapping[str, Any], protocol: TransportProtocol) -> None
 # --------------------------------------------------------------------------- #
 # The steps of `_from_dds_json`.
 # --------------------------------------------------------------------------- #
-#: Keys a DDS config refuses, each with the reason. A DDS node has no socket to
-#: describe, and what used to be written here by hand now comes from the DDS
-#: Interface. Refused rather than ignored: a key nothing reads is a setting its
-#: author believes is in force.
+#: Keys a DDS config refuses, with the reason. Refused rather than ignored: a key
+#: nothing reads is a setting its author believes is in force.
 _DDS_REFUSED_KEYS: dict[tuple[str, ...], str] = {
     (SIDE_KEY,): "DDS has no side -- what a unit publishes and subscribes comes from its "
                  "DdsUnit in the DDS Interface",
@@ -562,7 +544,6 @@ def _parse_unit_endpoint(unit_name: str, spec: Any, global_extra: Mapping[str, A
         raise ValueError(f"connections {code_owner[unitCode]!r} and {unit_name!r} both use unitCode "
                          f"{unitCode}; unit codes must be unique within a connection")
     code_owner[unitCode] = unit_name
-    # Per-unit echo and structures win; connection-level `extra` is the fallback.
     try:
         echo = EchoSettings.resolve(spec, global_extra)
         structures_raw, structures = resolve_structures(spec, global_extra)
@@ -621,7 +602,7 @@ class ConnectionConfig:
     #: Both None on DDS, which has no endpoint address.
     ip: str | None
     local_ip: str | None
-    #: Our unitCode
+    #: OUR Unit Code
     unitCode: int
     connections: dict[str, UnitEndpoint]
     #: Every key outside the fixed set: echo, Structures, and protocol-specific
@@ -671,9 +652,7 @@ class ConnectionConfig:
             connections=connections,
             extra=extra,
         )
-        # Parse the connection-level echo block even when every unit overrides
-        # it, so a malformed key there still fails the load.
-        config.echo
+        EchoSettings.from_extra(extra)  # fail the load on a malformed connection-level echo block
         return config
 
     @classmethod

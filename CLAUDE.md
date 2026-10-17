@@ -40,7 +40,8 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
 - **Verification & Organization:**
   - Verify claims about `core` behaviour by running real code against it, not by reading it.
   - Keep each fact in one file; point to the owning file instead of restating it.
-
+- **No Redundant Hot-Path Validation:**
+  - Never re-validate configuration or state variables inside high-frequency runtime functions (e.g., message packing/sending loops) if they are already validated once at startup/load time. Avoid redundant checks that add runtime overhead and dead code.
 ## Reference Codebases
 
 - Dependency boundaries: `core/IRS/_alias.py`, `core/IRS/annotations.py`, `core/annotations.py`.

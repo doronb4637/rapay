@@ -14,21 +14,28 @@ from dataclasses import dataclass
 
 from core.IRS.irs_parser import IRSDataError
 
-# "<" = little-endian, no padding. B = uint8, H = uint16, H = uint16.
-_HEADER_STRUCT = struct.Struct("<BHH")
+# "<"(little-endian), B(uint8): UnitCode, H(uint16): OpCode, H: Len.
+_HEADER_STRUCT = struct.Struct("<BHH")  # Total 5 bytes
 
-HEADER_SIZE = _HEADER_STRUCT.size      # 5 bytes
+HEADER_SIZE = _HEADER_STRUCT.size
 
 
 @dataclass(frozen=True, slots=True)
 class MessageHeader:
+    """The decoded fixed header of one framed message."""
+
     unit_code: int
     opcode: int
     data_length: int
 
 
 def pack_message(unit_code: int, opcode: int, payload: bytes) -> bytes:
-    """Build header + payload ready to write to a socket."""
+    """
+    Build header + payload, ready to write to a socket.
+
+    Raises `IRSDataError` if `unit_code` does not fit a uint8, `opcode` a uint16,
+    or `payload` the uint16 length field (64KB).
+    """
     if not (0 <= unit_code <= 0xFF):
         raise IRSDataError(f"unit_code {unit_code} does not fit in a byte")
     if not (0 <= opcode <= 0xFFFF):

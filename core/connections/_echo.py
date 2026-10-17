@@ -1,26 +1,17 @@
 """
-`UnitEchoSupervisor` -- the echo (heartbeat) lifecycle of one connection, one
-unit at a time.
+`UnitEchoSupervisor` -- the echo (heartbeat) lifecycle of one connection, keyed
+by unit: peers may heartbeat on different opcodes, at different rates, or not
+at all, so each unit runs on its own resolved `EchoSettings`.
 
-Echo is a property of a LINK, not of a process: a connection multiplexing
-several units may legitimately be talking to peers that heartbeat on different
-opcodes, at different rates, or not at all. So everything here is keyed by unit
-name and runs on that unit's own already-resolved `EchoSettings`
-(`config.EchoSettings.resolve`, done once at load time).
+Per unit, armed when it gains a peer and disarmed when it loses one (never by
+`start()`, which would aim heartbeats at peers that do not exist yet):
 
-Three pieces per unit, armed the moment that unit gains a peer and disarmed the
-moment it loses one -- never by `start()`, which would aim heartbeats at peers
-that do not exist yet:
-
-  1. a SENDER, transmitting the echo opcode every `EchoInterval` for as long as
-     the unit stays connected;
-  2. CONSUMPTION, which intercepts inbound echoes before the connection's
-     subscribe-or-drop filtering ever sees them;
+  1. a SENDER, transmitting the echo opcode every `EchoInterval`;
+  2. CONSUMPTION, which intercepts inbound echoes before subscribe-or-drop;
   3. a WATCHDOG, which drops the unit if no echo arrives within `EchoTimeout`.
 
-Direction-limited connections only get the half they can perform: a send-only
-member has no way to receive an echo, so watchdogging it would guarantee a
-spurious disconnect.
+A direction-limited connection gets only the half it can perform: watchdogging
+a send-only member would guarantee a spurious disconnect.
 
 Everything here runs ON the shared event-loop thread.
 """
@@ -40,11 +31,8 @@ UnitName = str
 
 class EchoHost(Protocol):
     """
-    Exactly what the supervisor needs from the connection it serves -- no more.
-
-    Spelling it out is what makes the echo lifecycle testable against a stub
-    instead of a live socket pair, and it is the whole contract between the two:
-    anything the supervisor wants beyond this list has to be added here first.
+    The whole contract between the supervisor and its connection, so the echo
+    lifecycle can be tested against a stub instead of a live socket pair.
     """
 
     can_send: bool
@@ -75,12 +63,8 @@ class UnitEchoSupervisor:
     # Arming and disarming (driven solely by per-unit connection state)
     # ------------------------------------------------------------------ #
     def arm(self, unit_name: UnitName) -> None:
-        """Start `unit_name`'s heartbeat, now that it actually has a peer.
-
-        A unit whose settings do not resolve stays silent while its neighbours
-        heartbeat normally, and re-arming an already-armed unit is a no-op --
-        which is what lets `_mark_unit_connected` stay idempotent.
-        """
+        """Start `unit_name`'s heartbeat. A no-op if its echo is disabled or it is
+        already armed, which keeps `_mark_unit_connected` idempotent."""
         echo = self._host._echo_for(unit_name)
         if not echo.enabled:
             return
@@ -97,11 +81,8 @@ class UnitEchoSupervisor:
         self._tasks[unit_name] = unit_tasks
 
     def disarm(self, unit_name: UnitName) -> None:
-        """Stop `unit_name`'s heartbeat and forget its liveness clock.
-
-        The watchdog reaches this through `_disconnect_unit`, so the calling
-        task is skipped -- it is already returning under its own power.
-        """
+        """Stop `unit_name`'s heartbeat and forget its liveness clock. The calling
+        task is skipped: the watchdog reaches this via `_disconnect_unit`."""
         current = asyncio.current_task()
         for task in self._tasks.pop(unit_name, []):
             if task is not current and not task.done():
@@ -109,12 +90,8 @@ class UnitEchoSupervisor:
         self._last_echo_at.pop(unit_name, None)
 
     def forget_all(self) -> None:
-        """Drop every unit's bookkeeping during connection teardown.
-
-        The tasks themselves are not cancelled here: they were created through
-        the host's `_track`, so its own single sweep over `_tasks` cancels and
-        awaits them along with every other background task it owns.
-        """
+        """Drop every unit's bookkeeping at teardown. The tasks are not cancelled
+        here: the host's `_track` sweep cancels and awaits them."""
         self._tasks.clear()
         self._last_echo_at.clear()
 
@@ -123,18 +100,13 @@ class UnitEchoSupervisor:
     # ------------------------------------------------------------------ #
     def consume(self, unit_name: UnitName, opcode: int) -> bool:
         """
-        True if this message was `unit_name`'s inbound echo, in which case it
-        has been consumed here and must go no further.
+        True if this message was `unit_name`'s inbound echo, which is consumed
+        here and never reaches the application.
 
-        Refreshing the liveness clock is the entire job: no reply is sent,
-        because the periodic sender already transmits on its own schedule --
-        answering an inbound echo would be pure duplication, and with a single
-        shared `echo_opcode` it would have both peers answering each other's
-        answers without end. The message is never visible to the application,
-        no matter what is or is not subscribed.
-
-        An opcode that is a heartbeat on one unit stays an ordinary application
-        message on another, which is why this asks per unit.
+        Only the liveness clock is refreshed, never a reply: with a shared
+        `echo_opcode` the peers would answer each other's answers forever. The
+        check is per unit because one opcode may be a heartbeat on a unit and an
+        ordinary message on another.
         """
         echo = self._host._echo_for(unit_name)
         if not (echo.enabled and opcode == echo.recv_opcode):

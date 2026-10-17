@@ -3,6 +3,9 @@ from enum import IntEnum
 from IRS.REGISTRY import register_message
 from IRS.core import OperationCode
 
+
+from dataclasses import dataclass
+
 Tiful = 0x01
 DTU = 0x02
 

@@ -15,7 +15,16 @@ from .base import (ConnectCallback, ConnectedTarget, Connection, IrsMessage,
 
 
 class CompositeUnit:
-    """Combines multiple partial-capability Connections into one logical Unit."""
+    """
+    Combines direction-limited Connections into one logical Unit, e.g. a
+    send-only and a receive-only UDP link that together form one peer.
+
+    Build it through `ConnectionManager.create_composite`. Sends and periodic
+    sends go to the one send-capable member, receives and callbacks to the one
+    receive-capable member; each method has the contract of the same-named
+    `Connection` method. Raises `ValueError` if more than one member can send,
+    more than one can receive, or none can do either.
+    """
 
     def __init__(self, name: str, members: list[Connection]):
         senders = [m for m in members if m.can_send]
@@ -91,6 +100,7 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     def send_message(self, data: IrsMessage | dict, opcode: OpCode | None = None,
                      unit_name: str | None = None) -> None:
+        """`Connection.send_message` on the send-capable member."""
         self._require_sender().send_message(data, opcode, unit_name)
 
     @property
@@ -136,6 +146,7 @@ class CompositeUnit:
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
     ) -> IrsMessage:
+        """`Connection.receive_message` on the receive-capable member."""
         return self._require_receiver().receive_message(opcode, unit_name, timeout, trigger_function)
 
     def handle_on_receive(
@@ -144,9 +155,11 @@ class CompositeUnit:
         callback_func: ReceiveCallback,
         unit_name: str | None = None,
     ) -> None:
+        """`Connection.handle_on_receive` on the receive-capable member."""
         self._require_receiver().handle_on_receive(opcode, callback_func, unit_name)
 
     def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool:
+        """`Connection.stop_on_receive` on the receive-capable member."""
         return self._require_receiver().stop_on_receive(opcode, unit_name)
 
     def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None:
@@ -155,6 +168,7 @@ class CompositeUnit:
         self._require_receiver().handle_on_connect(callback_func, unit_name)
 
     def stop_on_connect(self, unit_name: str | None = None) -> bool:
+        """`Connection.stop_on_connect` on the receive-capable member."""
         return self._require_receiver().stop_on_connect(unit_name)
 
     def periodic_sending(
@@ -164,7 +178,9 @@ class CompositeUnit:
         opcode: OpCode | None = None,
         unit_name: str | None = None,
     ) -> None:
+        """`Connection.periodic_sending` on the send-capable member."""
         self._require_sender().periodic_sending(data, interval, opcode, unit_name)
 
     def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
+        """`Connection.stop_periodic` on the send-capable member."""
         return self._require_sender().stop_periodic(opcode, unit_name)

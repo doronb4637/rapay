@@ -67,6 +67,7 @@ class _EventLoopThread:
     """
     _instance: _EventLoopThread | None = None
     _lock = threading.Lock()
+    #: Winsock/Proactor codes for a socket reset or already closed mid-teardown.
     _TEARDOWN_WINERRORS = frozenset({64, 1236, 10038, 10054})
 
     def __new__(cls) -> _EventLoopThread:
@@ -258,9 +259,14 @@ class Connection(ABC):
     def start(self, retry: bool = False) -> None:
         """
         Open every transport and block until inbound traffic can be accepted.
+        A no-op if already started.
 
         `retry=True` keeps retrying a refused connection once a second, with no
         limit, and lets TCP clients reconnect after their peer drops.
+
+        Raises whatever the transport raises on failure (e.g. `OSError` for a
+        port in use, `ConnectionRefusedError` when `retry` is False); whatever
+        was opened is closed first, so `start()` can be called again.
         """
         if self._started:
             return
@@ -510,8 +516,15 @@ class Connection(ABC):
                      unit_name: str | None = None) -> None:
         """
         Encode `data` via IRS (bytes pass through) and send it to `unit_name`,
-        which may be omitted when only one unit is configured. `opcode` is
-        required on framed links; on DDS the sample names its own topic.
+        which may be left out when only one unit is configured.
+
+        `opcode` may be left out only when `data` is an `IrsMessage` carrying opCode
+        attribute; for a dict or bytes specifying opCode is mandatory. On DDS the
+        sample names its own topic and goes to every subscriber.
+
+        Raises `ValueError` for an unknown unit or mismatched opcode, `TypeError`
+        for a missing opcode, `IRSDataError` if IRS cannot encode `data`, and
+        `ConnectionError` if the unit has no peer yet.
         """
         key = self._send_key(data, opcode)
         unit = self._send_unit(unit_name, key)
@@ -525,6 +538,9 @@ class Connection(ABC):
         Block until `target` is connected: an `int` (at least that many units),
         a unit name, or an iterable of names (all of them). Returns False on
         timeout, or if the connection is closed while waiting.
+
+        Raises `ValueError` for an unknown unit or a count above the number of
+        configured units, `TypeError` for a `bool`.
         """
         predicate = self._build_unit_predicate(target)
         wait_timeout = timeout + 1 if timeout is not None else None
@@ -668,6 +684,10 @@ class Connection(ABC):
         `send_message` every `interval` seconds until `stop_periodic`. Calling it
         again for the same route replaces the schedule. `data` is encoded once,
         here, so an unencodable message fails now rather than every tick.
+
+        A failed tick is logged and retried on the next one. Raises `ValueError`
+        if `interval` is not positive, plus whatever `send_message` raises for
+        a bad destination or opcode.
         """
         interval_seconds = float(interval)
         if interval_seconds <= 0:

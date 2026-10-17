@@ -63,10 +63,8 @@ if DEFAULT_LICENSE_FILE.is_file():
     os.environ.setdefault("RTI_LICENSE_FILE", str(DEFAULT_LICENSE_FILE))
 
 import rti.connextdds as dds  # type: ignore  # noqa: E402  # raises ImportError if not installed
-# Importing this is what ATTACHES `take_data_async` to dds.DataReader -- it is a
-# monkey-patch at the bottom of rti/asyncio.py, not a method on the class. It
-# looks unused to a linter and is load-bearing: without it `_read_loop` below
-# raises AttributeError and no sample is ever received.
+# Load-bearing despite looking unused: importing it monkey-patches `take_data_async`
+# onto dds.DataReader, which `_read_loop` needs.
 import rti.asyncio as rti_asyncio  # type: ignore  # noqa: E402
 
 from ._routes import MessageKey, RouteKey, UnitName  # noqa: E402
@@ -109,18 +107,14 @@ class DdsConnection(Connection):
         # Keyed by TOPIC name: a topic's entities serve every peer that speaks it.
         self._writers: dict[str, Any] = {}
         self._readers: dict[str, Any] = {}
-        #: The read loops, held apart from `_tasks` because they must stop
-        #: BEFORE the participant closes, not after (see `_close_entities`).
+        #: Kept apart from `_tasks`: these must stop BEFORE the participant closes (see `_close_entities`).
         self._read_tasks: list[asyncio.Task[None]] = []
         self._counted_live = False
-        #: Warnings about inbound traffic are once per cause, not once per
-        #: sample: a cause is a property of a peer or a type, so it would
-        #: otherwise repeat at full data rate.
+        #: Inbound-traffic warnings fire once per cause, or they would repeat at the data rate.
         self._warned: set[tuple[Any, ...]] = set()
 
-        # Direction is per topic, so the connection's capabilities are the
-        # union. This is what stops a subscribe-only unit being handed to
-        # `CompositeUnit` as a sender.
+        # Direction is per topic: the union keeps a subscribe-only unit from being
+        # handed to `CompositeUnit` as a sender.
         self.can_send = any(spec.publishes for spec in self._dds.topics)
         self.can_receive = any(spec.subscribes for spec in self._dds.topics)
 
@@ -169,11 +163,8 @@ class DdsConnection(Connection):
         except Exception:  # noqa: BLE001 - only ever used to word an error
             return []
 
-    #: Per entity kind: the accessor taking (profile, topic), and the one taking
-    #: only (topic) for the file's default profile. Both evaluate the profile's
-    #: `topic_filter`s against the topic name. The profile-only accessors
-    #: (`datawriter_qos_from_profile`, `.datawriter_qos`) take no topic, so they
-    #: cannot see a filter and would silently hand every topic the baseline.
+    #: Per entity kind: the (profile, topic) accessor and the (topic)-only one for the default
+    #: profile. The profile-only accessors take no topic, so they ignore `topic_filter`s.
     _QOS_ACCESSORS: dict[str, tuple[str, str]] = {
         "topic": ("set_topic_name_qos", "get_topic_name_qos"),
         "datawriter": ("set_topic_datawriter_qos", "get_topic_datawriter_qos"),
@@ -242,10 +233,8 @@ class DdsConnection(Connection):
 
     def _stamp_outgoing(self, sample: Any) -> None:
         """
-        Fill in our unit code as `A_sourceID.A_systemId` on an outgoing sample.
-        The far end identifies the sender by it, so leaving it at zero silently
-        gets the sample dropped there. Only a field still at zero is filled; a
-        caller-set value stays, and the platform/module ids are the caller's.
+        Fill in our unit code as `A_sourceID.A_systemId` on an outgoing sample; the
+        far end drops a sample it cannot attribute. A caller-set value stays.
         """
         source_id = getattr(sample, SOURCE_ID_FIELD, None)
         if source_id is None or getattr(source_id, SYSTEM_ID_FIELD, None):
@@ -272,9 +261,7 @@ class DdsConnection(Connection):
         source = self._source_code(sample)
         code = None if source is None else int(source)
         if code is not None and code == self._own_unit_code:
-            # Our own write, heard back by our own reader. Preferred to
-            # `ignore_participant`, which would also block a legitimate second
-            # process of ours on the same host.
+            # Our own write, heard back. Not `ignore_participant`: that would also block our second process on this host.
             return None
         if code == 0 and self.config.unit_for_code(0) is None:
             code = None  # an A_sourceID the sender never stamped
@@ -375,11 +362,9 @@ class DdsConnection(Connection):
 
     def _validate_route(self, unit_name: UnitName, route_key: RouteKey) -> None:
         """
-        DDS registers no IRS layouts, so the base `validate_irs` could never
-        pass here. The question it asks is still the right one -- "could this
-        route ever deliver?" -- so it is asked of the Interface: a topic this
-        unit does not subscribe, or a unit that does not publish it, is a
-        subscription that would block forever.
+        Ask the Interface, not IRS (DDS registers no layouts), whether this route
+        could ever deliver: a topic this unit does not subscribe, or a unit that
+        does not publish it, would block forever.
         """
         _unit_code, key = route_key
         spec = self._dds.topic_for(key)
@@ -397,9 +382,7 @@ class DdsConnection(Connection):
     # ------------------------------------------------------------------ #
     async def _do_start(self) -> None:
         global _live_connections
-        # The participant is the unit of discovery and owns everything below
-        # it; its QoS (transports, discovery peers) can only be set here. A
-        # failure part-way is undone by `Connection._abort_start` -> `_do_stop`.
+        # Participant QoS (transports, discovery peers) can only be set at construction.
         self._participant = dds.DomainParticipant(self._dds.domain_id, self._participant_qos())
         for spec in self._dds.topics:
             self._create_entities(self._participant, spec)
@@ -432,13 +415,10 @@ class DdsConnection(Connection):
 
     async def _read_loop(self, spec: TopicSpec, reader: Any) -> None:
         """
-        Feed every inbound sample on `spec` into the framework's single dispatch
-        point, keyed by the topic and tagged with the unit that sent it.
-
-        `take_data_async` exists only because this module imports `rti.asyncio`;
-        its waitset dispatcher is created on first use, which is here -- on the
-        shared loop thread, where it must be. `take_data` yields valid samples
-        only, so the `valid_data` check callers would otherwise need is done.
+        Feed every inbound sample on `spec` into `_dispatch_incoming`, keyed by
+        topic and tagged with its sender. `take_data_async` yields valid samples
+        only, and its waitset dispatcher is created on first use, which must
+        happen on the shared loop thread.
         """
         try:
             async for sample in reader.take_data_async():
@@ -475,14 +455,10 @@ class DdsConnection(Connection):
 
     async def _close_entities(self) -> None:
         """
-        Stop the read loops, THEN close the participant.
-
-        That order is the one piece of teardown RTI cannot do for us. Each read
-        loop has a ReadCondition attached to `rti.asyncio`'s process-wide
-        WaitSet, and cancelling the loop is what detaches it; closing the reader
-        first would leave that shared WaitSet holding a condition of a closed
-        entity. After that, a single `participant.close()` closes every topic,
-        writer and reader the participant contains.
+        Stop the read loops, THEN close the participant: cancelling a loop is what
+        detaches its ReadCondition from `rti.asyncio`'s process-wide WaitSet, and
+        closing the reader first would leave that WaitSet holding a dead entity's
+        condition. `participant.close()` then closes everything else.
         """
         tasks, self._read_tasks = self._read_tasks, []
         for task in tasks:
