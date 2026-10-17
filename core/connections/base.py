@@ -197,12 +197,6 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Unit resolution
     # ------------------------------------------------------------------ #
-    def _unit_code_for(self, unit_name: str) -> UnitCode:
-        code = self._unit_codes.get(unit_name)
-        if code is not None:
-            return code
-        raise ValueError(f"No unit code for unit {unit_name!r}; known units: {list(self._unit_codes)}")
-
     def _resolve_unit(self, unit_name: str | None) -> UnitName:
         units = self.config.unit_names
         if unit_name is not None:
@@ -216,7 +210,7 @@ class Connection(ABC):
     def _resolve_route(self, unit_name: str | None, key: MessageKey) -> tuple[UnitName, RouteKey]:
         """The caller's optional unit name -> (unit name, inbound route key)."""
         unit = self._resolve_unit(unit_name)
-        return unit, (self._unit_code_for(unit), key)
+        return unit, (self._unit_codes[unit], key)
 
     # ------------------------------------------------------------------ #
     # Message keys -- what a caller's selector routes under
@@ -251,7 +245,7 @@ class Connection(ABC):
         return self._resolve_unit(unit_name)
 
     def _periodic_key(self, unit_name: UnitName | None, key: MessageKey) -> PeriodicKey:
-        return (None if unit_name is None else self._unit_code_for(unit_name)), key
+        return (None if unit_name is None else self._unit_codes[unit_name]), key
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -422,7 +416,7 @@ class Connection(ABC):
         """
         if self._closing or self._echo_supervisor.consume(unit_name, key):
             return
-        unit_code = self._unit_code_for(unit_name)
+        unit_code = self._unit_codes[unit_name]
         route_key: RouteKey = (unit_code, key)
         owner = self._routes.owner_of(route_key)
         if owner is None:

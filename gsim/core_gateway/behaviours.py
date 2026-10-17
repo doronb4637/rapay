@@ -698,7 +698,7 @@ class BehaviourEngine:
             behaviour = self._behaviours.get(behaviour_id)
             if behaviour is None:
                 return
-            interval = max(float(behaviour.interval), MIN_INTERVAL_SECONDS)
+            interval = behaviour.interval
 
             # A firing that remapped the payload invalidates the built
             # message; rebuilding is the ~160us `prepare_message` and must

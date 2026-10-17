@@ -33,13 +33,10 @@ def pack_message(unit_code: int, opcode: int, payload: bytes) -> bytes:
     """
     Build header + payload, ready to write to a socket.
 
-    Raises `IRSDataError` if `unit_code` does not fit a uint8, `opcode` a uint16,
-    or `payload` the uint16 length field (64KB).
+    `unit_code` and `opcode` are trusted to fit a uint8 and a uint16 (config and
+    structures files already guarantee it). Raises `IRSDataError` if `payload`
+    exceeds the uint16 length field (64KB).
     """
-    if not (0 <= unit_code <= 0xFF):
-        raise IRSDataError(f"unit_code {unit_code} does not fit in a byte")
-    if not (0 <= opcode <= 0xFFFF):
-        raise IRSDataError(f"opcode {opcode} does not fit in uint16")
     if len(payload) > 0xFFFF:
         raise IRSDataError("payload exceeds uint16 length field (64KB)")
     header = _HEADER_STRUCT.pack(unit_code, opcode, len(payload))

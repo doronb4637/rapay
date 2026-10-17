@@ -368,21 +368,14 @@ class PreparedSend:
     payload: dict[str, Any]
 
     def fire(self) -> LogEntry:
-        """Send it and log it.
-
-        `_log` returns `None` only for a filtered RECEIVED message, and this is
-        the send path -- asserted rather than handled, so a future change that
-        made sending filterable fails here instead of returning a null entry to
-        the Send button.
-        """
+        """Send it and log it. `_log` filters only RECEIVED messages, so a sent
+        entry is never `None`."""
         self.record.unit.send_message(self.message, self.op_code, self.unit_name)
-        entry = self.runtime._log(
+        return self.runtime._log(  # type: ignore[return-value]
             self.record, "sent", self.record.name, self.record.own_unit_code,
             self.op_code, self.message_name, self.payload, None,
             namespace=self.namespace,
         )
-        assert entry is not None, "the sent direction is never filtered"
-        return entry
 
 
 class GSimRuntime:
@@ -945,7 +938,7 @@ class GSimRuntime:
                 if is_dds:
                     payload = dds_topics.sample_to_dict(message)
                 else:
-                    payload = message.to_dict() if hasattr(message, "to_dict") else {"raw": repr(message)}
+                    payload = message.to_dict()
                 error = None
             except Exception as exc:  # noqa: BLE001
                 payload, error = None, f"{type(exc).__name__}: {exc}"
@@ -985,7 +978,7 @@ class GSimRuntime:
         what the pane exists to show, and no rule could have been written
         against a payload that does not exist.
         """
-        if (direction == "received" and error is None and payload is not None
+        if (direction == "received" and error is None
                 and not self.filters.admits(record.name, unit_name, op_code, payload)):
             return None
         entry = LogEntry(

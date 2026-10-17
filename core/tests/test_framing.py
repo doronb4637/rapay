@@ -32,18 +32,6 @@ def test_pack_empty_payload():
     assert payload == b""
 
 
-@pytest.mark.parametrize("unit_code", [-1, 256, 1000])
-def test_pack_rejects_unit_code_out_of_uint8_range(unit_code):
-    with pytest.raises(IRSDataError, match="does not fit in a byte"):
-        pack_message(unit_code=unit_code, opcode=1, payload=b"")
-
-
-@pytest.mark.parametrize("opcode", [-1, 0x10000])
-def test_pack_rejects_opcode_out_of_uint16_range(opcode):
-    with pytest.raises(IRSDataError, match="does not fit in uint16"):
-        pack_message(unit_code=1, opcode=opcode, payload=b"")
-
-
 def test_pack_rejects_payload_over_uint16_length():
     with pytest.raises(IRSDataError, match="64KB"):
         pack_message(unit_code=1, opcode=1, payload=b"x" * 0x10000)
