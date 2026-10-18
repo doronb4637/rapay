@@ -31,8 +31,6 @@ from gsim.core_gateway import (
     IRSAmbiguousError,
     field_targets,
     get_runtime,
-    message_schema,
-    prepare_message,
 )
 
 router = APIRouter(prefix="/api", tags=["behaviours"])
@@ -68,6 +66,16 @@ def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, 
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
+    # A route key's type follows the protocol (opcode int, DDS topic str), so a
+    # JSON body that spelled it the other way is put right before anything
+    # keys on it.
+    try:
+        request.op_code = record.parse_route(request.op_code)
+        if request.trigger_op_code is not None:
+            request.trigger_op_code = record.parse_route(request.trigger_op_code)
+    except KeyError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
     peers = record.peers()
     if request.unit_name not in peers:
         raise HTTPException(
@@ -80,9 +88,7 @@ def set_behaviour(connection_name: str, request: BehaviourRequest) -> dict[str, 
         # Scoped by destination, exactly as `POST /send` is: the same opcode may
         # mean different layouts on two links. Building the real message here is
         # also the validation -- a payload that could never encode fails now.
-        prepared = prepare_message(record.own_unit_code, request.op_code,
-                                   record.interface_for(request.unit_name),
-                                   request.payload)
+        prepared = record.prepare(request.unit_name, request.op_code, request.payload)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
@@ -171,8 +177,7 @@ def _check_trigger_fields(record: Any, request: BehaviourRequest,
             detail=f"unknown trigger unit {source_unit!r}; known: {sorted(peers)}",
         )
     try:
-        incoming = message_schema(peers[source_unit], request.trigger_op_code,
-                                  record.interface_for(source_unit))
+        incoming = record.incoming_schema(request.trigger_op_code, source_unit)
     except KeyError as exc:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -180,8 +185,7 @@ def _check_trigger_fields(record: Any, request: BehaviourRequest,
     except IRSAmbiguousError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    outgoing = message_schema(record.own_unit_code, request.op_code,
-                              record.interface_for(request.unit_name))
+    outgoing = record.outgoing_schema(request.op_code, request.unit_name)
     incoming_targets = {t["path"]: t for t in field_targets(incoming)}
     outgoing_targets = {t["path"]: t for t in field_targets(outgoing)}
 
@@ -203,10 +207,19 @@ def _check_trigger_fields(record: Any, request: BehaviourRequest,
                     detail=f"{request.condition.value!r} is not a member of "
                            f"{target.get('enum', 'that enum')}; known: {names}",
                 )
+        elif target["kind"] == "string":
+            if request.condition.op not in EQUALITY_OPERATORS:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"{request.condition.path!r} is a string; use "
+                           f"{' or '.join(EQUALITY_OPERATORS)}, not {request.condition.op!r}.",
+                )
         elif not isinstance(request.condition.value, (int, float)):
+            # A bool decodes as true/false, which compare equal to 1/0.
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"{request.condition.path!r} is a number; "
+                detail=f"{request.condition.path!r} is a "
+                       f"{'bool' if target['kind'] == 'bool' else 'number'}; "
                        f"{request.condition.value!r} is not.",
             )
 

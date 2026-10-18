@@ -8,20 +8,16 @@ payload is parsed by exactly the layout its owner asked for -- there is no
 registry to look one up in. DDS stores None: its samples arrive already typed.
 
 `Connection` hands each inbound message to that route's owner: a parked
-`receive_message()` future if one is in flight, else a standing
-`handle_on_receive()` callback, else nobody -- in which case the message is
-dropped, never buffered. Those two owners are mutually exclusive by design, and
-the four ways that can be violated (subscribing over a callback, subscribing
-over a live subscription, registering a callback over a subscription,
-registering one over a callback) are all refused HERE rather than in four
-separate methods on `Connection`, each with its own nearly-identical message.
+`receive_message()` future, else a standing `handle_on_receive()` callback, else
+nobody -- the message is dropped, never buffered. The two owners are mutually
+exclusive, and every way of violating that is refused HERE.
 
-Connect callbacks live here too: keyed by unit name alone (a connect event has
-no opcode), but `drop_unit()` must reach every table at once.
+Connect callbacks live here too, keyed by unit name (a connect event has no
+opcode); `drop_unit()` must reach every table at once.
 
-Everything here runs ON the shared event-loop thread and is deliberately not
-thread-safe: `Connection`'s public API already marshals every mutation onto that
-thread, and a second lock here would only hide a caller that forgot to.
+Everything runs ON the shared event-loop thread and is deliberately not
+thread-safe: `Connection`'s public API marshals every mutation onto that thread,
+and a lock here would only hide a caller that forgot to.
 """
 from __future__ import annotations
 
@@ -36,8 +32,6 @@ MessageKey = OpCode | str
 RouteKey = tuple[UnitCode, MessageKey]
 ReceiveCallback = Callable[[IrsMessage], Any]
 ConnectCallback = Callable[[UnitName], Any]
-#: The layout a route's payloads are parsed with; None where the transport
-#: delivers typed samples (DDS).
 MessageClass = IrsMessage | None
 Owner = asyncio.Future[IrsMessage] | ReceiveCallback
 
@@ -85,17 +79,11 @@ class RouteTable:
     def claim(self, route: RouteKey, message_class: MessageClass,
               loop: asyncio.AbstractEventLoop) -> asyncio.Future[IrsMessage]:
         """
-        Register the future that makes `route` subscribed, and return it
-        without awaiting.
+        Register the future that makes `route` subscribed, and return it without
+        awaiting, so `receive_message` can run its trigger function in between
+        and an immediate reply is captured rather than dropped as unsubscribed.
 
-        Returning before the await is what lets `receive_message` run a trigger
-        function in between: by the time the trigger fires, the future is
-        already here, so a reply that arrives immediately -- even before the
-        caller gets as far as awaiting -- is captured rather than dropped as
-        unsubscribed.
-
-        The future is bound to `loop` rather than to whichever loop happens to
-        be running, because it outlives the coroutine that creates it and is
+        The future is bound to `loop` because it is created by one coroutine and
         awaited by another.
         """
         if route in self._callbacks:
@@ -116,13 +104,9 @@ class RouteTable:
         return future
 
     def settle(self, route: RouteKey, future: asyncio.Future[IrsMessage]) -> None:
-        """Free `route` now that `future` is done with it -- delivered, timed
-        out or cancelled alike.
-
-        Removes only OUR future: by the time an abandoned call gets here a later
-        subscriber may already own the slot, and evicting theirs would strand
-        them exactly as this whole rule exists to prevent.
-        """
+        """Free `route` once `future` is done with it (delivered, timed out or
+        cancelled). Removes only OUR future: a later subscriber may already own
+        the slot, and evicting theirs would strand them."""
         existing = self._subscriptions.get(route)
         if existing is not None and existing[0] is future:
             del self._subscriptions[route]
@@ -180,13 +164,10 @@ class RouteTable:
     def drop_unit(self, unit_code: UnitCode | None, reason: BaseException) -> None:
         """
         Retire every route belonging to `unit_code`: fail whoever is parked on
-        one with `reason`, and forget its standing callbacks.
+        one with `reason`, and forget its standing callbacks. The on-connect
+        callback is kept, so a unit that comes back is greeted again.
 
-        The unit's ON-CONNECT callback is deliberately kept. A unit that drops
-        may well come back, and it should be greeted again when it does.
-
-        `unit_code` may be None (a unit this connection never had a code for),
-        in which case nothing matches and nothing is dropped.
+        A `unit_code` of None (an unknown unit) matches nothing.
         """
         for route in [key for key in self._subscriptions if key[0] == unit_code]:
             future, _message_class = self._subscriptions.pop(route)

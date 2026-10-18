@@ -14,25 +14,29 @@ from dataclasses import dataclass
 
 from core.IRS.irs_parser import IRSDataError
 
-# "<" = little-endian, no padding. B = uint8, H = uint16, H = uint16.
-_HEADER_STRUCT = struct.Struct("<BHH")
+# "<"(little-endian), B(uint8): UnitCode, H(uint16): OpCode, H: Len.
+_HEADER_STRUCT = struct.Struct("<BHH")  # Total 5 bytes
 
-HEADER_SIZE = _HEADER_STRUCT.size      # 5 bytes
+HEADER_SIZE = _HEADER_STRUCT.size
 
 
 @dataclass(frozen=True, slots=True)
 class MessageHeader:
+    """The decoded fixed header of one framed message."""
+
     unit_code: int
     opcode: int
     data_length: int
 
 
 def pack_message(unit_code: int, opcode: int, payload: bytes) -> bytes:
-    """Build header + payload ready to write to a socket."""
-    if not (0 <= unit_code <= 0xFF):
-        raise IRSDataError(f"unit_code {unit_code} does not fit in a byte")
-    if not (0 <= opcode <= 0xFFFF):
-        raise IRSDataError(f"opcode {opcode} does not fit in uint16")
+    """
+    Build header + payload, ready to write to a socket.
+
+    `unit_code` and `opcode` are trusted to fit a uint8 and a uint16 (config and
+    structures files already guarantee it). Raises `IRSDataError` if `payload`
+    exceeds the uint16 length field (64KB).
+    """
     if len(payload) > 0xFFFF:
         raise IRSDataError("payload exceeds uint16 length field (64KB)")
     header = _HEADER_STRUCT.pack(unit_code, opcode, len(payload))

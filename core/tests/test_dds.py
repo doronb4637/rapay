@@ -177,7 +177,7 @@ def test_each_unit_gets_its_own_view_of_the_example_interface():
     sensor = resolve_unit(INTERFACE, SENSOR)
     assert (sensor.unit_code, sensor.system) == (SENSOR_CODE, "ExampleSystem")
     assert sensor.peers == ((CONTROL, CONTROL_CODE),)
-    track, status = sensor.topics
+    track, status = sensor.topic_named("Track"), sensor.topic_named("Status")
     assert (track.name, track.sample_type, track.direction) == ("Track", Track, TopicDirection.PUBLISH)
     assert (track.publishers, track.subscribers) == ((), (CONTROL,))
     assert (status.name, status.direction, status.publishers) == ("Status", TopicDirection.SUBSCRIBE, (CONTROL,))
@@ -185,7 +185,8 @@ def test_each_unit_gets_its_own_view_of_the_example_interface():
     control = resolve_unit(INTERFACE, CONTROL)
     assert control.peers == ((SENSOR, SENSOR_CODE),)
     assert {spec.name: spec.direction for spec in control.topics} == {
-        "Status": TopicDirection.PUBLISH, "Track": TopicDirection.SUBSCRIBE}
+        "Status": TopicDirection.PUBLISH, "Track": TopicDirection.SUBSCRIBE,
+        "SensorReport": TopicDirection.SUBSCRIBE}
 
 
 def test_an_interface_loads_by_dotted_name_too():
@@ -699,8 +700,8 @@ def test_two_units_talk_over_a_real_domain(manager):
     control = manager.create("control", dds_config(CONTROL, domain_id=TEST_DOMAIN, qos_file=QOS_FILE))
     control.start()
     sensor.start()
-    assert (set(sensor._writers), set(sensor._readers)) == ({"Track"}, {"Status"})
-    assert (set(control._writers), set(control._readers)) == ({"Status"}, {"Track"})
+    assert (set(sensor._writers), set(sensor._readers)) == ({"Track", "SensorReport"}, {"Status"})
+    assert (set(control._writers), set(control._readers)) == ({"Status"}, {"Track", "SensorReport"})
 
     # TRANSIENT_LOCAL durability in the profile means a sample published before
     # discovery completes is still delivered, so no sleep is load-bearing here.

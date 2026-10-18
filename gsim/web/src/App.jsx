@@ -820,6 +820,18 @@ export default function App() {
 /** Connection record -> modal form shape (for Edit). */
 function toForm(connection) {
   const config = connection.config ?? {};
+  if (config.protocol === 'dds') {
+    // Blank domain/QoS mean "core's default" -- the modal prefills those.
+    return {
+      name: connection.name,
+      protocol: 'dds',
+      dds_interface: config.dds_interface ?? '',
+      unit: config.unit ?? '',
+      domain_id: config.domain_id ?? '',
+      qos_file: config.qos_file ?? '',
+      qos_profile: config.qos_profile ?? '',
+    };
+  }
   const entries = Object.entries(config.connections ?? {});
   // Single-peer, non-multicast connections used to keep their Structures at
   // the connection level (the modal's top-level section, before it moved into

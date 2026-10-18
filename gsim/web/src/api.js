@@ -49,12 +49,13 @@ export const api = {
   // opCode can mean different layouts on two peers of one connection.
   messages: (id, unitName) =>
     request(`/api/connections/${id}/messages${query({ unit_name: unitName })}`),
+  // A DDS opCode is a topic name, which may carry `::` (an IDL module).
   messageSchema: (id, opCode, unitName) =>
-    request(`/api/connections/${id}/messages/${opCode}/schema${query({ unit_name: unitName })}`),
+    request(`/api/connections/${id}/messages/${encodeURIComponent(opCode)}/schema${query({ unit_name: unitName })}`),
   // `namespace` comes off the log entry itself, so a received message is
   // rendered against the exact layout it was decoded with.
   schemaByUnit: (unitCode, opCode, namespace) =>
-    request(`/api/schema/${unitCode}/${opCode}${query({ namespace })}`),
+    request(`/api/schema/${unitCode}/${encodeURIComponent(opCode)}${query({ namespace })}`),
   send: (id, body) => request(`/api/connections/${id}/send`, { method: 'POST', body: JSON.stringify(body) }),
   logs: (id, direction) => request(`/api/connections/${id}/logs/${direction}`),
   // Process-wide log history: a send and its matching receive belong to two
@@ -88,6 +89,11 @@ export const api = {
   // same list relabelled.
   incoming: (id, unitName) =>
     request(`/api/connections/${id}/incoming${query({ unit_name: unitName })}`),
+
+  // DDS: core's defaults, and the units an Interface defines -- so the modal
+  // offers choices instead of asking for a unit name to be typed.
+  ddsDefaults: () => request('/api/dds/defaults'),
+  ddsUnits: (iface) => request(`/api/dds/units${query({ interface: iface })}`),
 
   // Filesystem, for the in-app picker used when no native dialog exists
   // (`--server` + browser tab). The server browses because the browser refuses

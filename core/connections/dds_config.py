@@ -45,6 +45,7 @@ DEFAULT_LICENSE_FILE: Path = _CORE_DIR / "rti_license.dat"
 
 
 class TopicDirection(str, Enum):
+    """What this unit does with a topic."""
     PUBLISH = "publish"
     SUBSCRIBE = "subscribe"
     BOTH = "both"
@@ -96,6 +97,7 @@ class DdsUnitConfig:
         return [spec.name for spec in self.topics]
 
     def topic_named(self, name: str) -> TopicSpec | None:
+        """The topic called `name`, or None."""
         for spec in self.topics:
             if spec.name == name:
                 return spec
@@ -169,7 +171,14 @@ def _direction(publishes: bool, subscribes: bool) -> TopicDirection:
 
 def resolve_unit(interface: str, unit: str, *, domain_id: int = DEFAULT_DOMAIN_ID,
                  qos_file: Path = DEFAULT_QOS_FILE, qos_profile: str | None = None) -> DdsUnitConfig:
-    """Load `interface` and return `unit`'s view of it."""
+    """
+    Load the DDS Interface at `interface` (a `.py` path or dotted name) and
+    return `unit`'s view of it: its code, topics, and the peers at the other end.
+
+    `domain_id`, `qos_file` and `qos_profile` are deployment settings and are
+    carried through unchanged. Raises `FileNotFoundError` for a missing
+    Interface file and `ValueError` if the Interface has no unit named `unit`.
+    """
     module = load_dds_interface(interface)
     units: dict[str, DdsUnit] = {
         name: value for name, value in vars(module).items() if type(value).__name__ == "DdsUnit"}

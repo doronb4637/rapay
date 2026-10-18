@@ -36,7 +36,8 @@
  */
 
 /** Field kinds that carry a single value an operator can be applied to. */
-const COMPARABLE = new Set(['scalar', 'enum']);
+//: `string` and `bool` only ever come from a DDS topic.
+const COMPARABLE = new Set(['scalar', 'enum', 'string', 'bool']);
 
 export function fieldTargets(schema) {
   const targets = [];
@@ -94,6 +95,12 @@ export function valueControl(target) {
   if (target.kind === 'enum') {
     return { type: 'enum', options: target.options ?? [] };
   }
+  if (target.kind === 'bool') {
+    // Decoded as true/false; offered as the two names so one <select> serves
+    // enums and bools alike, and mapped back to booleans by `controlValue`.
+    return { type: 'enum', options: [{ name: 'true' }, { name: 'false' }], bool: true };
+  }
+  if (target.kind === 'string') return { type: 'string' };
   return { type: 'number', min: target.min, max: target.max };
 }
 
@@ -117,5 +124,13 @@ export const NUMERIC_OPS = [
 ];
 
 export function operatorsFor(target) {
-  return target?.kind === 'enum' ? EQUALITY_OPS : NUMERIC_OPS;
+  return ['enum', 'string', 'bool'].includes(target?.kind) ? EQUALITY_OPS : NUMERIC_OPS;
+}
+
+/** A rule-value control's raw text -> the value a rule compares with. */
+export function controlValue(control, raw) {
+  if (raw === '') return '';
+  if (control.bool) return raw === 'true';
+  if (control.type === 'enum' || control.type === 'string') return raw;
+  return Number(raw);
 }

@@ -49,7 +49,15 @@ class UnitHandler:
     """
     A handler bound to one configured unit. Subclasses must set `unitCode` to
     the PEER's code (not this process's own) and tag plain, synchronous
-    methods with `@route` / `@on_connect`.
+    methods with `@route` / `@on_connect`. Install one with
+    `ConnectionManager.create(..., handler_class=...)`.
+
+    `self.unitConnection` is the connection (or `CompositeUnit`) the handler is
+    bound to, for replying from a method. Methods run on an executor thread, so
+    they may block and call its sync API.
+
+    Raises `TypeError` at class definition if `unitCode` is missing, two
+    methods share a route, or more than one method is tagged `@on_connect`.
     """
     unitCode: int
     #: selector (message class, opcode, or DDS topic class) -> method name, built once per subclass.

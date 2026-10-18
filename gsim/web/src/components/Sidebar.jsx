@@ -133,7 +133,9 @@ export default function Sidebar({
                       className="block truncate font-mono text-[10px] text-slate-500"
                       title={hexTitle(connection.unit_code, 'unitCode')}
                     >
-                      {connection.protocol}/{sideLabel(connection.protocol, connection.side)} ·{' '}
+                      {/* DDS has no side; the unit IS its role in the Interface. */}
+                      {connection.protocol}/
+                      {connection.dds ? connection.dds.unit : sideLabel(connection.protocol, connection.side)} ·{' '}
                       {hex(connection.unit_code, 2)}
                     </span>
                   </button>

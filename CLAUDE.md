@@ -27,13 +27,21 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
 
 ## Code Style & Constraints
 
-- Fail loudly at the point of the mistake. Our own bug raises immediately; a third-party fault (bad inbound message) is logged and dropped without killing the link.
-- Comments explain *why* only, and only where non-obvious. No speculative abstraction.
-- IRS structures files spell the import `IRS.x`, never `core.IRS.x`.
-- Everything inside `core` spells IRS as `core.IRS.x`, and uses `from core.annotations import *` for the shared vocabulary.
-- Verify claims about `core` behaviour by running real code against it, not by reading it.
-- Keep each fact in one file; point to the owning file instead of restating it.
-
+- **Readability & Simplicity Above All:** Write the most direct, flat, and readable code possible. Cleverness, nested abstractions, and premature optimizations are bugs.
+- **Zero-Speculative Abstraction:** Never build helper functions for single-use logic, generalized factories, or future-proofing layers for hypothetical requirements. Write only what is required *today*.
+- **Comments & Docstrings Rules:** 
+  - **Inline comments:** Strictly limited to 1 line (max 2 lines on rare, special occasions). They must explain *why* (non-obvious architecture, API quirks, performance hacks), never *what*. If code needs a long explanation, refactor the code instead.
+  - **Public API Docstrings:** Mandatory to be very clear, comprehensive, and detailed on how to use public classes and functions.
+  - **Private / Non-Public Docstrings:** Must be concise and clearly state the function or class's internal purpose, without needing heavy usage guides.
+- **Fail Loudly:** Fail loudly at the point of the mistake. Our own bug raises immediately; a third-party fault (bad inbound message) is logged and dropped without killing the link.
+- **Import Rules:** 
+  - IRS structures files spell the import `IRS.x`, never `core.IRS.x`.
+  - Everything inside `core` spells IRS as `core.IRS.x`, and uses `from core.annotations import *` for the shared vocabulary.
+- **Verification & Organization:**
+  - Verify claims about `core` behaviour by running real code against it, not by reading it.
+  - Keep each fact in one file; point to the owning file instead of restating it.
+- **No Redundant Hot-Path Validation:**
+  - Never re-validate configuration or state variables inside high-frequency runtime functions (e.g., message packing/sending loops) if they are already validated once at startup/load time. Avoid redundant checks that add runtime overhead and dead code.
 ## Reference Codebases
 
 - Dependency boundaries: `core/IRS/_alias.py`, `core/IRS/annotations.py`, `core/annotations.py`.

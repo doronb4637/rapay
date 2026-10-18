@@ -92,7 +92,22 @@ export default function LinkOverview({ connection, sent, received, onPickPeer })
             </div>
             <dl className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-slate-800 pt-2.5">
               <Fact label="protocol" value={connection.protocol} />
-              <Fact label="side" value={sideLabel(connection.protocol, connection.side)} />
+              {connection.dds ? (
+                // DDS has no side or address: a node is one unit of an
+                // Interface, and peers find each other on the domain.
+                <>
+                  <Fact label="unit" value={connection.dds.unit} />
+                  <Fact label="system" value={connection.dds.system} />
+                  <Fact label="domain" value={connection.dds.domain_id} />
+                  <Fact
+                    label="interface"
+                    value={shortModule(connection.dds.interface.replace(/\.py$/i, ''))}
+                    title={connection.dds.interface}
+                  />
+                </>
+              ) : (
+                <Fact label="side" value={sideLabel(connection.protocol, connection.side)} />
+              )}
               <Fact
                 label="our unitCode"
                 value={hex(connection.unit_code, 2)}

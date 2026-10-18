@@ -26,6 +26,12 @@ RECONNECT_DELAY = 1.0
 
 
 class TcpConnection(FramedConnection):
+    """
+    A TCP link with one listening socket (server) or outgoing connection (client)
+    per configured unit; see the module docstring for the peer rules. Build it
+    with `ConnectionManager.create` from a config with `"protocol": "tcp"`.
+    """
+
     def __init__(self, config: ConnectionConfig) -> None:
         super().__init__(config)
         self._servers: list[asyncio.base_events.Server] = []
@@ -103,11 +109,10 @@ class TcpConnection(FramedConnection):
         """Close the dead socket and retire the unit -- unless a newer peer has
         already replaced this one. A client with `retry` reconnects."""
         writer.close()
-        if self._writers.get(unit_name) is writer:
-            del self._writers[unit_name]
-            self._mark_unit_disconnected(unit_name)
-        elif unit_name in self._writers:
-            return
+        if unit_name in self._writers and self._writers[unit_name] is not writer:
+            return  # a newer peer replaced this one
+        self._writers.pop(unit_name, None)
+        self._mark_unit_disconnected(unit_name)
         if self.config.side == Side.CLIENT and self._retry and not self._closing:
             self._track(self._reconnect(unit_name))
 

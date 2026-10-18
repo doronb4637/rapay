@@ -101,6 +101,9 @@ class ConnectionManager:
 
     # -- lifecycle -----------------------------------------------------------
     def start_all(self) -> None:
+        """Start every registered unit in creation order (`retry=False`). A unit
+        that fails to start raises, leaving the earlier ones running; call
+        `shutdown_all()` to clean up."""
         for name, connection in self._connections.items():
             logger.info("starting connection %s", name)
             connection.start()
@@ -115,6 +118,8 @@ class ConnectionManager:
         self._connections.clear()
 
     def get(self, name: str) -> Unit:
+        """Returns unit registered under `name`;
+         raises: `KeyError` if there is none."""
         return self._connections[name]
 
     def __enter__(self) -> ConnectionManager:

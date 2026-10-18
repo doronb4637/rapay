@@ -8,6 +8,7 @@ from types import ModuleType
 
 from core.annotations import *
 from core.IRS import is_definition
+from core.IRS.irs_parser import short_name
 from core.tools.file_functions import resolve_project_path
 
 # A structures file is user data kept anywhere on disk, so a path entry is
@@ -102,7 +103,7 @@ def _assert_is_structure(lib: str, module: ModuleType) -> None:
     # would otherwise never re-execute.
     sys.modules.pop(module.__name__, None)
     raise ImportError(
-        f"structures module {lib!r} imported as {module.__name__!r} but defines no "
+        f"structures module {lib!r} (namespace {short_name(module.__name__)!r}) defines no "
         f"@Definition message. Either it tags none, or it reached a DIFFERENT IRS "
         f"module object than core's (see core/IRS/_alias.py), so its classes are "
         f"not core.IRS.Message subclasses."

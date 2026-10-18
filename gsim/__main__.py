@@ -78,6 +78,19 @@ class Api:
         remember_structures_dir(Path(result[0]).parent)
         return result[0]
 
+    def browse_qos_file(self, start: str | None = None) -> str | None:
+        """Native "open file" dialog for a DDS QoS XML, opening beside `start`
+        (the file currently in the field, usually core's default)."""
+        import webview
+
+        start_dir = Path(start).parent if start else Path.home()
+        result = webview.windows[0].create_file_dialog(
+            webview.FileDialog.OPEN,
+            directory=_start_dir(start_dir),
+            file_types=("QoS XML files (*.xml)", "All files (*.*)"),
+        )
+        return result[0] if result else None
+
     def save_config_file(self, contents: str) -> str | bool:
         """Native "save file" dialog for the Save button -- writes `contents`
         (a JSON string the caller has already formatted) to the chosen path.

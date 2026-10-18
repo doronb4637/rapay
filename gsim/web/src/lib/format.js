@@ -44,13 +44,16 @@ export function formatDelta(seconds, previousSeconds) {
   return `+${Math.round(millis / 60000)}m`;
 }
 
-/** `0x1003` -- the form every IRS document and every log row uses. */
+/** `0x1003` -- the form every IRS document and every log row uses. A DDS
+ *  route key is a topic NAME, not a number, and passes through as-is. */
 export function hex(value, digits = 4) {
+  if (typeof value === 'string') return value;
   return `0x${Number(value).toString(16).toUpperCase().padStart(digits, '0')}`;
 }
 
 /** What a hex code's tooltip says, so the decimal stays one hover away rather
  *  than permanently doubling the width of the densest strip on the panel. */
 export function hexTitle(value, label) {
+  if (typeof value === 'string') return `${label === 'opCode' ? 'topic' : label}: ${value}`;
   return `${label}: ${hex(value)} · ${value} decimal`;
 }

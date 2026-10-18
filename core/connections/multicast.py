@@ -23,6 +23,7 @@ from .framing import unpack_message
 
 logger = logging.getLogger("connmgr.multicast")
 
+#: Packed `ip_mreq`: (group address, local interface address).
 MCAST_GROUP_REQ = struct.Struct("4s4s")
 
 

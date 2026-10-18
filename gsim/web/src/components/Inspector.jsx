@@ -56,8 +56,16 @@ function HeaderBlock({ title, doc, unitCode, opCode, length, children }) {
 
       <dl className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-slate-800 pt-2.5">
         <HeaderStat label="unitCode" value={hex(unitCode, 2)} title={hexTitle(unitCode, 'unitCode')} />
-        <HeaderStat label="opCode" value={hex(opCode)} title={hexTitle(opCode, 'opCode')} />
-        <HeaderStat label="length" value={`${length} B`} title="Payload size, excluding core's framing header" />
+        {/* A DDS route key is a topic name, and its CDR size is Connext's
+            business, so a DDS message shows neither opCode nor length. */}
+        <HeaderStat
+          label={typeof opCode === 'string' ? 'topic' : 'opCode'}
+          value={hex(opCode)}
+          title={hexTitle(opCode, 'opCode')}
+        />
+        {length !== null && (
+          <HeaderStat label="length" value={`${length} B`} title="Payload size, excluding core's framing header" />
+        )}
       </dl>
 
       {children && <div className="mt-2.5 border-t border-slate-800 pt-2.5">{children}</div>}
@@ -95,11 +103,14 @@ function HeaderFact({ label, value, title, className }) {
  * the form sets it on hover and focus, the ruler sets it on hover, and each has
  * to react to the other's.
  */
-function ByteScope({ fields, payload, children }) {
+function ByteScope({ schema, payload, children }) {
   const [activePath, setActivePath] = useState(null);
+  // A DDS topic travels as CDR, not as the IRS layout `encodePayload`
+  // mirrors, so it gets no byte view rather than a wrong one.
+  const byteView = schema.byte_view !== false;
   const { bytes, leaves } = useMemo(
-    () => encodePayload(fields ?? [], payload ?? {}),
-    [fields, payload],
+    () => (byteView ? encodePayload(schema.fields ?? [], payload ?? {}) : { bytes: null, leaves: null }),
+    [byteView, schema.fields, payload],
   );
   const focus = useMemo(() => ({ activePath, setActivePath }), [activePath]);
 
@@ -107,7 +118,7 @@ function ByteScope({ fields, payload, children }) {
   // where it belongs differs by mode and it has to sit under the message
   // header either way -- a provider that also decided layout would force the
   // header below it.
-  const ruler = (
+  const ruler = byteView && (
     <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2.5">
       <ByteRuler
         bytes={bytes}
@@ -120,7 +131,7 @@ function ByteScope({ fields, payload, children }) {
 
   return (
     <FieldFocus.Provider value={focus}>
-      {children({ length: bytes.length, ruler })}
+      {children({ length: bytes ? bytes.length : null, ruler })}
     </FieldFocus.Provider>
   );
 }
@@ -253,7 +264,7 @@ function ComposeForm({
       <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           <div className="mx-auto flex max-w-3xl flex-col gap-2.5">
-            <ByteScope fields={schema.fields} payload={payload}>
+            <ByteScope schema={schema} payload={payload}>
               {({ length, ruler }) => (
                 <>
                   <HeaderBlock
@@ -273,8 +284,10 @@ function ComposeForm({
                       />
                       {schema.namespace && (
                         <HeaderFact
-                          label="IRS"
-                          value={schema.namespace.split('.').slice(-2).join('.')}
+                          label={schema.byte_view === false ? 'DDS' : 'IRS'}
+                          value={schema.byte_view === false
+                            ? schema.namespace.split(/[\\/]/).pop()
+                            : schema.namespace.split('.').slice(-2).join('.')}
                           title={schema.namespace}
                           className="text-slate-400"
                         />
@@ -407,7 +420,7 @@ function LogDetails({ entry }) {
           )}
 
           {schema && entry.payload ? (
-            <ByteScope fields={schema.fields} payload={entry.payload}>
+            <ByteScope schema={schema} payload={entry.payload}>
               {({ length, ruler }) => (
                 <>
                   {header(length)}
@@ -425,7 +438,7 @@ function LogDetails({ entry }) {
             </ByteScope>
           ) : (
             <>
-              {header(0)}
+              {header(null)}
               <pre className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3 font-mono text-[11px] text-slate-300">
                 {JSON.stringify(entry.payload, null, 2)}
               </pre>

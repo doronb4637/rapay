@@ -55,6 +55,7 @@ from typing import Any, Callable
 
 from .delay import get_delay_queue
 from .fieldpath import ABSENT, Condition, assign_path, build_condition, resolve_path
+from .routekey import route_label
 from .timing import TIMER_TICK_SECONDS, high_resolution_clock, sleep_until, wall_time
 
 logger = logging.getLogger("gsim.behaviours")
@@ -108,7 +109,7 @@ class Behaviour:
     id: str
     connection_name: str
     unit_name: str
-    op_code: int
+    op_code: int | str
     kind: str
     payload: dict[str, Any]
     #: Already normalised by `prepare_message` at configure time, exactly as the
@@ -130,7 +131,7 @@ class Behaviour:
     #: they genuinely differ -- a behaviour can watch one unit and answer
     #: another, which is what makes a gateway simulable.
     trigger_unit_name: str | None = None
-    trigger_op_code: int | None = None
+    trigger_op_code: int | str | None = None
     #: Optional gate on the incoming payload. A `fieldpath.Condition`, shared
     #: verbatim with a received filter's rule.
     condition: Condition | None = None
@@ -218,14 +219,13 @@ class Behaviour:
             "connection_name": self.connection_name,
             "unit_name": self.unit_name,
             "op_code": self.op_code,
-            "op_code_hex": f"0x{self.op_code:04X}",
+            "op_code_hex": route_label(self.op_code),
             "kind": self.kind,
             "trigger": self.trigger,
             "mode": self.mode,
             "trigger_unit_name": self.trigger_unit_name,
             "trigger_op_code": self.trigger_op_code,
-            "trigger_op_code_hex": (
-                None if self.trigger_op_code is None else f"0x{self.trigger_op_code:04X}"),
+            "trigger_op_code_hex": route_label(self.trigger_op_code),
             "condition": None if self.condition is None else self.condition.as_dict(),
             "delay_ms": self.delay_ms,
             "mappings": list(self.mappings),
@@ -303,12 +303,12 @@ class BehaviourEngine:
         return behaviour
 
     # -- mutation --------------------------------------------------------
-    def set(self, connection_name: str, unit_name: str, op_code: int,
+    def set(self, connection_name: str, unit_name: str, op_code: int | str,
             payload: dict[str, Any], kind: str | None = None,
             trigger: str = "immediate", mode: str = MODE_PERIODIC,
             interval: float = 1.0, message_name: str | None = None,
             enabled: bool = True, trigger_unit_name: str | None = None,
-            trigger_op_code: int | None = None,
+            trigger_op_code: int | str | None = None,
             condition: dict[str, Any] | None = None, delay_ms: float = 0.0,
             mappings: list[dict[str, str]] | None = None) -> Behaviour:
         """Create or REPLACE the behaviour on this route AND trigger.
@@ -421,7 +421,7 @@ class BehaviourEngine:
             if behaviour.unit_name == unit_name:
                 self._trigger(behaviour, incoming=None)
 
-    def on_message(self, connection_name: str, unit_name: str, op_code: int,
+    def on_message(self, connection_name: str, unit_name: str, op_code: int | str,
                    payload: dict[str, Any] | None) -> None:
         """An inbound message arrived. Fire every `on_received` behaviour
         watching it.
@@ -566,9 +566,9 @@ class BehaviourEngine:
             self._behaviours.clear()
 
     # -- internals -------------------------------------------------------
-    def _find_by_route(self, connection_name: str, unit_name: str, op_code: int,
+    def _find_by_route(self, connection_name: str, unit_name: str, op_code: int | str,
                        trigger: str, trigger_unit_name: str | None,
-                       trigger_op_code: int | None) -> Behaviour | None:
+                       trigger_op_code: int | str | None) -> Behaviour | None:
         """The behaviour occupying this exact slot, if any.
 
         The slot is the outbound route PLUS what fires it. Two rules that send
@@ -698,7 +698,7 @@ class BehaviourEngine:
             behaviour = self._behaviours.get(behaviour_id)
             if behaviour is None:
                 return
-            interval = max(float(behaviour.interval), MIN_INTERVAL_SECONDS)
+            interval = behaviour.interval
 
             # A firing that remapped the payload invalidates the built
             # message; rebuilding is the ~160us `prepare_message` and must

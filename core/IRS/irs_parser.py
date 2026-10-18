@@ -44,6 +44,14 @@ class IRSAmbiguousError(Exception):
     """
 
 
+def short_name(namespace: Namespace) -> str:
+    """`<parent folder>.<file>` of a namespace, for error messages.
+
+    The full namespace of a path-picked file embeds its whole directory chain.
+    """
+    return ".".join(namespace.split(".")[-2:])
+
+
 @dataclass(frozen=True)
 class Interface:
     """What one link can say: its units by name and its layouts by route."""
@@ -68,7 +76,7 @@ class Interface:
                 if isinstance(value, Pair):
                     pairs[int(value)] = value.impose
             elif is_definition(value):
-                _add_message(messages, value, module.__name__)
+                _add_message(messages, value, short_name(module.__name__))
         return cls((module.__name__,), units, messages, pairs)
 
     @classmethod
@@ -81,7 +89,7 @@ class Interface:
         messages: dict[Route, IrsMessage] = {}
         pairs: dict[UnitCode, UnitCode] = {}
         for interface in interfaces:
-            source = ", ".join(interface.namespaces)
+            source = ", ".join(map(short_name, interface.namespaces))
             namespaces.extend(interface.namespaces)
             for name, unitCode in interface.units.items():
                 if units.get(name, unitCode) != unitCode:
@@ -112,7 +120,7 @@ class Interface:
         paired = f" (pair of {speaker})" if speaker != unitCode else ""
         raise IRSNotFoundError(
             f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode}{paired} "
-            f"[structures: {', '.join(self.namespaces)}]; known opcodes: {known}")
+            f"[structures: {', '.join(map(short_name, self.namespaces))}]; known opcodes: {known}")
 
     def routes(self, unitCode: UnitCode) -> list[tuple[int, IrsMessage]]:
         """Every (opCode, message class) `unitCode` sends on this link, by opcode."""

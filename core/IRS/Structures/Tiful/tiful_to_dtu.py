@@ -1,6 +1,9 @@
 from IRS import *
 from enum import IntEnum
 
+
+from dataclasses import dataclass
+
 Tiful = 0x01
 DTU = 0x02
 MFD = pair(DTU, 0x03)

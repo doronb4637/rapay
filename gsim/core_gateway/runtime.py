@@ -38,11 +38,13 @@ from . import bootstrap  # noqa: F401
 
 from core.connections.manager import ConnectionManager
 
+from . import dds as dds_topics
 from . import registry as message_registry
 from .behaviours import BehaviourEngine
 from .filters import FilterSet
-from .payloads import prepare_message
+from .payloads import Prepared, prepare_message
 from .registry import Interface
+from .routekey import route_label
 from .timing import wall_time
 
 logger = logging.getLogger("gsim.runtime")
@@ -84,7 +86,7 @@ class LogEntry:
     connection_name: str    # which GSim connection owns this entry (the console is global)
     unit_name: str          # OUR name when sent, the SENDER's configured name when received
     unit_code: int          # the sending unit's code -- ours on send, theirs on receive
-    op_code: int
+    op_code: int | str      # an IRS opcode, or a DDS topic name
     message_name: str
     payload: dict[str, Any] | None
     error: str | None
@@ -104,7 +106,7 @@ class LogEntry:
             "unit_code": self.unit_code,
             "namespace": self.namespace,
             "op_code": self.op_code,
-            "op_code_hex": f"0x{self.op_code:04X}",
+            "op_code_hex": route_label(self.op_code),
             "message_name": self.message_name,
             "payload": self.payload,
             "error": self.error,
@@ -210,14 +212,32 @@ class ConnectionRecord:
     start_token: int = 0
 
     @property
+    def parsed(self) -> Any:
+        """Core's parsed `ConnectionConfig`, or None for a `CompositeUnit`.
+
+        Read rather than the raw dict wherever core derives something: a DDS
+        config names neither its own unit code nor its peers -- core reads both
+        out of the DDS Interface."""
+        return getattr(self.unit, "config", None)
+
+    @property
+    def dds(self) -> Any:
+        """The resolved `DdsUnitConfig` of a DDS connection, else None."""
+        return getattr(self.parsed, "dds", None)
+
+    @property
     def own_unit_code(self) -> int:
-        return self.config["unitCode"]
+        if self.parsed is None:
+            return self.config["unitCode"]
+        return self.parsed.unitCode
 
     def peers(self) -> dict[str, int]:
         """Configured peer name -> that peer's unit code. This mapping is what
         lets a received message be labelled with the SENDER's defined name."""
-        connections = self.config.get("connections", {})
-        return {name: connected_unit["unitCode"] for name, connected_unit in connections.items()}
+        if self.parsed is None:
+            connections = self.config.get("connections", {})
+            return {name: connected_unit["unitCode"] for name, connected_unit in connections.items()}
+        return {name: endpoint.unitCode for name, endpoint in self.parsed.connections.items()}
 
     def interface_for(self, unit_name: str | None) -> Interface:
         """The IRS interface of ONE link, straight from core's connection -- the
@@ -233,6 +253,65 @@ class ConnectionRecord:
             return self.unit.interface_for(unit_name)
         return Interface.merge(*(self.unit.interface_for(name) for name in self.peers()))
 
+    # -- the protocol seam ---------------------------------------------------
+    # Routes and the send path ask the record, never IRS or DDS directly, so
+    # neither has to know which protocol a connection speaks. For IRS a route
+    # key is an int opcode; for DDS it is the topic name.
+    def parse_route(self, raw: int | str) -> int | str:
+        """A route key as it arrives over HTTP (a path segment is always text)."""
+        if self.dds is not None:
+            return str(raw)
+        try:
+            return int(raw)
+        except ValueError:
+            raise KeyError(f"{self.name!r} is not DDS; an opCode is a number, got {raw!r}") from None
+
+    def outgoing(self, unit_name: str | None) -> list[dict[str, Any]]:
+        """Every message this connection may SEND to `unit_name` (to anyone
+        when None)."""
+        if self.dds is not None:
+            return dds_topics.outgoing(self.dds, unit_name)
+        return message_registry.list_messages(self.own_unit_code, self.interface_for(unit_name))
+
+    def incoming(self, unit_name: str) -> list[dict[str, Any]]:
+        """Every message `unit_name` can send US, keyed by ITS unit code --
+        the code an IRS frame is decoded under."""
+        peer_code = self.peers()[unit_name]
+        if self.dds is not None:
+            return dds_topics.incoming(self.dds, unit_name, peer_code)
+        return message_registry.list_messages(peer_code, self.interface_for(unit_name))
+
+    def outgoing_schema(self, op_code: int | str, unit_name: str | None) -> dict[str, Any]:
+        """The form schema for one message we send."""
+        if self.dds is not None:
+            spec = self._topic(op_code)
+            return dds_topics.describe_topic(spec.sample_type, self.own_unit_code, self.dds.interface)
+        return message_registry.message_schema(self.own_unit_code, op_code, self.interface_for(unit_name))
+
+    def incoming_schema(self, op_code: int | str, unit_name: str) -> dict[str, Any]:
+        """The form schema for one message `unit_name` sends us."""
+        peer_code = self.peers()[unit_name]
+        if self.dds is not None:
+            spec = self._topic(op_code)
+            return dds_topics.describe_topic(spec.sample_type, peer_code, self.dds.interface)
+        return message_registry.message_schema(peer_code, op_code, self.interface_for(unit_name))
+
+    def prepare(self, unit_name: str, op_code: int | str, payload: dict[str, Any] | None) -> Prepared:
+        """A form payload -> a message ready for `send_message`."""
+        if self.dds is not None:
+            spec = self._topic(op_code)
+            return dds_topics.prepare_sample(spec.sample_type, self.dds.interface, payload)
+        # Scoped by the DESTINATION: our own unit code is the same for every
+        # peer, so it alone cannot say which link's layout this opcode means.
+        return prepare_message(self.own_unit_code, op_code, self.interface_for(unit_name), payload)
+
+    def _topic(self, op_code: int | str) -> Any:
+        spec = self.dds.topic_named(str(op_code))
+        if spec is None:
+            raise KeyError(f"unit {self.dds.unit!r} has no topic {op_code!r}; "
+                           f"its topics are {self.dds.topic_names}")
+        return spec
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -247,6 +326,12 @@ class ConnectionRecord:
             "active_units": sorted(getattr(self.unit, "active_units", set()) or set()),
             "config": self.config,
             "start_error": self.start_error,
+            "dds": None if self.dds is None else {
+                "unit": self.dds.unit,
+                "system": self.dds.system,
+                "interface": self.dds.interface,
+                "domain_id": self.dds.domain_id,
+            },
         }
 
 
@@ -271,28 +356,21 @@ class PreparedSend:
     runtime: GSimRuntime
     record: ConnectionRecord
     unit_name: str
-    op_code: int
+    op_code: int | str
     message: Any
     message_name: str
     namespace: str | None
     payload: dict[str, Any]
 
     def fire(self) -> LogEntry:
-        """Send it and log it.
-
-        `_log` returns `None` only for a filtered RECEIVED message, and this is
-        the send path -- asserted rather than handled, so a future change that
-        made sending filterable fails here instead of returning a null entry to
-        the Send button.
-        """
+        """Send it and log it. `_log` filters only RECEIVED messages, so a sent
+        entry is never `None`."""
         self.record.unit.send_message(self.message, self.op_code, self.unit_name)
-        entry = self.runtime._log(
+        return self.runtime._log(  # type: ignore[return-value]
             self.record, "sent", self.record.name, self.record.own_unit_code,
             self.op_code, self.message_name, self.payload, None,
             namespace=self.namespace,
         )
-        assert entry is not None, "the sent direction is never filtered"
-        return entry
 
 
 class GSimRuntime:
@@ -306,6 +384,12 @@ class GSimRuntime:
         self._conn_records: dict[str, ConnectionRecord] = {}
         self._lock = threading.RLock()
         self._seq = itertools.count(1)
+        #: Suffixes the name each connection is registered under in core's
+        #: manager. The manager has no removal, so it refuses a name it has
+        #: ever seen -- which is every edit (delete + recreate under the same
+        #: name) and every delete-then-recreate. GSim's own name stays the
+        #: identity; the manager's key is only for `shutdown_all()`.
+        self._manager_keys = itertools.count(1)
         self.events = EventBus()
         # Scheduled sending. Given `self.send` -- the same call the manual send
         # button makes -- so every tick lands in the console as an ordinary
@@ -479,7 +563,7 @@ class GSimRuntime:
                     f"a connection named {name!r} already exists; names identify "
                     f"connections and must be unique")
 
-        unit = self._manager.create(name, config)
+        unit = self._manager.create(f"{name}#{next(self._manager_keys)}", config)
         record = ConnectionRecord(name=name, config=config, unit=unit)
         with self._lock:
             self._conn_records[name] = record
@@ -736,7 +820,7 @@ class GSimRuntime:
             self._conn_records.clear()
 
     # -- messaging -------------------------------------------------------
-    def sender(self, connection_name: str, unit_name: str, op_code: int,
+    def sender(self, connection_name: str, unit_name: str, op_code: int | str,
                payload: dict[str, Any]) -> PreparedSend:
         """Resolve a route and build its message ONCE, for firing repeatedly.
 
@@ -759,17 +843,14 @@ class GSimRuntime:
         valid message fails when it is configured rather than once per tick.
         """
         record = self.get(connection_name)
-        # Scoped by the DESTINATION: our own unit code is the same for every
-        # peer, so it alone cannot say which link's layout this opcode means.
-        prepared = prepare_message(record.own_unit_code, op_code,
-                                   record.interface_for(unit_name), payload)
+        prepared = record.prepare(unit_name, op_code, payload)
         return PreparedSend(
             runtime=self, record=record, unit_name=unit_name, op_code=op_code,
             message=prepared.message, message_name=prepared.name,
             namespace=prepared.namespace, payload=prepared.payload,
         )
 
-    def send(self, connection_name: str, unit_name: str, op_code: int,
+    def send(self, connection_name: str, unit_name: str, op_code: int | str,
              payload: dict[str, Any]) -> dict[str, Any]:
         """Normalise, encode, send, and log it.
 
@@ -824,8 +905,7 @@ class GSimRuntime:
         the sender's *configured* name the Received log must display.
         """
         for unit_name, peer_code in record.peers().items():
-            interface = record.interface_for(unit_name)
-            for summary in message_registry.list_messages(peer_code, interface):
+            for summary in record.incoming(unit_name):
                 op_code = summary["op_code"]
                 record.unit.handle_on_receive(
                     op_code,
@@ -837,13 +917,18 @@ class GSimRuntime:
                 )
 
     def _make_receive_callback(self, record: ConnectionRecord, unit_name: str, peer_code: int,
-                               op_code: int, message_name: str,
+                               op_code: int | str, message_name: str,
                                namespace: str | None = None) -> Callable[[Any], None]:
+        is_dds = record.dds is not None
+
         def _on_message(message: Any) -> None:
             # Runs on a core executor thread. Must not raise: core logs and
             # swallows, but a clean log entry is more useful than a traceback.
             try:
-                payload = message.to_dict() if hasattr(message, "to_dict") else {"raw": repr(message)}
+                if is_dds:
+                    payload = dds_topics.sample_to_dict(message)
+                else:
+                    payload = message.to_dict()
                 error = None
             except Exception as exc:  # noqa: BLE001
                 payload, error = None, f"{type(exc).__name__}: {exc}"
@@ -858,7 +943,7 @@ class GSimRuntime:
         return _on_message
 
     def _log(self, record: ConnectionRecord, direction: str, unit_name: str, unit_code: int,
-             op_code: int, message_name: str, payload: dict[str, Any] | None,
+             op_code: int | str, message_name: str, payload: dict[str, Any] | None,
              error: str | None, namespace: str | None = None) -> LogEntry | None:
         """Record one message and stream it. `None` if a filter rejected it.
 
@@ -883,7 +968,7 @@ class GSimRuntime:
         what the pane exists to show, and no rule could have been written
         against a payload that does not exist.
         """
-        if (direction == "received" and error is None and payload is not None
+        if (direction == "received" and error is None
                 and not self.filters.admits(record.name, unit_name, op_code, payload)):
             return None
         entry = LogEntry(

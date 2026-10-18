@@ -28,7 +28,6 @@ from gsim.core_gateway import (
     IRSAmbiguousError,
     field_targets,
     get_runtime,
-    message_schema,
 )
 
 router = APIRouter(prefix="/api", tags=["filters"])
@@ -51,6 +50,11 @@ def set_filter(connection_name: str, request: FilterRequest) -> dict[str, Any]:
     """Create or replace the filter on one inbound route."""
     runtime = get_runtime()
     record = _record(connection_name)
+    try:
+        # A route key's type follows the protocol (opcode int, DDS topic str).
+        request.op_code = record.parse_route(request.op_code)
+    except KeyError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     peers = record.peers()
     if request.unit_name not in peers:
@@ -65,7 +69,7 @@ def set_filter(connection_name: str, request: FilterRequest) -> dict[str, Any]:
     # links of the same connection.
     peer_code = peers[request.unit_name]
     try:
-        schema = message_schema(peer_code, request.op_code, record.interface_for(request.unit_name))
+        schema = record.incoming_schema(request.op_code, request.unit_name)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
@@ -193,10 +197,19 @@ def _check_rule(rule: Any, targets: dict[str, dict[str, Any]], message_name: str
                 detail=f"{rule.value!r} is not a member of {target.get('enum', 'that enum')}; "
                        f"known: {names}",
             )
+    elif target["kind"] == "string":
+        if rule.op not in EQUALITY_OPERATORS:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{rule.path!r} is a string; use {' or '.join(EQUALITY_OPERATORS)}, "
+                       f"not {rule.op!r}.",
+            )
     elif not isinstance(rule.value, (int, float)):
+        # A bool decodes as true/false, which compare equal to 1/0.
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"{rule.path!r} is a number; {rule.value!r} is not.",
+            detail=f"{rule.path!r} is a {'bool' if target['kind'] == 'bool' else 'number'}; "
+                   f"{rule.value!r} is not.",
         )
 
 

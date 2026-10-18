@@ -13,12 +13,10 @@ from fastapi import APIRouter, HTTPException, status
 from gsim.api.models import SendMessageRequest
 from gsim.core_gateway import (
     IRSAmbiguousError,
-    interface_of_module,
     IRSDataError,
     IRSNotFoundError,
+    entry_schema,
     get_runtime,
-    list_messages,
-    message_schema,
 )
 
 router = APIRouter(prefix="/api/connections/{connection_name}", tags=["messages"])
@@ -54,7 +52,7 @@ def clear_all_logs(direction: str) -> dict[str, int]:
 
 
 @registry_router.get("/schema/{unit_code}/{op_code}")
-def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -> dict[str, Any]:
+def schema_by_unit(unit_code: int, op_code: str, namespace: str | None = None) -> dict[str, Any]:
     """Form schema for an explicit (unitCode, opCode).
 
     The Inspector needs this for RECEIVED messages: a message is decoded with
@@ -63,13 +61,14 @@ def schema_by_unit(unit_code: int, op_code: int, namespace: str | None = None) -
 
     `namespace` names the structures module the entry's class came from, which
     every log entry carries: (unitCode, opCode) alone is not a unique key once
-    every link has its own structures.
+    every link has its own structures. For a DDS entry `op_code` is the topic
+    name and `namespace` the DDS Interface it came from.
     """
     if not namespace:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             detail="namespace is required: the structures module the message came from")
     try:
-        return message_schema(unit_code, op_code, interface_of_module(namespace))
+        return entry_schema(unit_code, op_code, namespace)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
@@ -86,14 +85,12 @@ def connection_messages(connection_name: str, unit_name: str | None = None) -> l
     layouts an opcode belongs to. Omitting `unit_name` lists every
     peer's messages, each row tagged with its namespace.
     """
-    record = _record(connection_name)
     try:
-        interface = record.interface_for(unit_name)
+        return _record(connection_name).outgoing(unit_name)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    return list_messages(record.own_unit_code, interface)
 
 
 @router.get("/incoming")
@@ -123,18 +120,19 @@ def connection_incoming(connection_name: str, unit_name: str | None = None) -> l
         # received message with the SENDER's configured name, and the filter
         # dialog has to key its rules the same way.
         {**summary, "unit_name": peer_name}
-        for peer_name, peer_code in peers.items()
-        for summary in list_messages(peer_code, record.interface_for(peer_name))
+        for peer_name in peers
+        for summary in record.incoming(peer_name)
     ]
 
 
 @router.get("/messages/{op_code}/schema")
-def message_form_schema(connection_name: str, op_code: int,
+def message_form_schema(connection_name: str, op_code: str,
                         unit_name: str | None = None) -> dict[str, Any]:
-    """The recursive form schema the Inspector renders, for one destination."""
+    """The recursive form schema the Inspector renders, for one destination.
+    `op_code` is text because a DDS route key is a topic name."""
     record = _record(connection_name)
     try:
-        return message_schema(record.own_unit_code, op_code, record.interface_for(unit_name))
+        return record.outgoing_schema(record.parse_route(op_code), unit_name)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except IRSAmbiguousError as exc:
@@ -149,9 +147,10 @@ def send_message(connection_name: str, request: SendMessageRequest) -> dict[str,
     here: it resolves the route ONCE and builds the IRS message the encoder
     actually needs, so this route is only the HTTP error mapping.
     """
-    _record(connection_name)
+    record = _record(connection_name)
     try:
-        return get_runtime().send(connection_name, request.unit_name, request.op_code,
+        return get_runtime().send(connection_name, request.unit_name,
+                                  record.parse_route(request.op_code),
                                   request.payload)
     except KeyError as exc:
         # No layout for this route -- the request named an opcode this

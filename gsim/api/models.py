@@ -10,7 +10,8 @@ stated explicitly so the modal can show a field-level error instead of surfacing
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from pathlib import Path
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -25,6 +26,7 @@ from gsim.core_gateway import (
     BEHAVIOUR_MAX_DELAY_MS,
     BEHAVIOUR_MODES,
     BEHAVIOUR_TRIGGERS,
+    dds_defaults,
 )
 
 #: A connection's name IS its identifier -- every route addresses it as
@@ -47,17 +49,21 @@ CONNECTION_NAME_HELP = (
 #: reserved word is cheaper than the explanation.
 RESERVED_CONNECTION_NAMES = frozenset({"import"})
 
-Protocol = Literal["tcp", "udp", "multicast", "dds"]
-Side = Literal["client", "server", "publisher", "subscriber", "sender", "receiver"]
+Protocol = Literal["tcp", "udp", "multicast"]
+Side = Literal["client", "server", "sender", "receiver"]
 
 #: side values each protocol actually accepts, mirroring how the protocol
 #: classes read `config.side` (multicast derives direction from it entirely).
+#: DDS has no side: what a unit publishes and subscribes is its Interface's.
 _SIDES_BY_PROTOCOL: dict[str, set[str]] = {
     "tcp": {"client", "server"},
     "udp": {"client", "server"},
     "multicast": {"sender", "receiver", "client", "server"},
-    "dds": {"publisher", "subscriber"},
 }
+
+#: An IRS opcode, or a DDS topic name -- core takes either as a route key,
+#: depending on the connection's protocol (see `core_gateway/routekey.py`).
+RouteKey = Union[Annotated[int, Field(ge=0, le=0xFFFF)], Annotated[str, Field(min_length=1)]]
 
 
 class PeerSpec(BaseModel):
@@ -80,14 +86,15 @@ class PeerSpec(BaseModel):
     #: connection-level value only for the keys the unit leaves unset
     #: (`EchoSettings.resolve`, core/connections/config.py) -- so a peer may
     #: override just the opcode and still inherit the shared interval/timeout.
-    #: Only meaningful on tcp/udp; the modal hides these for multicast/dds,
+    #: Only meaningful on tcp/udp; the modal hides these for multicast,
     #: same as the connection-level ones.
     echo_opcode: int | None = Field(default=None, ge=0, le=0xFFFF)
     echo_interval: float | None = Field(default=None, gt=0)
     echo_timeout: float | None = Field(default=None, gt=0)
 
 
-class ConnectionCreate(BaseModel):
+class IrsConnectionCreate(BaseModel):
+    """A framed (tcp/udp/multicast) connection, whose messages are IRS layouts."""
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
@@ -129,7 +136,7 @@ class ConnectionCreate(BaseModel):
         return [item.strip() for item in value if item and item.strip()]
 
     @model_validator(mode="after")
-    def _check_consistency(self) -> "ConnectionCreate":
+    def _check_consistency(self) -> "IrsConnectionCreate":
         if self.name.lower() in RESERVED_CONNECTION_NAMES:
             raise ValueError(
                 f"{self.name!r} is reserved; it collides with a fixed API endpoint "
@@ -232,9 +239,64 @@ class ConnectionCreate(BaseModel):
         return config
 
 
-class ConnectionUpdate(ConnectionCreate):
-    """Same shape: 'Edit' rebuilds the connection from scratch, because
-    `ConnectionConfig` is frozen and a live `Connection` caches state from it."""
+class DdsConnectionCreate(BaseModel):
+    """A DDS node: ONE unit of a generated DDS Interface.
+
+    Everything else core derives from the Interface -- our unit code, the peers
+    and the topics -- so a DDS config names no side, address, peers or
+    structures, and core refuses any of them (`config._refuse_non_dds_keys`).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        min_length=1, max_length=64, pattern=CONNECTION_NAME_PATTERN,
+        description=f"Identifies this connection everywhere; {CONNECTION_NAME_HELP}.",
+    )
+    protocol: Literal["dds"]
+    dds_interface: str = Field(min_length=1, description="Path to the generated DDS Interface .py.")
+    unit: str = Field(min_length=1, description="Which DdsUnit of the Interface this node is.")
+    domain_id: int | None = Field(default=None, ge=0)
+    qos_file: str | None = None
+    qos_profile: str | None = None
+    autostart: bool = True
+
+    @field_validator("dds_interface", "unit", mode="before")
+    @classmethod
+    def _strip(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("qos_file", "qos_profile", mode="before")
+    @classmethod
+    def _blank_is_default(cls, value: Any) -> Any:
+        """A blank optional field means "core's default", not an empty string."""
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    def to_core_config(self) -> dict[str, Any]:
+        """Only the keys core reads for DDS. `domain_id`/`qos_file` are left
+        out when they equal core's defaults, so a saved session does not pin
+        one install's absolute QoS path into every other machine it is loaded
+        on."""
+        defaults = dds_defaults()
+        config: dict[str, Any] = {
+            "protocol": "dds", "unit": self.unit, "dds_interface": self.dds_interface,
+        }
+        if self.domain_id is not None and self.domain_id != defaults["domain_id"]:
+            config["domain_id"] = self.domain_id
+        if self.qos_file and Path(self.qos_file).resolve() != Path(defaults["qos_file"]).resolve():
+            config["qos_file"] = self.qos_file
+        if self.qos_profile:
+            config["qos_profile"] = self.qos_profile
+        return config
+
+
+#: One request body for both shapes, picked by `protocol`. 'Edit' uses the
+#: same shape: it rebuilds the connection from scratch, because
+#: `ConnectionConfig` is frozen and a live `Connection` caches state from it.
+ConnectionCreate = Annotated[
+    Union[IrsConnectionCreate, DdsConnectionCreate], Field(discriminator="protocol")]
+ConnectionUpdate = ConnectionCreate
 
 
 class ConnectionImport(BaseModel):
@@ -266,7 +328,7 @@ class SendMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_name: str = Field(min_length=1, description="Which configured peer to send to.")
-    op_code: int = Field(ge=0, le=0xFFFF)
+    op_code: RouteKey
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -322,7 +384,7 @@ class BehaviourRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_name: str = Field(min_length=1, description="Which configured peer to send to.")
-    op_code: int = Field(ge=0, le=0xFFFF)
+    op_code: RouteKey
     #: The legacy spelling of (trigger, mode). Kept working, and it wins when
     #: given, so a caller written before triggers existed needs no migration.
     kind: str | None = Field(default=None, description="Legacy shape name, e.g. 'periodic'.")
@@ -331,7 +393,7 @@ class BehaviourRequest(BaseModel):
     mode: str = Field(default="periodic", description="'once' or 'periodic'.")
     #: Which peer's message fires this, and which message. `on_received` only.
     trigger_unit_name: str | None = None
-    trigger_op_code: int | None = Field(default=None, ge=0, le=0xFFFF)
+    trigger_op_code: RouteKey | None = None
     condition: BehaviourCondition | None = None
     #: Response latency before the send (or before a periodic action's first
     #: tick). Milliseconds, because that is the unit a protocol timing budget is
@@ -420,7 +482,7 @@ class FilterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_name: str = Field(min_length=1, description="Which peer sends this message.")
-    op_code: int = Field(ge=0, le=0xFFFF)
+    op_code: RouteKey
     mode: str = Field(default="all", description="'all', 'change', or 'field-change'.")
     change_field: str | None = Field(
         default=None, description="Field to watch, required when mode is 'field-change'.")

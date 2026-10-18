@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .fieldpath import EQUALITY_OPERATORS, OPERATORS, Condition, resolve_path
+from .routekey import route_label
 
 #: Re-exported: several callers reach for these through `filters` because this
 #: is where they used to live, and the API layer imports them by name.
@@ -140,7 +141,7 @@ class MessageFilter:
     connection_name: str
     unit_name: str          # the SENDER's configured name, as the Received log shows it
     unit_code: int          # THEIR unit code -- the sender the layout is defined for
-    op_code: int
+    op_code: int | str
     message_name: str
     namespace: str | None
     mode: str = MODE_ALL
@@ -166,7 +167,7 @@ class MessageFilter:
             "unit_code": self.unit_code,
             "unit_code_hex": f"0x{self.unit_code:02X}",
             "op_code": self.op_code,
-            "op_code_hex": f"0x{self.op_code:04X}",
+            "op_code_hex": route_label(self.op_code),
             "message_name": self.message_name,
             "namespace": self.namespace,
             "mode": self.mode,
@@ -190,7 +191,7 @@ class FilterSet:
     def __init__(self, publish: Callable[[dict[str, Any]], None]) -> None:
         self._publish = publish
         self._filters: dict[str, MessageFilter] = {}
-        self._by_route: dict[tuple[str, str, int], MessageFilter] = {}
+        self._by_route: dict[tuple[str, str, int | str], MessageFilter] = {}
         #: filter id -> the last value logged for it (whole payload, or the one
         #: resolved change field). This is the entire state a change trigger has.
         self._last: dict[str, Any] = {}
@@ -207,7 +208,7 @@ class FilterSet:
         self._stats.start()
 
     # -- the hot path ----------------------------------------------------
-    def admits(self, connection_name: str, unit_name: str, op_code: int,
+    def admits(self, connection_name: str, unit_name: str, op_code: int | str,
                payload: Any) -> bool:
         """Should this received message be logged? Called once per arrival.
 
@@ -282,7 +283,7 @@ class FilterSet:
         return message_filter
 
     # -- mutation --------------------------------------------------------
-    def set(self, connection_name: str, unit_name: str, unit_code: int, op_code: int,
+    def set(self, connection_name: str, unit_name: str, unit_code: int, op_code: int | str,
             message_name: str, namespace: str | None = None, mode: str = MODE_ALL,
             change_field: str | None = None, rules: list[dict[str, Any]] | None = None,
             armed: bool = True) -> MessageFilter:
