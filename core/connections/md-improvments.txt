@@ -1,0 +1,4 @@
+MD 
+line: 25 - Structures files are plugins that consume IRS, not IRS internals. A `Structures` entry is either a `.py` path anywhere on disk (loaded from that path) or a dotted name for a module under `core/IRS/Structures/`. Never branch import behaviour on file location.
+
+line: 26 - Classes shared across an Interface/structures file and application code must be the same objects: use absolute imports and one module object per file (same failure class as `_alias.py`).
