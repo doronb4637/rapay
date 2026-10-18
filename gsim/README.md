@@ -2,29 +2,40 @@
 
 A UI and an HTTP/WebSocket API on top of the `core` connection framework.
 
-## Architectural constraint: core is untouched
+## Architectural constraint: core is not modified
 
-Not one file under `core/` was modified. The dependency is confined to a single
+GSim never edits `core/`; the few authorised exceptions are listed in
+`gsim/CLAUDE.md`. The dependency is confined to a single
 package — `gsim/core_gateway/` — which is **the only place in GSim that imports
 `connections`, `IRS` or `tools`**. Everything above it talks to that package.
 
 ```
 <repo-root>/
-  core/                      ← UNTOUCHED. connections/ IRS/ tools/ annotations.py
+  core/                      ← NOT MODIFIED. connections/ IRS/ DDS/ tools/ annotations.py
   gsim/
     __main__.py              PyWebView desktop launcher (`python -m gsim`)
     core_gateway/            ◄── THE ONLY IMPORTER OF core
       bootstrap.py             puts <repo-root> on sys.path (imports first)
       schema.py                IRS message class -> JSON form schema
-      registry.py              read-only view of the GLOBAL MESSAGE REGISTRY
-      payloads.py              zero-fill + counted-array sync before encoding
+      registry.py              read-only view of a link's IRS `Interface`
+      payloads.py              form payload -> a built IRS message (`from_dict(...).fill()`)
+      dds.py                   DDS topics as messages: listing, form schema, samples
+      routekey.py              a route key is an IRS opcode (int) or a DDS topic name (str)
+      behaviours.py            send rules: triggers, schedules, conditions, mappings
+      filters.py               which RECEIVED messages are worth logging at all
+      fieldpath.py             dotted field paths and the shared `Condition`
+      delay.py / timing.py     sub-millisecond waits and wall-clock timestamps
       runtime.py               GSim's connection registry, logs, thread bridge
     api/
       app.py                   FastAPI factory (+ serves the built UI)
       models.py                Pydantic contract — where GSim is STRICTER than core
       routes/
         connections.py         yellow box: create / edit / delete / start / stop
-        messages.py            gray box: registry query, form schema, send, logs
+        messages.py            gray box: message list, form schema, send, logs
+        behaviours.py          behaviour rules: create / edit / delete
+        filters.py             Received filters
+        dds.py                 DDS defaults and an Interface's units, for the connection modal
+        files.py               browse / read / save files in `--server` mode (no native dialogs)
         events.py              WebSocket: live log + state feed
     web/                     React 18 + Vite + Tailwind v4 + lucide-react
       public/fonts/            Inter + JetBrains Mono woff2 (see the README there)
@@ -61,7 +72,7 @@ get nothing — that is the isolation guarantee, and it is mechanically checkabl
 # UI dev server with hot reload (proxies /api and /ws to :8765)
 cd gsim/web && npm install && npm run dev
 
-# production bundle — FastAPI serves gsim/web/dist at "/" when it exists
+# production bundle — FastAPI serves gsim/web/ui_dist at "/" when it exists
 cd gsim/web && npm run build
 ```
 
@@ -108,14 +119,10 @@ WebSocket.
 
 ### Where GSim is deliberately stricter than core
 
-Core accepts a config with no `Structures` key — correct for core, since a
-byte-oriented deployment genuinely needs no message layouts. It is wrong for
-GSim: with no registered layouts the Messages panel has nothing to list and the
-Inspector has no schema to build a form from, so the connection would be created
-and then be useless. `gsim/api/models.py` therefore makes it **mandatory at the
-API edge**, and core stays unchanged. Peer `unitCode` uniqueness and
-side/protocol agreement are enforced there too, so the modal shows a field-level
-error instead of surfacing a `ValueError` string from deep inside `from_json`.
+Core already refuses a socket link with no `Structures`, but only with a
+`ValueError` from deep inside `from_json`. `gsim/api/models.py` checks it (plus
+peer `unitCode` uniqueness and side/protocol agreement) **at the API edge**, so
+the modal shows a field-level error instead of that string.
 
 ### Two IRS behaviours the wrapper must absorb
 
@@ -125,8 +132,8 @@ exists rather than passing form output straight through:
 1. **A missing field is not a clean error.** `Structure.from_dict` only assigns
    keys that are present, leaving the slot unset; `to_bytes` then raises a bare
    `AttributeError: 'SetGeneralFlag' object has no attribute 'value'` from inside
-   IRS. (`BitField.from_dict` is stricter still — `KeyError`.) Zero-filling every
-   absent field is what makes the spec's "empty fields default to 0" real.
+   IRS. Calling IRS's `fill()` after `from_dict` defaults every absent field,
+   which is what makes the spec's "empty fields default to 0" real.
 
 2. **A counted array's length field is not maintained by IRS.**
    `ArrayField.to_bytes` iterates the list and never writes the count, while
@@ -253,13 +260,3 @@ would silently double its rate.
 
 Every send goes through the same path as the Send button, so it appears in the Sent console with a
 real timestamp — including reactive ones. Behaviours are not saved in session files.
-
-## Known core issues GSim works around (no changes made)
-
-- `tools.file_functions.read_unit_config` is an unimplemented stub (`...`), so
-  `ConnectionManager.create(name, "SomeConfigName")` — the `str` form — returns
-  `None` and fails. GSim always passes a config **dict**, which is both the
-  working path and the one that lets the UI build configs.
-- `core/connections/CLAUDE.md` still carries a stale "known blocker" note about
-  `validated_opCode`/`validated_unitCode` rejecting ints; they handle ints
-  correctly today. Left alone, as it is inside `core/`.
