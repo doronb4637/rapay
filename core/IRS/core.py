@@ -1,5 +1,6 @@
 # logic/core.py
 from typing import Any, Type
+from typing_extensions import dataclass_transform
 from enum import IntEnum
 from beartype.door import is_bearable
 
@@ -55,6 +56,8 @@ class ArrayField(BaseField):
             return [type(self.baseType)().fill() for _ in range(self.length)]
         return [self.baseType.fill() for _ in range(self.length)]
 
+
+@dataclass_transform(kw_only_default=False, field_specifiers=())
 class MessageMeta(type):
     def __new__(cls, name: str, bases: tuple, namespace: dict) -> 'MessageMeta': # TODO change to Self
         if name in ("Structure", "Message"):
