@@ -156,9 +156,11 @@ datas = [
     # data, describing the units they simulate, and they change far more often
     # than GSim does. Shipping them made a message-layout edit into an app
     # release. They now live wherever the user keeps them and are picked by
-    # path -- see the note in `gsim/paths.py`.
+    # path -- see the note in `gsim/paths.py`. The DDS data model (topic types,
+    # Interfaces, Structures) is skipped for the same reason.
     *tree(REPO / "core", "core",
-          skip=("tests", "temp.py", "pyvenv.cfg", "IRS/Structures")),
+          skip=("tests", "temp.py", "pyvenv.cfg", "IRS/Structures",
+                "DDS/idl_types", "DDS/Interfaces", "DDS/Structures")),
     # Seed content for %LOCALAPPDATA%\GSim\GsimConfig on first run.
     *tree(REPO / "configs" / "GsimConfig", "configs/GsimConfig"),
 ]

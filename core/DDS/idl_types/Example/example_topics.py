@@ -113,8 +113,8 @@ class Detection:
 #: structs takes `idl.list_factory`, since `array_factory` only builds primitives.
 @idl.struct(member_annotations={
     "label": [idl.bound(32)],
-    "spectrum": [idl.array([128])],
-    "detections": [idl.array([25])],
+    "spectrum": [idl.array([256])],
+    "detections": [idl.array([100])],
 })
 class SensorReport:
     A_sourceID: SourceId = field(default_factory=SourceId)
@@ -124,5 +124,5 @@ class SensorReport:
     tracking: bool = False
     calibrated: bool = True
     label: str = ""
-    spectrum: Sequence[idl.float32] = field(default_factory=idl.array_factory(idl.float32, [128]))
-    detections: Sequence[Detection] = field(default_factory=idl.list_factory(Detection, [25]))
+    spectrum: Sequence[idl.float32] = field(default_factory=idl.array_factory(idl.float32, [256]))
+    detections: Sequence[Detection] = field(default_factory=idl.list_factory(Detection, [100]))
