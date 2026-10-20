@@ -228,15 +228,6 @@ def test_short_fixed_array_is_rejected():
         message.to_bytes()
 
 
-def test_field_without_a_wire_format_is_rejected_at_class_definition():
-    """A lost `= Byte` dropped the field from `_fields_` while leaving it in
-    `__slots__`, so the class looked normal and quietly stopped carrying it."""
-    with pytest.raises(TypeError, match="Typo.oops: annotated <class 'int'> with no Type/Size"):
-        class Typo(Message):
-            good: int = Byte
-            oops: int
-
-
 def test_enum_attribute_rejects_a_non_member():
     """This check existed but sat behind an `elif` that could never be reached, so
     enum fields were the one kind never validated."""

@@ -118,10 +118,8 @@ class DdsConnection(Connection):
         self.can_send = any(spec.publishes for spec in self._dds.topics)
         self.can_receive = any(spec.subscribes for spec in self._dds.topics)
 
-        # Both in the caller's thread, so a bad QoS file/profile or a topic whose
-        # senders cannot be told apart fails create(), not start().
+        # In the caller's thread, so a bad QoS file/profile fails create(), not start().
         self._qos_provider: dds.QosProvider = self._load_qos_provider()
-        self._check_senders_identifiable()
 
         logger.info(
             "DDS unit %s (unitCode %#04x) of %s: publishes %s, subscribes %s; peers %s; "
@@ -200,37 +198,6 @@ class DdsConnection(Connection):
         source_id = getattr(sample, SOURCE_ID_FIELD, None)
         return None if source_id is None else getattr(source_id, SYSTEM_ID_FIELD, None)
 
-    @staticmethod
-    def _carries_source(sample_type: type) -> bool | None:
-        """Whether `sample_type` has A_sourceID.A_systemId, or None if a default
-        sample cannot be built to look."""
-        try:
-            sample = sample_type()
-        except Exception:  # noqa: BLE001 - a type we cannot probe is not a type we can fault
-            return None
-        source_id = getattr(sample, SOURCE_ID_FIELD, None)
-        return source_id is not None and hasattr(source_id, SYSTEM_ID_FIELD)
-
-    def _check_senders_identifiable(self) -> None:
-        """
-        A subscribed topic needs A_sourceID when anything but one peer can
-        write to it: when several units publish it, or when this unit publishes
-        it too (a participant's reader hears its own writer). Without it every
-        such sample would be unattributable and silently dropped, so it is a
-        load error instead.
-        """
-        for spec in self._dds.topics:
-            hears_itself = spec.publishes
-            if not spec.subscribes or (len(spec.publishers) < 2 and not hears_itself):
-                continue
-            if self._carries_source(spec.sample_type) is False:
-                why = ("also publishes it, and a participant hears its own writes" if hears_itself
-                       else f"it has {len(spec.publishers)} publishers {list(spec.publishers)}")
-                raise ValueError(
-                    f"unit {self._dds.unit!r} subscribes {spec.name!r} and {why}, but "
-                    f"{spec.sample_type.__qualname__} has no {SOURCE_PATH!r} field to tell "
-                    f"the senders apart.")
-
     def _stamp_outgoing(self, sample: Any) -> None:
         """
         Fill in our unit code as `A_sourceID.A_systemId` on an outgoing sample; the
@@ -297,22 +264,13 @@ class DdsConnection(Connection):
         """A topic class, a sample of it, or its name -> the topic name."""
         return self._dds.topic_for(topic_id).name
 
-    def _send_key(self, data: Any, opCode: OpCode | None) -> MessageKey:
-        """
-        A sample names its own topic, so `opCode` is optional on a send; given,
-        it must name the same topic. With no sample (`stop_periodic`) the
-        selector alone names it.
-        """
-        if data is None:
-            return self._message_key(opCode)
+    def _send_key(self, data: Any) -> MessageKey:
+        """A sample names its own topic."""
         if isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError(
                 f"DDS publishes typed samples, not bytes: build an instance of one of "
                 f"{self._dds.topic_names}")
         spec = self._dds.topic_for(data)
-        if opCode is not None and self._message_key(opCode) != spec.name:
-            raise ValueError(
-                f"the sample is topic {spec.name!r}, but the call names topic {self._message_key(opCode)!r}")
         if not spec.publishes:
             raise ValueError(
                 f"{self._dds.unit} does not publish {spec.name!r} in the DDS Interface (it only "

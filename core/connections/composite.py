@@ -98,10 +98,9 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     # Public API -- same shape as Connection
     # ------------------------------------------------------------------ #
-    def send_message(self, data: Outbound, opcode: OpCode | None = None,
-                     unit_name: str | None = None) -> None:
+    def send_message(self, data: Outbound, unit_name: str | None = None) -> None:
         """`Connection.send_message` on the send-capable member."""
-        self._require_sender().send_message(data, opcode, unit_name)
+        self._require_sender().send_message(data, unit_name)
 
     def interface_for(self, unit_name: str | None = None) -> Interface:
         """The IRS interface of the first member that configures `unit_name`."""
@@ -182,11 +181,10 @@ class CompositeUnit:
         self,
         data: Outbound,
         interval: int | float,
-        opcode: OpCode | None = None,
         unit_name: str | None = None,
     ) -> None:
         """`Connection.periodic_sending` on the send-capable member."""
-        self._require_sender().periodic_sending(data, interval, opcode, unit_name)
+        self._require_sender().periodic_sending(data, interval, unit_name)
 
     def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         """`Connection.stop_periodic` on the send-capable member."""

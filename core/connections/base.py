@@ -30,8 +30,8 @@ logger = logging.getLogger("connmgr")
 
 TriggerFunction = Callable[[], Any]
 #: What a send takes: a `@Definition` message instance (it carries its own
-#: route), raw bytes with an explicit opcode, or -- on DDS -- a typed sample.
-Outbound = Message | bytes
+#: route) or -- on DDS -- a typed sample.
+Outbound = Message
 ConnectedTarget = int | UnitName | Iterable[UnitName]
 #: A periodic schedule's key. The unit is None for a DDS broadcast, which has no
 #: single destination.
@@ -48,7 +48,7 @@ class Unit(Protocol):
     def active_units(self) -> set[str]: ...
     def start(self, retry: bool = False) -> None: ...
     def close(self, timeout: float | int | None = 5.0) -> None: ...
-    def send_message(self, data: Outbound, opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
+    def send_message(self, data: Outbound, unit_name: str | None = None) -> None: ...
     def receive_message(self, opcode: OpCode, unit_name: str | None = None,
                         timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage: ...
     def handle_on_receive(self, opcode: OpCode, callback_func: ReceiveCallback, unit_name: str | None = None) -> None: ...
@@ -57,7 +57,7 @@ class Unit(Protocol):
     def stop_on_connect(self, unit_name: str | None = None) -> bool: ...
     def interface_for(self, unit_name: str | None = None) -> Interface: ...
     def periodic_sending(self, data: Outbound, interval: int | float,
-                         opcode: OpCode | None = None, unit_name: str | None = None) -> None: ...
+                         unit_name: str | None = None) -> None: ...
     def stop_periodic(self, opcode: OpCode,
                       unit_name: str | None = None) -> bool: ...
     def wait_for_connected_units(self, target: ConnectedTarget,
@@ -227,32 +227,16 @@ class Connection(ABC):
             raise TypeError(f"an opcode is required on {self.config.protocol.value} connections")
         return extract_opcode(opCode)
 
-    def _send_key(self, data: Any, opCode: OpCode | None) -> MessageKey:
+    def _send_key(self, data: Any) -> MessageKey:
         """
         The key an outbound `data` goes out under. A message carries its own
-        route from `@Definition`, so `opCode` is optional for it and, if given,
-        must agree -- and its unit must be US (or the unit we are a pair of),
-        since the header is stamped with our code. Bytes carry nothing, so `opCode` is required (as it is with no
-        data at all, for `stop_periodic`). DDS derives the key from the sample.
+        route from `@Definition`, and its unit must be US (or the unit we are a
+        pair of), since the header is stamped with our code. DDS derives the key
+        from the sample.
         """
-        if data is None or isinstance(data, (bytes, bytearray, memoryview)):
-            return self._message_key(opCode)
         if not isinstance(data, Message):
-            raise TypeError(
-                f"send_message takes a @Definition message instance or bytes, got {type(data).__name__}")
-        message_class = type(data)
-        if not is_definition(message_class):
-            raise TypeError(f"{message_class.__name__} has no @Definition(unitCode=..., opCode=...)")
-        speaks_as = {interface.speaks_as(self._own_unit_code, message_class._opCode) for interface in self._interfaces.values()}
-        if message_class._unitCode != self._own_unit_code and message_class._unitCode not in speaks_as:
-            raise ValueError(
-                f"{message_class.__name__} is sent by unit {message_class._unitCode}, but this "
-                f"connection is unit {self._own_unit_code}")
-        own = message_class._opCode
-        if opCode is not None and self._message_key(opCode) != own:
-            raise ValueError(
-                f"the message is opcode {own}, but the call names opcode {self._message_key(opCode)}")
-        return own
+            raise TypeError(f"send_message only takes a IRS message instance, got {type(data).__name__}")
+        return data._unitCode
 
     def _send_unit(self, unit_name: str | None, key: MessageKey) -> UnitName | None:
         """The destination of a send. None only on DDS, where a sample goes to
@@ -529,20 +513,18 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: Outbound, opcode: OpCode | None = None,
-                     unit_name: str | None = None) -> None:
+    def send_message(self, data: Outbound, unit_name: str | None = None) -> None:
         """
         Send `data` to `unit_name`, which may be left out when only one unit is
-        configured. A `@Definition` message goes out under its own opcode, so
-        `opcode` is optional for it; bytes pass through and need `opcode`. On
+        configured. A `@Definition` message goes out under its own opcode. On
         DDS the sample names its own topic and goes to every subscriber.
 
-        Raises `ValueError` for an unknown unit, a mismatched opcode or a
-        message another unit sends, `TypeError` for a missing opcode or an
-        unsupported `data` type, `IRSDataError` if IRS cannot encode `data`,
-        and `ConnectionError` if the unit has no peer yet.
+        Raises `ValueError` for an unknown unit or a message another unit
+        sends, `TypeError` for an unsupported `data` type, `IRSDataError` if
+        IRS cannot encode `data`, and `ConnectionError` if the unit has no peer
+        yet.
         """
-        key = self._send_key(data, opcode)
+        key = self._send_key(data)
         unit = self._send_unit(unit_name, key)
         payload = self._encode(key, data, unit)
         self._loop_thread.await_coroutine(self._do_send(unit, payload, key))
@@ -692,7 +674,6 @@ class Connection(ABC):
         self,
         data: Outbound,
         interval: int | float,
-        opcode: OpCode | None = None,
         unit_name: str | None = None,
     ) -> None:
         """
@@ -702,12 +683,12 @@ class Connection(ABC):
 
         A failed tick is logged and retried on the next one. Raises `ValueError`
         if `interval` is not positive, plus whatever `send_message` raises for
-        a bad destination or opcode.
+        a bad destination or message.
         """
         interval_seconds = float(interval)
         if interval_seconds <= 0:
             raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
-        key = self._send_key(data, opcode)
+        key = self._send_key(data)
         unit = self._send_unit(unit_name, key)
         payload = self._encode(key, data, unit)
         self._loop_thread.await_coroutine(
@@ -716,7 +697,7 @@ class Connection(ABC):
     def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         """Stop the schedule `periodic_sending` started for this route. True if
         one was running."""
-        key = self._send_key(None, opcode)
+        key = self._message_key(opcode)
         unit = self._send_unit(unit_name, key)
         stopped: bool = self._loop_thread.await_coroutine(self._stop_periodic(self._periodic_key(unit, key)))
         return stopped
@@ -811,11 +792,9 @@ class FramedConnection(Connection):
                 f"{unit_name!r} (unit {unit_code})")
         return interface.message_class(unit_code, opcode)
 
-    def _encode(self, opcode: OpCode, message: Message | bytes, unit_name: UnitName) -> bytes:
-        """The message's own layout; bytes pass through. Stamped with OUR unit
-        code by `_frame`, which `_send_key` already checked the message is."""
-        if isinstance(message, (bytes, bytearray, memoryview)):
-            return message
+    def _encode(self, opcode: OpCode, message: Message, unit_name: UnitName) -> bytes:
+        """The message's own layout. Stamped with OUR unit code by `_frame`,
+        which `_send_key` already checked the message is."""
         try:
             return message.to_bytes()
         except Exception as exc:

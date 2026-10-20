@@ -26,7 +26,7 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 
 ### Framing and codec
 - `FramedConnection` mixes framing into TCP/UDP/Multicast. `DdsConnection` never touches `framing.py`; it passes typed samples through.
-- `_encode` is the message's own `to_bytes()`; the header carries **our** config `unitCode`. `_decode` parses with the class the route was claimed with (`RouteTable` stores it beside the owner). Raw `bytes` pass through on send.
+- `_encode` is the message's own `to_bytes()`; the header carries **our** config `unitCode`. `_decode` parses with the class the route was claimed with (`RouteTable` stores it beside the owner).
 - A send that IRS cannot encode raises `IRSDataError`. A receive that IRS cannot parse is logged with the traceback and dropped; one bad frame never costs the read loop, the link or a parked `receive_message()`.
 - The abstract `Connection._route_class()` answers "could this connection ever deliver this route, and with which class?". Framed links ask the unit's `Interface`; DDS asks its DDS Interface and returns `None` (samples arrive typed).
 
@@ -42,7 +42,7 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - Inbound routing comes from the transport, not the header. `ConnectionConfig` is `frozen=True, slots=True`; mutating it would desync `Connection`'s caches.
 
 ### Sending and receiving
-- A send takes a `@Definition` message instance (its opcode is its own; an explicit one must agree, else `ValueError`; its `unitCode` must be ours or the unit we are a pair of, else `ValueError`) or bytes with an explicit opcode. Dicts and undecorated messages are a `TypeError`. Same for `periodic_sending`.
+- A send takes a `@Definition` message instance and nothing else; its opcode is its own, so `send_message` and `periodic_sending` have no `opcode` parameter. Bytes and dicts are a `TypeError`. The message and the `Interface` are trusted: `unitCode` and `@Definition` are not re-checked on send.
 - A receive selector (`receive_message`, `handle_on_receive`, `@route`) is the message class or an int/"0x.." opcode, resolved once at subscribe time against the unit's `Interface`; a class is trusted (no identity check against the link's layout), only its unit code must be THEIR unit code (or the unit they are a pair of).
 - `unit_name` may be omitted only when exactly one unit is connected. `receive_message()` matches both opcode and resolved unit.
 - The selector is turned into a route key by `_message_key`, `_send_key` and `_send_unit`. DDS overrides all three (selector = topic class, sample or name) and `_resolve_route`.

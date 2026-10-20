@@ -7,17 +7,17 @@ import time
 
 import pytest
 
-from core.tests._messages import MESSAGES, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import MESSAGES, text, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 
 def test_unit_name_optional_with_a_single_connected_unit(manager, free_port):
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
@@ -25,7 +25,7 @@ def test_unit_name_optional_with_a_single_connected_unit(manager, free_port):
 
     message = server.receive_message(
         1, timeout=3,  # unit_name omitted -- only one unit configured
-        trigger_function=lambda: client.send_message(b"hi", 1),  # unit_name omitted too
+        trigger_function=lambda: client.send_message(text(1, b"hi")),  # unit_name omitted too
     )
     assert bytes(message.data) == b"hi"
 
@@ -33,7 +33,7 @@ def test_unit_name_optional_with_a_single_connected_unit(manager, free_port):
 def test_unit_name_required_with_multiple_units(manager, free_ports):
     port_a, port_b = free_ports(2)
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
             "A": {"port": port_a, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]},
@@ -54,12 +54,12 @@ def test_send_only_mode_cannot_receive_and_receive_only_cannot_send(manager, fre
     routes traffic to it in a real deployment."""
     port_send, port_recv = free_ports(2)
     sender = manager.create("sender", {
-        "protocol": "udp", "unitCode": 100, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "send_only",
         "connections": {"Peer": {"port": port_send, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     receiver = manager.create("receiver", {
-        "protocol": "udp", "unitCode": 101, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "receive_only",
         "connections": {"Peer": {"port": port_recv, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
@@ -69,13 +69,13 @@ def test_send_only_mode_cannot_receive_and_receive_only_cannot_send(manager, fre
     assert receiver.can_send is False and receiver.can_receive is True
 
     with pytest.raises(RuntimeError):
-        receiver.send_message(b"nope", 1, unit_name="Peer")
+        receiver.send_message(text(1, b"nope"), unit_name="Peer")
 
 
 def test_invalid_mode_rejected_at_construction(manager, free_port):
     with pytest.raises(ValueError, match="mode"):
         manager.create("c", {
-            "protocol": "udp", "unitCode": 100, "side": "server",
+            "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "sideways",
             "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         })
@@ -83,7 +83,7 @@ def test_invalid_mode_rejected_at_construction(manager, free_port):
 
 def test_server_learns_peer_address_from_first_datagram(manager, free_port):
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
@@ -91,12 +91,12 @@ def test_server_learns_peer_address_from_first_datagram(manager, free_port):
     assert "Peer" not in server.active_units
 
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client.start()
-    client.send_message(b"hello", 1)
+    client.send_message(text(1, b"hello"))
 
     assert server.wait_for_connected_units("Peer", timeout=3) is True
 
@@ -106,25 +106,25 @@ def test_server_send_before_any_inbound_datagram_raises(manager, free_port):
     something -- sending to it beforehand must fail loudly, not corrupt the
     unconnected socket's write buffer."""
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     server.start()
     with pytest.raises(ConnectionError):
-        server.send_message(b"nobody-yet", 1, unit_name="Peer")
+        server.send_message(text(1, b"nobody-yet"), unit_name="Peer")
 
 
 def test_malformed_datagram_is_dropped_not_fatal(manager, free_port):
     from core.connections.framing import HEADER_SIZE
 
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
@@ -140,17 +140,17 @@ def test_malformed_datagram_is_dropped_not_fatal(manager, free_port):
     # The connection is still fully usable afterwards.
     message = server.receive_message(
         1, unit_name="Peer", timeout=3,
-        trigger_function=lambda: client.send_message(b"still-works", 1),
+        trigger_function=lambda: client.send_message(text(1, b"still-works")),
     )
     assert bytes(message.data) == b"still-works"
 
 
 def test_connection_not_started_raises_on_send(manager, free_port):
     connection = manager.create("c", {
-        "protocol": "udp", "unitCode": 100, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     # Never started -- no transport exists yet.
     with pytest.raises(Exception):
-        connection.send_message(b"x", 1, unit_name="Peer")
+        connection.send_message(text(1, b"x"), unit_name="Peer")

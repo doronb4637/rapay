@@ -174,7 +174,4 @@ def test_a_message_from_a_pair_is_parsed_as_the_paired_units_message(manager, fr
 def test_a_pair_sends_the_paired_units_messages(manager, free_ports):
     connection = manager.create("mfd", _pair_config(free_ports(1)[0], 0x03, "Tiful", 0x01))
     set_flag = connection.interface_for("Tiful").message_class(0x02, 0x0012)
-    general_flag = connection.interface_for("Tiful").message_class(0x01, 0x0012)
-    assert connection._send_key(set_flag(), None) == 0x0012
-    with pytest.raises(ValueError, match="sent by unit 1"):
-        connection._send_key(general_flag(), None)
+    assert connection._send_key(set_flag()) == 0x0012

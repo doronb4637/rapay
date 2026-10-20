@@ -8,7 +8,7 @@ import pytest
 
 from core.connections.composite import CompositeUnit
 from core.connections.manager import ConnectionManager
-from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, text, TEXT_UNIT_CODE
 
 
 def _member(protocol_mode, port, own_code=TEXT_UNIT_CODE, peer_code=TEXT_UNIT_CODE, side="client"):
@@ -41,7 +41,7 @@ def test_composite_combines_send_only_and_receive_only_members(manager, free_por
 
     message = composite.receive_message(
         1, unit_name="Peer", timeout=3,
-        trigger_function=lambda: peer.send_message(b"to-composite", 1),
+        trigger_function=lambda: peer.send_message(text(1, b"to-composite")),
     )
     assert bytes(message.data) == b"to-composite"
 
@@ -61,7 +61,7 @@ def test_composite_send_uses_the_send_capable_member(manager, free_ports):
 
     message = peer.receive_message(
         1, unit_name="Beacon", timeout=3,
-        trigger_function=lambda: composite.send_message(b"from-composite", 1, unit_name="Peer"),
+        trigger_function=lambda: composite.send_message(text(1, b"from-composite"), unit_name="Peer"),
     )
     assert bytes(message.data) == b"from-composite"
 
@@ -100,7 +100,7 @@ def test_composite_send_with_no_sender_raises_runtimeerror(manager, free_port):
         "receive": _member("receive_only", free_port, 100, side="server"),
     })
     with pytest.raises(RuntimeError, match="no send-capable member"):
-        composite.send_message(b"x", 1, unit_name="Peer")
+        composite.send_message(text(1, b"x"), unit_name="Peer")
 
 
 def test_composite_active_units_is_union_of_members(manager, free_ports):
@@ -120,7 +120,7 @@ def test_composite_active_units_is_union_of_members(manager, free_ports):
         "connections": {"Beacon": {"port": port_recv, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     manager.start_all()
-    peer_sender.send_message(b"warm-up", 1)  # lets the receive member learn its peer
+    peer_sender.send_message(text(1, b"warm-up"))  # lets the receive member learn its peer
 
     assert composite.wait_for_connected_units("Peer", timeout=3) is True
     assert "Peer" in composite.active_units

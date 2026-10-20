@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from core.tests._messages import MESSAGES, TEXT_UNIT_CODE
+from core.tests._messages import MESSAGES, text, TEXT_UNIT_CODE
 
 #: Long enough that a sender left running by mistake fires several more times
 #: within a test's observation window; short enough to keep the suite quick.
@@ -40,12 +40,12 @@ class Counter:
 def _pair(manager, port):
     """A started UDP server+client pair talking as 'Peer' on `port`."""
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
@@ -58,7 +58,7 @@ def test_periodic_sending_repeats(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
+    client.periodic_sending(text(1, b"tick"), FAST_INTERVAL)
     time.sleep(FAST_INTERVAL * 8)
 
     assert counter.read() >= 3, "periodic sender did not repeat"
@@ -71,11 +71,11 @@ def test_periodic_sending_replaces_the_sender_for_a_route(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"fast", FAST_INTERVAL, 1)
+    client.periodic_sending(text(1, b"fast"), FAST_INTERVAL)
     time.sleep(FAST_INTERVAL * 6)
     assert counter.read() >= 2
 
-    client.periodic_sending(b"slow", SLOW_INTERVAL, 1)
+    client.periodic_sending(text(1, b"slow"), SLOW_INTERVAL)
     after_replace = counter.read()
     time.sleep(FAST_INTERVAL * 10)
 
@@ -86,7 +86,7 @@ def test_periodic_sending_replaces_the_sender_for_a_route(manager, free_port):
 
 def test_stop_periodic_reports_whether_there_was_one_to_stop(manager, free_port):
     _server, client = _pair(manager, free_port)
-    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
+    client.periodic_sending(text(1, b"tick"), FAST_INTERVAL)
 
     assert client.stop_periodic(1, unit_name="Peer") is True
     assert client.stop_periodic(1, unit_name="Peer") is False
@@ -97,7 +97,7 @@ def test_stopped_sender_actually_stops(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
+    client.periodic_sending(text(1, b"tick"), FAST_INTERVAL)
     time.sleep(FAST_INTERVAL * 6)
     client.stop_periodic(1, unit_name="Peer")
     settled = counter.read()
@@ -110,7 +110,7 @@ def test_periodic_sending_rejects_a_non_positive_interval(manager, free_port):
     _server, client = _pair(manager, free_port)
     for bad in (0, -1, -0.5):
         with pytest.raises(ValueError, match="interval must be > 0"):
-            client.periodic_sending(b"tick", bad, 1)
+            client.periodic_sending(text(1, b"tick"), bad)
 
 
 def test_close_cancels_periodic_senders(manager, free_port):
@@ -118,7 +118,7 @@ def test_close_cancels_periodic_senders(manager, free_port):
     counter = Counter()
     server.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
+    client.periodic_sending(text(1, b"tick"), FAST_INTERVAL)
     time.sleep(FAST_INTERVAL * 6)
     client.close()
     settled = counter.read()
@@ -135,6 +135,6 @@ def test_periodic_sending_and_a_standing_callback_share_the_route_key(manager, f
     counter = Counter()
     client.handle_on_receive(1, counter, unit_name="Peer")
 
-    client.periodic_sending(b"tick", FAST_INTERVAL, 1)
+    client.periodic_sending(text(1, b"tick"), FAST_INTERVAL)
     assert client.stop_periodic(1, unit_name="Peer") is True
     assert client.stop_on_receive(1, unit_name="Peer") is True

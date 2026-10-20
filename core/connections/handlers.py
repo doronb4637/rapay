@@ -39,7 +39,7 @@ def on_connect(func: _F) -> _F:
 
             @on_connect
             def greet(self, unit_name: str) -> None:
-                self.unitConnection.send_message(hello, HELLO_OPCODE)
+                self.unitConnection.send_message(hello)
     """
     setattr(func, _ON_CONNECT_ATTR, True)
     return func

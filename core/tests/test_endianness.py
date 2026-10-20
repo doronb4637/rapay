@@ -110,14 +110,6 @@ def test_module_declaration_reaches_plain_fields():
     assert be.Sample._fields_[0].packer.format == '>H'
 
 
-@pytest.mark.parametrize("declared", ['!', '=', 'big', '', None])
-def test_invalid_declaration_is_rejected(declared, monkeypatch):
-    """Fail fast at import, not silently on the wire."""
-    monkeypatch.setattr(be, 'ENDIAN', declared, raising=False)
-    with pytest.raises(ValueError, match="must be bigEndian"):
-        module_endian(be.__name__)
-
-
 def test_unknown_module_falls_back_to_little_endian():
     """A class built by `exec` has no entry in `sys.modules` -- it must not explode."""
     assert module_endian('no.such.module') == littleEndian

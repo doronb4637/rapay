@@ -65,3 +65,9 @@ class Ping(Message):
     seq: int = UInt16
     kind: E_Kind
     value: int = UInt16
+
+
+def text(opcode: int, payload: bytes, unit_code: int = TEXT_UNIT_CODE) -> Message:
+    """A Text message `unit_code` sends on `opcode` -- what the transport tests
+    send in place of raw bytes."""
+    return globals()[f"Text_{unit_code}_{opcode}"](data=list(payload))

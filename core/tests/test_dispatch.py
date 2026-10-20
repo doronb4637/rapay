@@ -11,11 +11,11 @@ import pytest
 
 from core.connections.framing import pack_message
 
-from core.tests._messages import (MESSAGES, E_Kind, Ping, PING_OPCODE, PING_UNIT_CODE, TEXT_UNIT_CODE,
+from core.tests._messages import (MESSAGES, text, E_Kind, Ping, PING_OPCODE, PING_UNIT_CODE, TEXT_UNIT_CODE,
                                   TEXT_UNIT_CODE_2)
 
 
-def _pair(manager, port, server_unit_code=100, client_unit_code=101,
+def _pair(manager, port, server_unit_code=TEXT_UNIT_CODE, client_unit_code=TEXT_UNIT_CODE,
           peer_unit_code=TEXT_UNIT_CODE, **extra):
     """A UDP server+client pair, both already `.start()`ed, talking as
     'Peer' on `port`. Returns (server, client).
@@ -46,7 +46,7 @@ def _pair(manager, port, server_unit_code=100, client_unit_code=101,
 # --------------------------------------------------------------------------- #
 def test_message_sent_before_anyone_subscribes_is_dropped(manager, free_port):
     server, client = _pair(manager, free_port)
-    client.send_message(b"nobody-home", 1)
+    client.send_message(text(1, b"nobody-home"))
     time.sleep(0.2)
     with pytest.raises(TimeoutError):
         server.receive_message(1, unit_name="Peer", timeout=0.3)
@@ -97,7 +97,7 @@ def test_receive_message_delivers_matching_opcode_and_unit(manager, free_port):
     server, client = _pair(manager, free_port)
     message = server.receive_message(
         1, unit_name="Peer", timeout=3,
-        trigger_function=lambda: client.send_message(b"hello", 1),
+        trigger_function=lambda: client.send_message(text(1, b"hello")),
     )
     assert bytes(message.data) == b"hello"
 
@@ -120,7 +120,7 @@ def test_receive_message_ignores_a_different_opcode(manager, free_port):
     )
     t.start()
     time.sleep(0.1)  # let the subscription arm
-    client.send_message(b"wrong-opcode", 1)  # not opcode 2 -- dropped
+    client.send_message(text(1, b"wrong-opcode"))  # not opcode 2 -- dropped
     t.join(timeout=2)
     assert result.get("timed_out") is True  # still waiting / timed out, never delivered
 
@@ -133,12 +133,12 @@ def test_trigger_function_closes_the_request_response_race(manager, free_port):
     # A UDP server only learns its peer's address from an inbound datagram
     # (`_remember_peer`) -- warm it up so `server.send_message` below has
     # somewhere to send, same as a real request/response exchange would.
-    client.send_message(b"warm-up", 1)
+    client.send_message(text(1, b"warm-up"))
     time.sleep(0.2)
 
     message = client.receive_message(
         2, unit_name="Peer", timeout=3,
-        trigger_function=lambda: server.send_message(b"immediate", 2, unit_name="Peer"),
+        trigger_function=lambda: server.send_message(text(2, b"immediate"), unit_name="Peer"),
     )
     assert bytes(message.data) == b"immediate"
 
@@ -155,7 +155,7 @@ def test_trigger_function_raising_releases_the_subscription(manager, free_port):
     # The route must be free again -- not left "subscribed" forever.
     message = server.receive_message(
         1, unit_name="Peer", timeout=3,
-        trigger_function=lambda: client.send_message(b"after-failure", 1),
+        trigger_function=lambda: client.send_message(text(1, b"after-failure")),
     )
     assert bytes(message.data) == b"after-failure"
 
@@ -180,14 +180,14 @@ def test_handle_on_receive_answers_every_matching_message(manager, free_port):
     server, client = _pair(manager, free_port)
 
     def echo_back(message):
-        server.send_message(b"re:" + bytes(message.data), 2, unit_name="Peer")
+        server.send_message(text(2, b"re:" + bytes(message.data)), unit_name="Peer")
 
     server.handle_on_receive(1, echo_back, unit_name="Peer")
 
     for i in range(3):
         reply = client.receive_message(
             2, unit_name="Peer", timeout=3,
-            trigger_function=lambda i=i: client.send_message(f"n{i}".encode(), 1),
+            trigger_function=lambda i=i: client.send_message(text(1, f"n{i}".encode())),
         )
         assert bytes(reply.data) == f"re:n{i}".encode()
 
@@ -227,7 +227,7 @@ def test_stop_on_receive_removes_the_callback(manager, free_port):
 
     # Route is free again: no callback firing, so a fresh send is dropped
     # (nobody subscribed either).
-    client.send_message(b"post-stop", 1)
+    client.send_message(text(1, b"post-stop"))
     time.sleep(0.2)
     with pytest.raises(TimeoutError):
         server.receive_message(1, unit_name="Peer", timeout=0.3)
@@ -240,7 +240,7 @@ def test_callback_exception_is_swallowed_and_does_not_kill_the_read_loop(manager
         raise RuntimeError("boom in callback")
 
     server.handle_on_receive(1, bad_callback, unit_name="Peer")
-    client.send_message(b"first", 1)
+    client.send_message(text(1, b"first"))
     time.sleep(0.3)
 
     # The connection is still alive and this route still works for a second
@@ -248,12 +248,12 @@ def test_callback_exception_is_swallowed_and_does_not_kill_the_read_loop(manager
     server.stop_on_receive(1, unit_name="Peer")
 
     def good_callback(message):
-        server.send_message(b"still-alive", 2, unit_name="Peer")
+        server.send_message(text(2, b"still-alive"), unit_name="Peer")
 
     server.handle_on_receive(1, good_callback, unit_name="Peer")
     reply = client.receive_message(
         2, unit_name="Peer", timeout=3,
-        trigger_function=lambda: client.send_message(b"second", 1),
+        trigger_function=lambda: client.send_message(text(1, b"second")),
     )
     assert bytes(reply.data) == b"still-alive"
 
@@ -317,7 +317,7 @@ def test_echo_opcode_is_consumed_and_never_delivered(manager, free_port):
         manager, free_port,
         echo_opcode=15, EchoInterval=0.2, EchoTimeout=30,
     )
-    client.send_message(b"heartbeat", 15)
+    client.send_message(text(15, b"heartbeat"))
     time.sleep(0.2)
     with pytest.raises(TimeoutError):
         server.receive_message(15, unit_name="Peer", timeout=0.3)
@@ -330,7 +330,7 @@ def test_non_echo_opcode_still_delivered_on_a_connection_with_echo_enabled(manag
     )
     message = server.receive_message(
         1, unit_name="Peer", timeout=3,
-        trigger_function=lambda: client.send_message(b"app-data", 1),
+        trigger_function=lambda: client.send_message(text(1, b"app-data")),
     )
     assert bytes(message.data) == b"app-data"
 
@@ -342,7 +342,7 @@ def _two_unit_server(manager, ports):
     """A UDP server multiplexing two units, so a per-unit teardown can be
     shown to leave the other one alone."""
     return manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
             "PeerA": {"port": ports[0], "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]},
@@ -393,8 +393,8 @@ def test_disconnect_unit_drops_only_that_units_callbacks(manager, free_ports):
 def test_disconnect_unit_cancels_only_that_units_periodic_senders(manager, free_ports):
     server = _two_unit_server(manager, free_ports(2))
     server.start()
-    server.periodic_sending(b"tick", 0.05, 1, unit_name="PeerA")
-    server.periodic_sending(b"tick", 0.05, 1, unit_name="PeerB")
+    server.periodic_sending(text(1, b"tick"), 0.05, unit_name="PeerA")
+    server.periodic_sending(text(1, b"tick"), 0.05, unit_name="PeerB")
 
     _disconnect(server, "PeerA")
 

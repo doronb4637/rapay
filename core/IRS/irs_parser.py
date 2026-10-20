@@ -42,8 +42,8 @@ class IRSDataError(Exception):
 
 
 class IRSAmbiguousError(Exception):
-    """Raised when the structures files one link combines give one route, or
-    a pair code that also has layouts, two different meanings.
+    """Raised when the structures files one link combines give one route two
+    different layouts.
 
     Deliberately NOT a subclass of IRSNotFoundError
     """
@@ -71,35 +71,17 @@ class Interface:
         route for every layout THIS file gives the unit it speaks as, so a pair
         never leaks into another file merged onto the same link.
 
-        Raises:
-            TypeError: `PAIRS` is not a dict of int unit code -> int unit code.
-            ValueError: a pair speaks a unit this file gives no layouts.
-            IRSAmbiguousError: two layouts on one route, or a pair code that
-                also defines layouts of its own.
+        The file is trusted as written; `core.tools.validate_interface` checks
+        it offline.
         """
-        source = short_name(module.__name__)
-        defined: dict[Route, IrsMessage] = {}
-        for name, value in vars(module).items():
-            if not name.startswith("_") and is_definition(value):
-                _add_message(defined, (value._unitCode, value._opCode), value, source)
-        pairs = getattr(module, PAIRS_ATTRIBUTE, {})
-        if not isinstance(pairs, dict) or not all(
-                type(code) is int and type(speaks) is int for code, speaks in pairs.items()):
-            raise TypeError(f"{module.__name__}.{PAIRS_ATTRIBUTE} must be a dict of "
-                            f"{{pair unit code: unit code it speaks as}}, got {pairs!r}")
+        defined: dict[Route, IrsMessage] = {
+            (value._unitCode, value._opCode): value
+            for name, value in vars(module).items() if not name.startswith("_") and is_definition(value)}
         messages = dict(defined)
-        for pairCode, speaksCode in pairs.items():
-            own = sorted(op for unit, op in defined if unit == pairCode)
-            if own:
-                raise IRSAmbiguousError(
-                    f"unit {pairCode} is paired to {speaksCode} but also defines its own "
-                    f"message on opCode={own[0]} [structures: {source}]")
-            borrowed = [(op, message_class) for (unit, op), message_class in defined.items() if unit == speaksCode]
-            if not borrowed:
-                raise ValueError(f"unit {pairCode} is paired to {speaksCode}, which sends no "
-                                 f"message in this file [structures: {source}]")
-            for op, message_class in borrowed:
-                messages[(pairCode, op)] = message_class
+        for pairCode, speaksCode in getattr(module, PAIRS_ATTRIBUTE, {}).items():
+            for (unit, op), message_class in defined.items():
+                if unit == speaksCode:
+                    messages[(pairCode, op)] = message_class
         return cls((module.__name__,), messages)
 
     @classmethod

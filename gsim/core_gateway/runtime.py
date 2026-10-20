@@ -365,7 +365,7 @@ class PreparedSend:
     def fire(self) -> LogEntry:
         """Send it and log it. `_log` filters only RECEIVED messages, so a sent
         entry is never `None`."""
-        self.record.unit.send_message(self.message, self.op_code, self.unit_name)
+        self.record.unit.send_message(self.message, self.unit_name)
         return self.runtime._log(  # type: ignore[return-value]
             self.record, "sent", self.record.name, self.record.own_unit_code,
             self.op_code, self.message_name, self.payload, None,

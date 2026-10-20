@@ -440,26 +440,6 @@ def test_with_several_publishers_the_source_id_decides(tmp_path):
     assert b._sending_unit(sample_from(Track, 0x0A), spec_of(b, "Track")) == "A"
 
 
-def test_several_publishers_and_no_source_id_fails_at_load(tmp_path):
-    """Every sample would be unattributable -- a load error, not silent drops."""
-    path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=0x0A, publish=(Plain,))
-        B = DdsUnit(unitCode=0x0B, subscribe=(Plain,))
-        C = DdsUnit(unitCode=0x0C, publish=(Plain,))
-        """, types=NO_SOURCE_ID)
-    with pytest.raises(ValueError, match=r"2 publishers \['A', 'C'\]"):
-        build("B", path)
-
-
-def test_a_topic_the_unit_also_publishes_needs_a_source_id(tmp_path):
-    path = write_interface(tmp_path, """\
-        A = DdsUnit(unitCode=1, publish=(Plain,), subscribe=(Plain,))
-        B = DdsUnit(unitCode=2, publish=(Plain,), subscribe=(Plain,))
-        """, types=NO_SOURCE_ID)
-    with pytest.raises(ValueError, match="hears its own writes"):
-        build("A", path)
-
-
 def test_a_units_own_samples_are_filtered(tmp_path):
     path = write_interface(tmp_path, """\
         A = DdsUnit(unitCode=1, publish=(Track,), subscribe=(Track,))
@@ -600,18 +580,6 @@ def test_a_named_destination_is_checked():
     assert len(writer.written) == 1
     with pytest.raises(ValueError, match="does not subscribe"):
         sensor.send_message(Track(), unit_name="NoSuchUnit")
-
-
-def test_a_selector_naming_another_topic_is_refused():
-    sensor = build(SENSOR)
-    sensor._writers["Track"] = RecordingWriter()
-    with pytest.raises(ValueError, match="names topic 'Status'"):
-        sensor.send_message(Track(), Status)
-
-
-def test_an_int_opcode_is_refused_on_dds():
-    with pytest.raises(TypeError, match="no opcodes"):
-        build(SENSOR).send_message(Track(), 5)
 
 
 def test_unknown_dds_config_keys_are_refused():

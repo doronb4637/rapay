@@ -69,6 +69,7 @@ anything in this suite or in `connections` itself. Stick to the `.venv`.
 | `test_echo_supervisor.py` | `UnitEchoSupervisor` against a stub `EchoHost` on a private loop: arming, sending, consumption, the watchdog's deadline -- millisecond timings, no sockets |
 | `test_handlers.py` | `route`/`UnitHandler` class-definition-time logic, `install_handler` wiring |
 | `test_manager.py` | `ConnectionManager` factory, lifecycle, `Structures` import normalization |
+| `test_validate_interface.py` | `core.tools.validate_interface`: offline checks of structures files and DDS Interfaces (DDS cases skip without `rti`) |
 | `test_dispatch.py` | Subscribe-or-drop, `handle_on_receive`, `trigger_function`, mutual exclusion, echo consumption, malformed-payload handling, per-unit `_disconnect_unit` cleanup |
 | `test_periodic.py` | `periodic_sending`/`stop_periodic`: repetition, replace-don't-double, interval validation, cancellation on `close()` |
 | `test_on_connect.py` | `handle_on_connect`/`stop_on_connect` and the `@on_connect` handler tag: exclusivity, no retroactive firing |

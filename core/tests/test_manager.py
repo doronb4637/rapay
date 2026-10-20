@@ -244,15 +244,6 @@ def test_a_structures_path_that_does_not_exist_names_the_missing_file(tmp_path):
         import_modules([str(missing)])
 
 
-def test_a_file_with_no_definition_is_not_a_structures_file(tmp_path):
-    from core.tools.general import import_modules
-
-    path = tmp_path / "empty_messages.py"
-    path.write_text("from IRS import *\nUnit = 1\n")
-    with pytest.raises(ImportError, match="defines no @Definition message"):
-        import_modules([str(path)])
-
-
 def test_same_named_files_in_different_directories_do_not_clobber(tmp_path):
     """`sys.modules[path.stem]` used to collapse both onto one entry, so the
     second import silently erased the first."""

@@ -7,20 +7,20 @@ import time
 
 import pytest
 
-from core.tests._messages import MESSAGES, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
+from core.tests._messages import MESSAGES, text, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2
 
 pytestmark = pytest.mark.slow
 
 
 def test_echo_disconnects_a_silent_peer(manager, free_port):
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": 0.5,
     })
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         # No echo keys on the client -- it never answers, so the server's
@@ -28,7 +28,7 @@ def test_echo_disconnects_a_silent_peer(manager, free_port):
     })
     manager.start_all()
 
-    client.send_message(b"hello", 1)  # server learns the peer's address
+    client.send_message(text(1, b"hello"))  # server learns the peer's address
     assert server.wait_for_connected_units("Peer", timeout=2) is True
 
     time.sleep(1.0)  # comfortably past EchoTimeout with zero replies
@@ -37,13 +37,13 @@ def test_echo_disconnects_a_silent_peer(manager, free_port):
 
 def test_echo_keeps_a_responsive_peer_alive(manager, free_port):
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": 0.6,
     })
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": 0.6,
@@ -61,13 +61,13 @@ def test_echo_opcode_never_reaches_receive_message(manager, free_port):
     surface to receive_message() on either end -- consumption is per the
     RECEIVING side's own echo config, regardless of who initiated it."""
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.1, "EchoTimeout": 30,
     })
     client = manager.create("client", {
-        "protocol": "udp", "unitCode": 101, "side": "client",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.1, "EchoTimeout": 30,
@@ -88,7 +88,7 @@ def test_hierarchical_echo_per_unit_opcode_override(manager, free_ports):
     port1, port2 = free_ports(2)
     GLOBAL_ECHO, UNIT1_ECHO = 15, 16
     server = manager.create("server", {
-        "protocol": "tcp", "unitCode": 100, "side": "server",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
             "unit1": {"port": port1, "unitCode": TEXT_UNIT_CODE, "echo_opcode": UNIT1_ECHO, "Structures": [MESSAGES]},
@@ -105,12 +105,12 @@ def test_hierarchical_echo_per_unit_opcode_override(manager, free_ports):
     server._do_send = recording_send
 
     client1 = manager.create("client1", {
-        "protocol": "tcp", "unitCode": 101, "side": "client",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"unit1": {"port": port1, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     })
     client2 = manager.create("client2", {
-        "protocol": "tcp", "unitCode": 102, "side": "client",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"unit2": {"port": port2, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
     })
@@ -127,7 +127,7 @@ def test_echo_watchdog_disconnects_only_the_dead_unit(manager, free_ports):
     alive -- the watchdog must isolate the failure to one unit."""
     port1, port2 = free_ports(2)
     server = manager.create("server", {
-        "protocol": "tcp", "unitCode": 100, "side": "server",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {
             "silent": {"port": port1, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]},
@@ -136,13 +136,13 @@ def test_echo_watchdog_disconnects_only_the_dead_unit(manager, free_ports):
         "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": 0.5,
     })
     client_silent = manager.create("client_silent", {
-        "protocol": "tcp", "unitCode": 101, "side": "client",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"silent": {"port": port1, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         # No echo keys -- never answers the server's heartbeat.
     })
     client_alive = manager.create("client_alive", {
-        "protocol": "tcp", "unitCode": 102, "side": "client",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"alive": {"port": port2, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": 30,
@@ -168,7 +168,7 @@ def _wait_until_gone(connection, unit_name, timeout=3.0):
 
 def _echo_server(manager, port, echo_timeout):
     return manager.create("server", {
-        "protocol": "tcp", "unitCode": 100, "side": "server",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         "echo_opcode": 15, "EchoInterval": 0.15, "EchoTimeout": echo_timeout,
@@ -177,7 +177,7 @@ def _echo_server(manager, port, echo_timeout):
 
 def _echo_client(manager, name, port, echo=True):
     spec = {
-        "protocol": "tcp", "unitCode": 101, "side": "client",
+        "protocol": "tcp", "unitCode": TEXT_UNIT_CODE, "side": "client",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }

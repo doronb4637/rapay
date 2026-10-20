@@ -6,7 +6,7 @@ import pytest
 
 from core.connections.handlers import UnitHandler, install_handler, route
 from core.connections.manager import ConnectionManager
-from core.tests._messages import MESSAGES, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2, Text_200_2
+from core.tests._messages import MESSAGES, text, TEXT_UNIT_CODE, TEXT_UNIT_CODE_2, Text_200_2
 
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +151,7 @@ def test_install_handler_registers_every_route_as_a_callback(manager, free_port)
             received.append(("two", bytes(message.data)))
 
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }, handler_class=Handler)
@@ -162,8 +162,8 @@ def test_install_handler_registers_every_route_as_a_callback(manager, free_port)
     })
     manager.start_all()
 
-    client.send_message(b"a", 1)
-    client.send_message(b"b", 2)
+    client.send_message(text(1, b"a"))
+    client.send_message(text(2, b"b"))
 
     import time
     deadline = time.monotonic() + 3
@@ -183,7 +183,7 @@ def test_install_handler_unknown_unit_code_raises_and_leaves_manager_clean(manag
 
     with pytest.raises(ValueError, match="0xfe|254"):
         manager.create("server", {
-            "protocol": "udp", "unitCode": 100, "side": "server",
+            "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1",
             "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
         }, handler_class=Orphan)
@@ -201,7 +201,7 @@ def test_install_handler_route_occupies_slot_like_ordinary_callback(manager, fre
             pass
 
     server = manager.create("server", {
-        "protocol": "udp", "unitCode": 100, "side": "server",
+        "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
         "ip": "127.0.0.1", "local_ip": "127.0.0.1",
         "connections": {"Peer": {"port": free_port, "unitCode": TEXT_UNIT_CODE, "Structures": [MESSAGES]}},
     }, handler_class=Handler)
@@ -230,12 +230,12 @@ def test_install_handler_on_composite(manager, free_ports):
 
     composite = manager.create_composite("composite", {
         "transport": {
-            "protocol": "udp", "unitCode": 100, "side": "client",
+            "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "client",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "send_only",
             "connections": {"Peer2": {"port": port_send, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
         },
         "receive": {
-            "protocol": "udp", "unitCode": 100, "side": "server",
+            "protocol": "udp", "unitCode": TEXT_UNIT_CODE, "side": "server",
             "ip": "127.0.0.1", "local_ip": "127.0.0.1", "mode": "receive_only",
             "connections": {"Peer2": {"port": port_recv, "unitCode": TEXT_UNIT_CODE_2, "Structures": [MESSAGES]}},
         },
@@ -247,7 +247,7 @@ def test_install_handler_on_composite(manager, free_ports):
     })
     manager.start_all()
 
-    peer.send_message(b"hi", 1)
+    peer.send_message(text(1, b"hi", TEXT_UNIT_CODE_2))
 
     import time
     deadline = time.monotonic() + 3

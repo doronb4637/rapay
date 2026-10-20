@@ -83,12 +83,11 @@ track = connection.receive_message(TrackAck, timeout=3)          # -> a TrackAck
 track = connection.receive_message(0x3C, timeout=3)              # same, resolved via the link
 ```
 
-- **Outbound** (`send_message`, `periodic_sending`): the message must be
-  `@Definition`'d with **our** unit code (§3) -- anything else is a
-  `ValueError`, a dict or undecorated message a `TypeError`. It goes out under
-  its own opcode, encoded by its own `to_bytes()`; nothing is looked up. Raw
-  `bytes` pass through with an explicit opcode. `periodic_sending` encodes once,
-  when the schedule is created.
+- **Outbound** (`send_message`, `periodic_sending`): the message must be a
+  `@Definition`'d IRS message instance -- bytes and dicts are a `TypeError`.
+  It goes out under its own opcode, encoded by its own `to_bytes()`; nothing is
+  looked up, and the message and the link's `Interface` are trusted, not
+  re-checked. `periodic_sending` encodes once, when the schedule is created.
 - **Inbound** (`receive_message`, `handle_on_receive`, `@route`): the selector
   is the message class or its opcode. It is resolved once, at subscribe time,
   against the unit's `Interface` under the **sender's** code, and the route
@@ -202,7 +201,7 @@ code messages of its own.
 Every message now carries an `opcode`, and the API is:
 
 ```python
-connection.send_message(data: Message | bytes, opcode: int | None = None, unit_name: str | None = None) -> None
+connection.send_message(data: Message, unit_name: str | None = None) -> None
 connection.receive_message(opcode: int | type[Message], unit_name: str | None = None,
                             timeout: float | int | None = None,
                             trigger_function: Callable[[], Any] | None = None) -> IrsMessage
@@ -212,8 +211,7 @@ connection.stop_on_receive(opcode: int, unit_name: str | None = None) -> bool
 ```
 
 Every message declares what kind of message it is: on a framed link a send's
-opcode comes from the message's `@Definition` (an explicit one must agree), and
-bytes need it given. On receive, `opcode` is an int, a `"0x.."` string, or the
+opcode comes from the message's `@Definition`. On receive, `opcode` is an int, a `"0x.."` string, or the
 `@Definition`'d message class itself. `unit_name` stays
 optional wherever exactly one unit is connected (auto-resolved from
 `config.connections`); otherwise it's required and validated, with strict
@@ -562,17 +560,13 @@ disconnect at exactly `EchoTimeout`.
 ## 6a. Periodic sending
 
 ```python
-connection.periodic_sending(data: bytes, interval: int | float, opcode: int | None = None,
+connection.periodic_sending(data: Message, interval: int | float,
                             unit_name: str | None = None) -> None
 connection.stop_periodic(opcode: int, unit_name: str | None = None) -> bool
 ```
 
-`data` comes first, then `interval`, with `opcode` optional after it (it is
-unneeded on DDS and for IRS messages carrying their own `_opCode`).
-`periodic_sending` behaves exactly like `send_message` but keeps sending in
-the background every `interval` seconds. `opcode` may be `None` if `data` is an IRS message object carrying
-its own `_opCode` (the same auto-detection `send_message` does); a raw
-`bytes` payload has no such attribute and needs `opcode` given explicitly.
+`data` comes first, then `interval`. `periodic_sending` behaves exactly like
+`send_message` but keeps sending in the background every `interval` seconds.
 
 Tasks are tracked in `self._periodic_tasks`, keyed by the same
 `(unit_code, opcode)` route key as subscriptions. Calling it twice for one
@@ -612,7 +606,7 @@ beacon = mgr.create_composite("BeaconUnit", {
   "receive": {"protocol": "udp", "side": "server", "mode": "receive_only", ...},
 })
 beacon.start()
-beacon.send_message(b"...", opCode=20)
+beacon.send_message(Beacon(...))
 unit, payload = beacon.receive_message(opcode=21)
 beacon.close()
 ```
@@ -726,8 +720,8 @@ once, so the sending unit is read off the SAMPLE: always
 fixed `A_platformId: int32, A_systemId: int16, A_moduleId: int16` struct),
 falling back to the Interface when it lists exactly one publisher. A topic with
 several publishers -- or one this unit also publishes, since a participant
-hears its own writes -- must carry `A_sourceID`, and a type that does not is a
-load error. A sample from a peer the
+hears its own writes -- must carry `A_sourceID`; the Interface is trusted, so
+check this offline with `core/tools/validate_interface.py`. A sample from a peer the
 Interface does not list as publishing that topic is warned about once and
 dropped.
 

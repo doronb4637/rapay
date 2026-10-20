@@ -66,9 +66,11 @@ def test_two_names_for_one_class_are_one_layout():
     assert dict(interface.messages) == {(1, 0x10): Alpha}
 
 
-def test_two_classes_on_one_route_in_one_file_are_refused():
-    with pytest.raises(IRSAmbiguousError, match="both Alpha and Rival"):
-        Interface.from_module(_module("link", Alpha=Alpha, Rival=Rival))
+def test_the_base_message_class_is_not_a_layout():
+    """`from IRS import *` puts `Message` itself in every structures file."""
+    interface = Interface.from_module(_module("link", Message=Message, Alpha=Alpha))
+    assert dict(interface.messages) == {(1, 0x10): Alpha}
+    assert interface.unit_codes() == [1]
 
 
 # --------------------------------------------------------------------------- #
@@ -146,19 +148,3 @@ def test_a_pair_names_itself_when_the_route_is_missing():
     interface = Interface.from_module(_module("link", PAIRS={3: 2}, AlphaReply=AlphaReply))
     with pytest.raises(IRSNotFoundError, match=r"Unit: 3 .*known opcodes: \[16\]"):
         interface.message_class(3, 0x11)
-
-
-def test_a_pair_that_defines_its_own_layouts_is_refused():
-    with pytest.raises(IRSAmbiguousError, match="unit 1 is paired to 2 but also defines its own message"):
-        Interface.from_module(_module("link", PAIRS={1: 2}, Alpha=Alpha))
-
-
-def test_a_pair_to_a_unit_the_file_does_not_send_is_refused():
-    with pytest.raises(ValueError, match="unit 3 is paired to 2, which sends no message"):
-        Interface.from_module(_module("link", PAIRS={3: 2}, Alpha=Alpha))
-
-
-@pytest.mark.parametrize("pairs", [[(3, 2)], {"MFD": 2}, {3: "DTU"}, {3: True}])
-def test_malformed_pairs_are_refused(pairs):
-    with pytest.raises(TypeError, match="link.PAIRS must be a dict"):
-        Interface.from_module(_module("link", PAIRS=pairs))

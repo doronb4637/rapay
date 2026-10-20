@@ -7,8 +7,6 @@ from pathlib import Path
 from types import ModuleType
 
 from core.annotations import *
-from core.IRS import is_definition
-from core.IRS.irs_parser import short_name
 from core.tools.file_functions import resolve_project_path
 
 # A structures file is user data kept anywhere on disk, so a path entry is
@@ -76,9 +74,7 @@ def _import_one(lib: str) -> ModuleType:
     else:
         name = lib
         _import_dotted(lib)
-    module = sys.modules[name]
-    _assert_is_structure(lib, module)
-    return module
+    return sys.modules[name]
 
 
 def _import_dotted(lib: str) -> None:
@@ -93,21 +89,6 @@ def _import_dotted(lib: str) -> None:
             f"-- the normal case -- must be named by its full .py path.",
             name=exc.name,
         ) from exc
-
-
-def _assert_is_structure(lib: str, module: ModuleType) -> None:
-    """Fail here, naming the file, rather than later with every route missing."""
-    if any(is_definition(value) for value in vars(module).values()):
-        return
-    # Both import paths short-circuit on sys.modules, so a retry after a fix
-    # would otherwise never re-execute.
-    sys.modules.pop(module.__name__, None)
-    raise ImportError(
-        f"structures module {lib!r} (namespace {short_name(module.__name__)!r}) defines no "
-        f"@Definition message. Either it tags none, or it reached a DIFFERENT IRS "
-        f"module object than core's (see core/IRS/_alias.py), so its classes are "
-        f"not core.IRS.Message subclasses."
-    )
 
 
 def _ensure_synthetic_package(directory: Path) -> None:

@@ -22,7 +22,7 @@ What a DDS system is *described* in, as opposed to how a connection runs it. Dep
 - No type registry: the type travels with the sample and RTI matches on topic name, type name and QoS compatibility.
 - Sender identity is fixed by the ICD: every topic type carries `A_sourceID` (`A_platformId`, `A_systemId`, `A_moduleId`). `A_systemId` is the sender's unit code and alone decides who sent a sample.
 - On send only `A_systemId` is stamped, and only while it is 0. There is no destination field; a named destination is only checked against the Interface.
-- A topic with several publishers, or one the unit both publishes and subscribes, is refused at load if its type lacks `A_sourceID`.
+- A topic with several publishers, or one the unit both publishes and subscribes, needs `A_sourceID` in its type; nothing checks this at load, `core/tools/validate_interface.py` does offline.
 - Two silent failures (discovery succeeds, no samples arrive): a type-name mismatch (QoS `topic_filter`s must match the pinned name too) and an extensibility mismatch (`idl.final`/`extensible`/`mutable`).
 
 ## Code Style & Constraints

@@ -81,16 +81,12 @@ class MessageMeta(type):
                 field._name = field_name
                 fields_list.append(field)
                 namespace.pop(field_name, None)
+            elif isinstance(field_type, type) and issubclass(field_type, IntEnum):
+                fields_list.append(EnumField(field_type, field_name))
             else:
-                if isinstance(field_type, type) and issubclass(field_type, IntEnum):
-                    field = EnumField(field_type, field_name)
-                    fields_list.append(field)
-                elif isinstance(field_type, type) and issubclass(field_type, (Structure, BitField)):
-                    field = field_type()
-                    field._name = field_name
-                    fields_list.append(field)
-                else:
-                    raise TypeError(f"{name}.{field_name}: annotated {field_type!r} with no Type/Size")
+                field = field_type()
+                field._name = field_name
+                fields_list.append(field)
         namespace['_fields_'] = tuple(fields_list)
         namespace['__slots__'] = tuple(annotations.keys())
         return type.__new__(cls, name, bases, namespace)
@@ -195,7 +191,7 @@ class Structure(BaseField, metaclass=MessageMeta):
 
 
 class Message(Structure):
-    __slots__ = ()
+    __slots__ = ("_unitCode", "_opCode")
 
     def to_bytes(self, writer: BinaryWriter | None = None, value: Any = None) -> bytes | None:
         is_root = writer is None
@@ -220,4 +216,5 @@ def Definition(unitCode: int, opCode: int):
 def is_definition(obj: Any) -> bool:
     """Whether `obj` is a message class carrying its OWN `@Definition` -- an
     undecorated subclass of one inherits the attributes but not the route."""
-    return isinstance(obj, type) and issubclass(obj, Message) and "_opCode" in vars(obj)
+    # `Message` itself is excluded: its `__slots__` put `_opCode` in its own vars.
+    return isinstance(obj, type) and issubclass(obj, Message) and obj is not Message and "_opCode" in vars(obj)

@@ -11,6 +11,7 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
 - Import-boundary check -- IRS structures files: `grep -rn "core\.IRS" core/IRS/Structures --include=*.py` must print nothing.
 - Import-boundary check -- DDS: `grep -rn "^from core\.\(annotations\|connections\|tools\|IRS\)\|^import core\.\(annotations\|connections\|tools\|IRS\)" core/DDS --include=*.py` must print nothing.
 - Run these greps whenever you touch an import under `core/IRS` or `core/DDS`.
+- Validate a structures file or DDS Interface (offline only; never imported by runtime code): `.venv/Scripts/python.exe -m core.tools.validate_interface <path.py | dotted.name> [...]`.
 
 ## Architecture & Tech Stack
 
@@ -42,6 +43,12 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
   - Keep each fact in one file; point to the owning file instead of restating it.
 - **No Redundant Hot-Path Validation:**
   - Never re-validate configuration or state variables inside high-frequency runtime functions (e.g., message packing/sending loops) if they are already validated once at startup/load time. Avoid redundant checks that add runtime overhead and dead code.
+- **Structures Files Are Correct By Definition:**
+  - Everything in a structures/Interface file (`@Definition` messages, `PAIRS`, unit codes, opcodes, layouts) is assumed perfect. It is the author's responsibility; the library does not validate it.
+  - Never add a check, guard, `ValueError` or defensive branch for the content of a structures file or an `Interface`, anywhere: not at send, not at receive, not at load. If a file is wrong, the failure belongs to the file, not to code written to catch it.
+  - Only genuinely external input is checked: the type of what a caller passes (e.g. `send_message` takes a message instance) and inbound payload bytes.
+  - Content checks for these files belong only in `core/tools/validate_interface.py`.
+
 ## Reference Codebases
 
 - Dependency boundaries: `core/IRS/_alias.py`, `core/IRS/annotations.py`, `core/annotations.py`.
