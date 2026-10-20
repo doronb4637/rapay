@@ -54,10 +54,9 @@ genuinely does fan out to many receivers over a single shared IRS. Every unit
 MUST end up with a non-empty list: there is no global registry to fall back on,
 so a link without one could neither send nor receive.
 
-A unit's name and code are checked against its structures file when the
-connection is built (`validate_interfaces`): `"DTU": {"unitCode": 2}` requires
-the file to define `DTU = 2`, and our own top-level `unitCode` must be one of
-that file's units too.
+Unit names live only here: a structures file writes unit codes as plain
+numbers (`@Definition(unitCode=0x02, ...)`), so `"DTU": {"unitCode": 2}` is
+what names 0x02 "DTU".
 
 A `"protocol": "dds"` config is a different shape altogether: a DDS node has no
 socket to describe, and its routing is the system contract's to say. It names
@@ -754,32 +753,5 @@ def load_interfaces(config: ConnectionConfig) -> dict[str, Interface]:
             if raw not in loaded:
                 loaded[raw] = Interface.from_module(import_modules(raw)[0])
         interfaces[unit_name] = Interface.merge(*(loaded[raw] for raw in endpoint.structures_raw))
-    validate_interfaces(config, interfaces)
     return interfaces
 
-
-def validate_interfaces(config: ConnectionConfig, interfaces: Mapping[str, Interface]) -> None:
-    """
-    Every configured unit must be a unit of its own structures file, under the
-    same name and code, and so must we.
-
-    Unit names are the contract between a config and a structures file: a
-    `"DTU": {"unitCode": 3}` against a file defining `DTU = 2` would subscribe
-    and parse against the wrong sender, silently.
-    """
-    for unit_name, endpoint in config.connections.items():
-        interface = interfaces[unit_name]
-        where = f"structures {', '.join(interface.namespaces)}"
-        defined = interface.units.get(unit_name)
-        if defined is None:
-            raise ValueError(
-                f"config['connections'][{unit_name!r}]: {where} defines no unit named "
-                f"{unit_name!r}; units defined there: {dict(interface.units)}")
-        if defined != endpoint.unitCode:
-            raise ValueError(
-                f"config['connections'][{unit_name!r}]['unitCode'] = {endpoint.unitCode}, but "
-                f"{where} defines {unit_name} = {defined}")
-        if config.unitCode not in interface.units.values():
-            raise ValueError(
-                f"config['unitCode'] = {config.unitCode} is not a unit of {where} (the link to "
-                f"{unit_name!r}); units defined there: {dict(interface.units)}")

@@ -205,29 +205,16 @@ class Message(Structure):
 
 
 def Definition(unitCode: int, opCode: int):
-    """Bind a message class to its one route: the unit that SENDS it and its opcode."""
+    """Bind a message class to its one route: the unit that SENDS it and its opcode.
+
+    Both are plain numbers, written inline: `@Definition(unitCode=0x02, opCode=0x0012)`.
+    A structures file names no units; unit names live only in the connection config.
+    """
     def wrapper(msg: type[Message]) -> type[Message]:
         msg._unitCode = unitCode
         msg._opCode = opCode
         return msg
     return wrapper
-
-
-class Pair(int):
-    """A unit code that speaks another unit's IRS: `MFD = pair(DTU, 0x03)` means
-    a message from 0x03 is laid out exactly as DTU's message on that opcode."""
-    impose: int
-
-    def __repr__(self) -> str:
-        return f"pair({self.impose}, {int(self)})"
-
-
-def pair(unitCode: int, pairCode: int) -> Pair:
-    """Declare `unitCode` as a pair of `unit` (a pair of a pair resolves to the
-    unit that actually owns the layouts)."""
-    paired = Pair(pairCode)
-    paired.impose = unitCode
-    return paired
 
 
 def is_definition(obj: Any) -> bool:

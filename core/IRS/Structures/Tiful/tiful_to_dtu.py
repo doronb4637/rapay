@@ -4,9 +4,8 @@ from enum import IntEnum
 
 from dataclasses import dataclass
 
-Tiful = 0x01
-DTU = 0x02
-MFD = pair(DTU, 0x03)
+#: 0x03 (MFD) has no layouts of its own: it speaks 0x02's (DTU's) IRS.
+PAIRS = {0x03: 0x02}
 
 """ Data Types """
 @baseType(1)
@@ -44,30 +43,30 @@ class Data(Structure):
 
 
 """ Tiful Messages"""
-@Definition(unitCode=Tiful, opCode=0x0012)
+@Definition(unitCode=0x01, opCode=0x0012)
 class GeneralFlag(Message):
     Flag: E_Flag
     value: int = Byte
 
 
-@Definition(unitCode=Tiful, opCode=0x0001)
+@Definition(unitCode=0x01, opCode=0x0001)
 class ArrayOfAreas(Message):
     Len: int = Byte
     Areas: list[S_Area] = [S_Area, "Len"]
 
 
-@Definition(unitCode=Tiful, opCode=0x0200)
+@Definition(unitCode=0x01, opCode=0x0200)
 class StructMessage(Message):
     datas: tuple[Data] = [Data, 9]
 
 
 """ DTU Messages """
-@Definition(unitCode=DTU, opCode=0x0011)
+@Definition(unitCode=0x02, opCode=0x0011)
 class GetGeneralFlag(Message):
     Flag: E_Flag
 
 
-@Definition(unitCode=DTU, opCode=0x0012)
+@Definition(unitCode=0x02, opCode=0x0012)
 class SetGeneralFlag(Message):
     Flag: E_Flag
     value: int = Byte

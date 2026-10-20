@@ -13,5 +13,14 @@ from .constants import *
 from .buffers import BinaryReader, BinaryWriter
 from .bitfields import baseType, BitField
 from .fields import Field, EnumField
-from .core import ArrayField, Structure, Message, Definition, Pair, pair, is_definition
+from .core import ArrayField, Structure, Message, Definition, is_definition
 from .annotations import IrsMessage, UnitCode, OpCode, Namespace, NamespaceScope
+
+# Without __all__, `from IRS import *` also exports the submodules, and `core` (core.py) shadows the caller's `core` package.
+__all__ = [name for name in vars(constants) if not name.startswith("_")] + [
+    "BinaryReader", "BinaryWriter",
+    "baseType", "BitField",
+    "Field", "EnumField",
+    "ArrayField", "Structure", "Message", "Definition", "is_definition",
+    "IrsMessage", "UnitCode", "OpCode", "Namespace", "NamespaceScope",
+]

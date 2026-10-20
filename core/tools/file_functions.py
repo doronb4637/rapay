@@ -10,7 +10,7 @@ def _find_caller_project_root() -> Path:
     """The root of the project whose script is running, which may be a project
     using this one as a package: walk up from `__main__`'s file to a marker.
     """
-    main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+    main_file = getattr(sys.modules.get("__main__"), "path", None)
     current = Path(main_file).resolve().parent if main_file else Path.cwd()
     markers = {"Pipfile", "Pipfile.lock", ".git", "pyproject.toml", "setup.py", "requirements.txt"}
     for parent in [current, *current.parents]:

@@ -243,7 +243,7 @@ class Connection(ABC):
         message_class = type(data)
         if not is_definition(message_class):
             raise TypeError(f"{message_class.__name__} has no @Definition(unitCode=..., opCode=...)")
-        speaks_as = {interface.speaks_as(self._own_unit_code) for interface in self._interfaces.values()}
+        speaks_as = {interface.speaks_as(self._own_unit_code, message_class._opCode) for interface in self._interfaces.values()}
         if message_class._unitCode != self._own_unit_code and message_class._unitCode not in speaks_as:
             raise ValueError(
                 f"{message_class.__name__} is sent by unit {message_class._unitCode}, but this "
@@ -805,7 +805,7 @@ class FramedConnection(Connection):
         structures. A class selector is trusted; only its unit code is checked."""
         unit_code, opcode = route_key
         interface = self._interfaces[unit_name]
-        if is_definition(selector) and selector._unitCode != interface.speaks_as(unit_code):
+        if is_definition(selector) and selector._unitCode != interface.speaks_as(unit_code, opcode):
             raise ValueError(
                 f"{selector.__name__} is sent by unit {selector._unitCode}, not by "
                 f"{unit_name!r} (unit {unit_code})")

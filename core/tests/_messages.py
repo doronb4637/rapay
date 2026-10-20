@@ -1,8 +1,7 @@
 """
-The pytest suite's own structures file: its units and their `@Definition`
-layouts. Every test connection names it in `Structures` (as `MESSAGES`), so
-every unit name a test config uses must be one of the unit constants below,
-with the same code -- `config.validate_interfaces` checks exactly that.
+The pytest suite's own structures file: its `@Definition` layouts. Every test
+connection names it in `Structures` (as `MESSAGES`). Unit names are free -- they
+live only in each test's config; the codes below are just the ones tests share.
 
 Deliberately NOT `from __future__ import annotations`: `IRS.core.MessageMeta`
 reads `__annotations__` at class-body execution time and hands the real type
@@ -16,19 +15,13 @@ from core.IRS import Byte, Definition, Message, UInt16, baseType
 #: How test configs name this file.
 MESSAGES = __name__
 
-#: Codes test connections stamp as their OWN (`"unitCode"` at the top level).
-Local = 100
-Local2 = 101
-Local3 = 102
-
-#: unitCode 200's peer talks Text on every opcode in TEXT_OPCODES -- covers
-#: every generic transport/dispatch/handler test. Each name is one way a test
-#: config calls that peer.
-TEXT_UNIT_CODE = Peer = Peer0 = PeerA = Radar = A = Beacon = silent = unit1 = 200
+#: unitCode 200 talks Text on every opcode in TEXT_OPCODES -- covers every
+#: generic transport/dispatch/handler test.
+TEXT_UNIT_CODE = 200
 #: A second Text-speaking unit, for tests that need two distinct peers.
-TEXT_UNIT_CODE_2 = Peer1 = Peer2 = PeerB = Tracker = B = alive = unit2 = 201
+TEXT_UNIT_CODE_2 = 201
 #: Typed round-trip: unit 210 sends Ping on opcode 21.
-PING_UNIT_CODE = Server = 210
+PING_UNIT_CODE = 210
 PING_OPCODE = 21
 
 TEXT_OPCODES = range(1, 20)

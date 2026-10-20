@@ -93,8 +93,6 @@ anything in this suite or in `connections` itself. Stick to the `.venv`.
   connect and disarmed by disconnect -- could be asked directly instead of
   inferred from whether a live socket pair survived. Anything provable there
   belongs there; the socket-level files stay for what genuinely needs a wire.
-- Every test link names `"Structures": [MESSAGES]`, and its unit names must
-  be unit constants in `_messages.py` with the same code (`"Peer"` is 200,
-  `"Peer2"`/`"Tracker"` 201, `"Server"` 210, our own codes `Local*` 100-102).
-  A new unit name in a test means a new constant there; a mismatch is a
-  `ValueError` at `create()`, which is the validation working as intended.
+- Every test link names `"Structures": [MESSAGES]`. `_messages.py` defines
+  layouts for unit codes 200 and 201 (Text) and 210 (Ping); our own codes are
+  100-102 by convention. Unit names are free: they live only in the config.

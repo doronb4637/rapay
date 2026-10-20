@@ -4,7 +4,7 @@ Per-link IRS end to end: every connection holds its own interface per link.
 One process, one unit code, two peers, two structures files that both define
 the SAME opcode under our own code with DIFFERENT layouts. With a global
 registry the second file erased the first; now each link only ever sees its
-own file, and the config's unit names are checked against it.
+own file.
 
 The files are written to `tmp_path` rather than added under `IRS/Structures`
 because the collision only matters when two genuinely independent files are in
@@ -31,14 +31,11 @@ SHARED_OPCODE = 940
 _FILE = """
 from IRS import *
 
-Us = {ours}
-{peer} = {theirs}
-
-@Definition(unitCode=Us, opCode={opcode})
+@Definition(unitCode={ours}, opCode={opcode})
 class {cls}(Message):
 {fields}
 
-@Definition(unitCode={peer}, opCode={opcode})
+@Definition(unitCode={theirs}, opCode={opcode})
 class {cls}Reply(Message):
     ack: int = Byte
 """
@@ -48,20 +45,19 @@ class {cls}Reply(Message):
 def link_structures(tmp_path):
     """Two independent structures files, returned as (raw path, namespace)."""
     written = []
-    for cls, fields, peer, theirs in (
-        ("AlphaTrack", "    track_id: int = UInt16\n    heading: int = UInt16", "PeerA", PEER_A_CODE),
-        ("BetaStatus", "    status: int = Byte", "PeerB", PEER_B_CODE),
+    for cls, fields, theirs in (
+        ("AlphaTrack", "    track_id: int = UInt16\n    heading: int = UInt16", PEER_A_CODE),
+        ("BetaStatus", "    status: int = Byte", PEER_B_CODE),
     ):
         path = tmp_path / f"{cls.lower()}_link.py"
-        path.write_text(_FILE.format(cls=cls, fields=fields, ours=OUR_CODE, peer=peer,
-                                     theirs=theirs, opcode=SHARED_OPCODE))
+        path.write_text(_FILE.format(cls=cls, fields=fields, ours=OUR_CODE, theirs=theirs,
+                                     opcode=SHARED_OPCODE))
         written.append((str(path), resolve_module_name(str(path))))
     return written
 
 
-def _config(ports, structures_a=None, structures_b=None, connection_level=None,
-            own_code=OUR_CODE, code_a=PEER_A_CODE, name_a="PeerA"):
-    peer_a = {"port": ports[0], "unitCode": code_a}
+def _config(ports, structures_a=None, structures_b=None, connection_level=None):
+    peer_a = {"port": ports[0], "unitCode": PEER_A_CODE}
     peer_b = {"port": ports[1], "unitCode": PEER_B_CODE}
     if structures_a:
         peer_a["Structures"] = structures_a if isinstance(structures_a, list) else [structures_a]
@@ -69,8 +65,8 @@ def _config(ports, structures_a=None, structures_b=None, connection_level=None,
         peer_b["Structures"] = [structures_b]
     config = {
         "protocol": "udp", "side": "server", "ip": "127.0.0.1", "local_ip": "127.0.0.1",
-        "unitCode": own_code,
-        "connections": {name_a: peer_a, "PeerB": peer_b},
+        "unitCode": OUR_CODE,
+        "connections": {"PeerA": peer_a, "PeerB": peer_b},
     }
     if connection_level:
         config["Structures"] = [connection_level]
@@ -153,30 +149,7 @@ def test_connection_level_structures_with_two_units_is_rejected(free_ports, link
 
 
 # --------------------------------------------------------------------------- #
-# The config's unit names are the structures file's unit names
-# --------------------------------------------------------------------------- #
-def test_a_unit_code_that_disagrees_with_the_file_is_refused(manager, free_ports, link_structures):
-    (path_a, _), (path_b, _) = link_structures
-    with pytest.raises(ValueError, match=rf"\['PeerA'\]\['unitCode'\] = 99, but .* defines PeerA = {PEER_A_CODE}"):
-        manager.create("multi", _config(free_ports(2), path_a, path_b, code_a=99))
-    with pytest.raises(KeyError):
-        manager.get("multi")
-
-
-def test_a_unit_name_the_file_does_not_define_is_refused(manager, free_ports, link_structures):
-    (path_a, _), (path_b, _) = link_structures
-    with pytest.raises(ValueError, match="defines no unit named 'Alpha'"):
-        manager.create("multi", _config(free_ports(2), path_a, path_b, name_a="Alpha"))
-
-
-def test_our_own_code_must_be_a_unit_of_every_link(manager, free_ports, link_structures):
-    (path_a, _), (path_b, _) = link_structures
-    with pytest.raises(ValueError, match=r"config\['unitCode'\] = 77 is not a unit of"):
-        manager.create("multi", _config(free_ports(2), path_a, path_b, own_code=77))
-
-
-# --------------------------------------------------------------------------- #
-# A pair unit speaks the IRS of the unit it pairs (tiful_to_dtu: MFD = pair(DTU, 0x03))
+# A pair unit speaks the IRS of the unit it pairs (tiful_to_dtu: PAIRS = {0x03: 0x02})
 # --------------------------------------------------------------------------- #
 TIFUL_TO_DTU = str(Path(core.IRS.__file__).parent / "Structures" / "Tiful" / "tiful_to_dtu.py")
 

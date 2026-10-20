@@ -10,9 +10,6 @@ from enum import IntEnum
 
 from IRS import *
 
-#: The two peers of this link.
-CLIENT_UNIT_CODE = Client = 21
-SERVER_UNIT_CODE = Server = 22
 #: One opcode, both directions -- see the module docstring.
 TRACK_OPCODE = 60
 
@@ -24,7 +21,7 @@ class E_TrackKind(IntEnum):
     SURFACE = 0x02
 
 
-@Definition(unitCode=CLIENT_UNIT_CODE, opCode=TRACK_OPCODE)
+@Definition(unitCode=21, opCode=TRACK_OPCODE)
 class TrackReport(Message):
     """Client -> server. 5 bytes on the wire: uint16, uint8, uint16."""
     trackId: int = UInt16
@@ -32,7 +29,7 @@ class TrackReport(Message):
     heading: int = UInt16
 
 
-@Definition(unitCode=SERVER_UNIT_CODE, opCode=TRACK_OPCODE)
+@Definition(unitCode=22, opCode=TRACK_OPCODE)
 class TrackAck(Message):
     """Server -> client. 3 bytes on the wire: uint16, uint8."""
     trackId: int = UInt16

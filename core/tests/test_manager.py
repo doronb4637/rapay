@@ -179,13 +179,12 @@ def test_a_dotted_entry_that_is_not_importable_names_the_entry(manager, free_por
 def test_the_link_interface_is_ready_when_create_returns(manager, free_port):
     """So a config can never come up unable to receive messages it declares
     layouts for."""
-    from core.IRS.Structures.Test.test_messages import (CLIENT_UNIT_CODE, SERVER_UNIT_CODE,
-                                                         TRACK_OPCODE, TrackAck, TrackReport)
+    from core.IRS.Structures.Test.test_messages import TRACK_OPCODE, TrackAck, TrackReport
 
     connection = manager.create("c", _track_config(free_port, [TEST_MESSAGES]))
     interface = connection.interface_for("Server")
-    assert interface.message_class(CLIENT_UNIT_CODE, TRACK_OPCODE) is TrackReport
-    assert interface.message_class(SERVER_UNIT_CODE, TRACK_OPCODE) is TrackAck
+    assert interface.message_class(21, TRACK_OPCODE) is TrackReport
+    assert interface.message_class(22, TRACK_OPCODE) is TrackAck
 
 
 # --------------------------------------------------------------------------- #
@@ -221,7 +220,7 @@ def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
     from core.IRS.irs_parser import Interface
     from core.tools.general import import_modules, resolve_module_name
     import core.IRS.Structures.Test.test_messages as module
-    from core.IRS.Structures.Test.test_messages import CLIENT_UNIT_CODE, TRACK_OPCODE
+    from core.IRS.Structures.Test.test_messages import TRACK_OPCODE
 
     by_path = str(Path(module.__file__).resolve())
     name = resolve_module_name(by_path)
@@ -231,7 +230,7 @@ def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
     [loaded] = import_modules([by_path])
     assert loaded.__name__ == name
     interface = Interface.from_module(loaded)
-    assert interface.message_class(CLIENT_UNIT_CODE, TRACK_OPCODE).__name__ == "TrackReport"
+    assert interface.message_class(21, TRACK_OPCODE).__name__ == "TrackReport"
 
 
 def test_a_structures_path_that_does_not_exist_names_the_missing_file(tmp_path):

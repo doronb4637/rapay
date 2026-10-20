@@ -31,11 +31,10 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - The abstract `Connection._route_class()` answers "could this connection ever deliver this route, and with which class?". Framed links ask the unit's `Interface`; DDS asks its DDS Interface and returns `None` (samples arrive typed).
 
 ### Structures are per-link
-- There is no global registry. A structures file describes one link, usually both directions (multicast is the exception): units are its public module-level ints (`DTU = 0x02`), layouts its `@Definition(unitCode=, opCode=)` messages. `IRS.irs_parser.Interface.from_module` reads both.
+- There is no global registry. A structures file describes one link, usually both directions (multicast is the exception): layouts are its `@Definition(unitCode=0x02, opCode=)` messages, with the unit code written inline; its optional `PAIRS` dict declares pairs. It names no units: unit names live only in the config. `IRS.irs_parser.Interface.from_module` reads both.
 - `Structures` is mandatory on tcp/udp/multicast: declared per unit and resolved at load (`resolve_structures`, same default/override shape as `EchoSettings.resolve`, resolved as a group). A unit left with none is a `from_json` `ValueError`; DDS refuses the key.
 - A connection-level `Structures` is legal only with exactly one unit, or on multicast; `from_json` rejects it otherwise.
-- `config.load_interfaces` (called by `Connection.__init__`) imports each unit's files and merges them into that unit's `Interface`; two files giving one route or unit name two meanings raise `IRSAmbiguousError`, which must not subclass `IRSNotFoundError`. Read it through `interface_for(unit_name)`.
-- `config.validate_interfaces` then requires every `connections[name]` to be a unit of its own file under the same name and code, and our top-level `unitCode` to be one of that file's units.
+- `config.load_interfaces` (called by `Connection.__init__`) imports each unit's files and merges them into that unit's `Interface`; two files giving one route (pair routes included) two layouts raise `IRSAmbiguousError`, which must not subclass `IRSNotFoundError`. A file's `PAIRS` covers only that file's layouts. Read it through `interface_for(unit_name)`.
 - `tools.general.resolve_module_name` is the single source of a file's module name, shared by `ConnectionConfig` and `import_modules`. A `.py` path is always loaded from that path.
 ### Unit routing
 - Top-level `unitCode` is OUR code (required, uint8): stamped into every header, and every message we send must be `@Definition`'d with it.

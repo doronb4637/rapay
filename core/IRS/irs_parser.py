@@ -2,11 +2,13 @@
 A link's IRS interface: the units and message layouts ONE structures file (or
 the few a link lists together) defines.
 
-There is no process-wide registry. A structures file declares its units as
-module-level int constants (`DTU = 0x02`) and tags each message with
-`@Definition(unitCode=..., opCode=...)`; `Interface.from_module` reads both off
-the imported module. A unit declared `MFD = pair(DTU, 0x03)` has no layouts of
-its own: it speaks DTU's IRS, so (0x03, op) resolves to DTU's message on `op`.
+There is no process-wide registry. A structures file tags each message with
+`@Definition(unitCode=0x02, opCode=...)` -- the unit code is the number itself;
+unit names live only in the connection config. A file may also declare
+`PAIRS = {0x03: 0x02}`: unit 0x03 has no layouts of its own and speaks 0x02's
+IRS, so (0x03, op) resolves to 0x02's message on `op`. `Interface.from_module`
+reads both off the imported module and turns each pair into plain routes, so a
+pair applies only to the file that declares it.
 Whoever owns a link -- a `Connection` -- holds its own
 `Interface`, so two links whose files reuse one (unitCode, opCode) never see
 each other's layouts.
@@ -18,12 +20,15 @@ from types import ModuleType
 from typing import Mapping
 
 from .buffers import BinaryReader
-from .core import Message, Pair, is_definition
+from .core import Message, is_definition
 from .annotations import *
 
 logger = logging.getLogger("parser")
 
 Route = tuple[UnitCode, int]
+
+#: Module-level `{pair code: code it speaks as}` a structures file may declare.
+PAIRS_ATTRIBUTE = "PAIRS"
 
 
 """ Exception's """
@@ -38,7 +43,7 @@ class IRSDataError(Exception):
 
 class IRSAmbiguousError(Exception):
     """Raised when the structures files one link combines give one route, or
-    one unit name, two different meanings.
+    a pair code that also has layouts, two different meanings.
 
     Deliberately NOT a subclass of IRSNotFoundError
     """
@@ -54,57 +59,68 @@ def short_name(namespace: Namespace) -> str:
 
 @dataclass(frozen=True)
 class Interface:
-    """What one link can say: its units by name and its layouts by route."""
+    """What one link can say: its layouts by route, pair routes already resolved."""
     namespaces: tuple[Namespace, ...]
-    units: Mapping[str, UnitCode] = field(default_factory=dict)
     messages: Mapping[Route, IrsMessage] = field(default_factory=dict)
-    pairs: Mapping[UnitCode, UnitCode] = field(default_factory=dict)
 
     @classmethod
     def from_module(cls, module: ModuleType) -> 'Interface':
-        """Every public module-level int is a unit; every `@Definition`'d
-        message reachable from the module's globals is a layout (imported ones
-        included, so a file may share messages with a sibling)."""
-        units: dict[str, UnitCode] = {}
-        messages: dict[Route, IrsMessage] = {}
-        pairs: dict[UnitCode, UnitCode] = {}
+        """Every `@Definition`'d message reachable from the module's globals is
+        a layout (imported ones included, so a file may share messages with a
+        sibling). The module's optional `PAIRS` dict gives each pair code a
+        route for every layout THIS file gives the unit it speaks as, so a pair
+        never leaks into another file merged onto the same link.
+
+        Raises:
+            TypeError: `PAIRS` is not a dict of int unit code -> int unit code.
+            ValueError: a pair speaks a unit this file gives no layouts.
+            IRSAmbiguousError: two layouts on one route, or a pair code that
+                also defines layouts of its own.
+        """
+        source = short_name(module.__name__)
+        defined: dict[Route, IrsMessage] = {}
         for name, value in vars(module).items():
-            if name.startswith("_"):
-                continue
-            if isinstance(value, int) and not isinstance(value, bool):
-                units[name] = int(value)
-                if isinstance(value, Pair):
-                    pairs[int(value)] = value.impose
-            elif is_definition(value):
-                _add_message(messages, value, short_name(module.__name__))
-        return cls((module.__name__,), units, messages, pairs)
+            if not name.startswith("_") and is_definition(value):
+                _add_message(defined, (value._unitCode, value._opCode), value, source)
+        pairs = getattr(module, PAIRS_ATTRIBUTE, {})
+        if not isinstance(pairs, dict) or not all(
+                type(code) is int and type(speaks) is int for code, speaks in pairs.items()):
+            raise TypeError(f"{module.__name__}.{PAIRS_ATTRIBUTE} must be a dict of "
+                            f"{{pair unit code: unit code it speaks as}}, got {pairs!r}")
+        messages = dict(defined)
+        for pairCode, speaksCode in pairs.items():
+            own = sorted(op for unit, op in defined if unit == pairCode)
+            if own:
+                raise IRSAmbiguousError(
+                    f"unit {pairCode} is paired to {speaksCode} but also defines its own "
+                    f"message on opCode={own[0]} [structures: {source}]")
+            borrowed = [(op, message_class) for (unit, op), message_class in defined.items() if unit == speaksCode]
+            if not borrowed:
+                raise ValueError(f"unit {pairCode} is paired to {speaksCode}, which sends no "
+                                 f"message in this file [structures: {source}]")
+            for op, message_class in borrowed:
+                messages[(pairCode, op)] = message_class
+        return cls((module.__name__,), messages)
 
     @classmethod
     def merge(cls, *interfaces: 'Interface') -> 'Interface':
-        """One link built from several structures files. A route or unit name
-        two of them define differently is refused, not shadowed."""
+        """One link built from several structures files. A route two of them
+        define differently is refused, not shadowed. Each file's pairs were
+        resolved in `from_module`, so they only cover that file's layouts."""
         namespaces: list[Namespace] = []
-        units: dict[str, UnitCode] = {}
-        unit_source: dict[str, str] = {}
         messages: dict[Route, IrsMessage] = {}
-        pairs: dict[UnitCode, UnitCode] = {}
         for interface in interfaces:
             source = ", ".join(map(short_name, interface.namespaces))
             namespaces.extend(interface.namespaces)
-            for name, unitCode in interface.units.items():
-                if units.get(name, unitCode) != unitCode:
-                    raise IRSAmbiguousError(f"unit {name!r} is {units[name]} in {unit_source[name]} but {unitCode} in {source}")
-                units[name] = unitCode
-                unit_source.setdefault(name, source)
-            for message_class in interface.messages.values():
-                _add_message(messages, message_class, source)
-            for unitCode, imposeCode in interface.pairs.items():
-                pairs[unitCode] = imposeCode
-        return cls(tuple(namespaces), units, messages, pairs)
+            for route, message_class in interface.messages.items():
+                _add_message(messages, route, message_class, source)
+        return cls(tuple(namespaces), messages)
 
-    def speaks_as(self, unitCode: UnitCode) -> UnitCode:
-        """The unit whose IRS `unitCode` speaks: the paired unit, else itself."""
-        return self.pairs.get(unitCode, unitCode)
+    def speaks_as(self, unitCode: UnitCode, opCode: int) -> UnitCode:
+        """The unit whose layout `unitCode` sends on `opCode`: the paired unit's
+        for a pair route, else (and for an unknown route) `unitCode` itself."""
+        message_class = self.messages.get((unitCode, opCode))
+        return unitCode if message_class is None else message_class._unitCode
 
     def message_class(self, unitCode: UnitCode, opCode: int) -> IrsMessage:
         """The layout `unitCode` sends under `opCode`.
@@ -112,29 +128,25 @@ class Interface:
         Raises:
             IRSNotFoundError: this link defines no such route.
         """
-        speaker = self.speaks_as(unitCode)
-        message_class = self.messages.get((speaker, opCode))
+        message_class = self.messages.get((unitCode, opCode))
         if message_class is not None:
             return message_class
-        known = sorted(op for unit, op in self.messages if unit == speaker)
-        paired = f" (pair of {speaker})" if speaker != unitCode else ""
+        known = sorted(op for unit, op in self.messages if unit == unitCode)
         raise IRSNotFoundError(
-            f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode}{paired} "
+            f"Message of OpCode: {opCode}, Was not Implemented! for Unit: {unitCode} "
             f"[structures: {', '.join(map(short_name, self.namespaces))}]; known opcodes: {known}")
 
     def routes(self, unitCode: UnitCode) -> list[tuple[int, IrsMessage]]:
         """Every (opCode, message class) `unitCode` sends on this link, by opcode."""
-        speaker = self.speaks_as(unitCode)
         return sorted(((op, message_class) for (unit, op), message_class in self.messages.items()
-                       if unit == speaker), key=lambda route: route[0])
+                       if unit == unitCode), key=lambda route: route[0])
 
     def unit_codes(self) -> list[UnitCode]:
-        """Every unit code this link names or sends from."""
-        return sorted({*self.units.values(), *(unit for unit, _op in self.messages)})
+        """Every unit code that sends a layout on this link, directly or as a pair."""
+        return sorted({unit for unit, _op in self.messages})
 
 
-def _add_message(messages: dict[Route, IrsMessage], message_class: IrsMessage, source: str) -> None:
-    route = (message_class._unitCode, message_class._opCode)
+def _add_message(messages: dict[Route, IrsMessage], route: Route, message_class: IrsMessage, source: str) -> None:
     existing = messages.get(route)
     if existing is not None and existing is not message_class:
         raise IRSAmbiguousError(

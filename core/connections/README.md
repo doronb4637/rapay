@@ -172,29 +172,27 @@ nor receive. It can be set at two levels:
   fanning out to many receivers over a single shared IRS); otherwise
   `ConnectionConfig.from_json` raises `ValueError`.
 
-A structures file declares its units as module-level ints and its layouts with
-`@Definition`:
+A structures file names no units. It writes each sender's unit code inline in
+`@Definition`, and may declare pairs (units that speak another unit's IRS):
 
 ```python
 from IRS import *
 
-Tiful = 0x01
-DTU = 0x02
+#: 0x03 has no layouts of its own; it sends and receives 0x02's messages.
+PAIRS = {0x03: 0x02}
 
-@Definition(unitCode=Tiful, opCode=0x0012)
+@Definition(unitCode=0x01, opCode=0x0012)
 class GeneralFlag(Message):
     Flag: E_Flag
     value: int = Byte
 ```
 
-When the connection is built, `config.load_interfaces` imports each unit's
-files into that unit's `Interface` (several files are merged; two giving one
-route or unit name different meanings raise `IRSAmbiguousError`), and
-`config.validate_interfaces` checks the config against them:
-
-- every `connections[name]` must be a unit of its own file **under the same
-  name and code** -- `"DTU": {"unitCode": 3}` against `DTU = 0x02` fails;
-- our own top-level `unitCode` must be one of that file's units too.
+Unit names live only in the config: `"DTU": {"unitCode": 2}` is what names
+0x02 "DTU". When the connection is built, `config.load_interfaces` imports each
+unit's files into that unit's `Interface` (several files are merged; two giving
+one route different layouts raise `IRSAmbiguousError`). A file's `PAIRS` covers
+only that file's layouts, so another file on the same link may give the pair
+code messages of its own.
 
 `Connection.interface_for(unit_name)` returns a link's `Interface`. A message
 *class* passed as a selector is trusted; only its unit code is checked.
