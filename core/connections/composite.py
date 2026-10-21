@@ -8,10 +8,12 @@ and exposes the same public surface as a `Connection`.
 from __future__ import annotations
 
 import time
+from typing import Any, Callable, overload
+
 from core.IRS.irs_parser import Interface
 
-from .base import (ConnectCallback, ConnectedTarget, Connection, IrsMessage,
-                   OpCode, Outbound, ReceiveCallback, TriggerFunction)
+from .base import (ConnectCallback, ConnectedTarget, Connection, Message, MessageT,
+                   OpCode, Outbound, TriggerFunction)
 
 
 class CompositeUnit:
@@ -98,9 +100,9 @@ class CompositeUnit:
     # ------------------------------------------------------------------ #
     # Public API -- same shape as Connection
     # ------------------------------------------------------------------ #
-    def send_message(self, data: Outbound, unit_name: str | None = None) -> None:
+    def send_message(self, message: Outbound, unit_name: str | None = None) -> None:
         """`Connection.send_message` on the send-capable member."""
-        self._require_sender().send_message(data, unit_name)
+        self._require_sender().send_message(message, unit_name)
 
     def interface_for(self, unit_name: str | None = None) -> Interface:
         """The IRS interface of the first member that configures `unit_name`."""
@@ -145,20 +147,38 @@ class CompositeUnit:
             raise ValueError(f"CompositeUnit {self.name!r}: no member configures unit(s) {sorted(unknown)}")
         return pairs
 
+    @overload
+    def receive_message(
+        self, opcode: type[MessageT], unit_name: str | None = None,
+        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None,
+    ) -> MessageT: ...
+    @overload
+    def receive_message(
+        self, opcode: int, unit_name: str | None = None,
+        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None,
+    ) -> Message: ...
     def receive_message(
         self,
         opcode: OpCode,
         unit_name: str | None = None,
         timeout: float | int | None = None,
         trigger_function: TriggerFunction | None = None,
-    ) -> IrsMessage:
+    ) -> Any:
         """`Connection.receive_message` on the receive-capable member."""
         return self._require_receiver().receive_message(opcode, unit_name, timeout, trigger_function)
 
+    @overload
+    def handle_on_receive(
+        self, opcode: type[MessageT], callback_func: Callable[[MessageT], Any], unit_name: str | None = None,
+    ) -> None: ...
+    @overload
+    def handle_on_receive(
+        self, opcode: int, callback_func: Callable[[Message], Any], unit_name: str | None = None,
+    ) -> None: ...
     def handle_on_receive(
         self,
         opcode: OpCode,
-        callback_func: ReceiveCallback,
+        callback_func: Callable[[Any], Any],
         unit_name: str | None = None,
     ) -> None:
         """`Connection.handle_on_receive` on the receive-capable member."""
@@ -179,12 +199,12 @@ class CompositeUnit:
 
     def periodic_sending(
         self,
-        data: Outbound,
+        message: Outbound,
         interval: int | float,
         unit_name: str | None = None,
     ) -> None:
         """`Connection.periodic_sending` on the send-capable member."""
-        self._require_sender().periodic_sending(data, interval, unit_name)
+        self._require_sender().periodic_sending(message, interval, unit_name)
 
     def stop_periodic(self, opcode: OpCode, unit_name: str | None = None) -> bool:
         """`Connection.stop_periodic` on the send-capable member."""

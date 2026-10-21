@@ -13,7 +13,7 @@ import concurrent.futures
 import logging
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Coroutine, Iterable, Protocol
+from typing import Any, Callable, Coroutine, Iterable, Protocol, TypeVar, overload
 
 from core.annotations import IrsMessage, OpCode, UnitCode
 from core.IRS import Message, is_definition
@@ -29,9 +29,8 @@ from .framing import pack_message
 logger = logging.getLogger("connmgr")
 
 TriggerFunction = Callable[[], Any]
-#: What a send takes: a `@Definition` message instance (it carries its own
-#: route) or -- on DDS -- a typed sample.
 Outbound = Message
+MessageT = TypeVar("MessageT", bound=Message)
 ConnectedTarget = int | UnitName | Iterable[UnitName]
 #: A periodic schedule's key. The unit is None for a DDS broadcast, which has no
 #: single destination.
@@ -48,15 +47,27 @@ class Unit(Protocol):
     def active_units(self) -> set[str]: ...
     def start(self, retry: bool = False) -> None: ...
     def close(self, timeout: float | int | None = 5.0) -> None: ...
-    def send_message(self, data: Outbound, unit_name: str | None = None) -> None: ...
+    def send_message(self, message: Outbound, unit_name: str | None = None) -> None: ...
+    @overload
+    def receive_message(self, opcode: type[MessageT], unit_name: str | None = None,
+                        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> MessageT: ...
+    @overload
+    def receive_message(self, opcode: int, unit_name: str | None = None,
+                        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> Message: ...
     def receive_message(self, opcode: OpCode, unit_name: str | None = None,
-                        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage: ...
-    def handle_on_receive(self, opcode: OpCode, callback_func: ReceiveCallback, unit_name: str | None = None) -> None: ...
+                        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> Message: ...
+    @overload
+    def handle_on_receive(self, opcode: type[MessageT],
+                          callback_func: Callable[[MessageT], Any], unit_name: str | None = None) -> None: ...
+    @overload
+    def handle_on_receive(self, opcode: int,
+                          callback_func: Callable[[Message], Any], unit_name: str | None = None) -> None: ...
+    def handle_on_receive(self, opcode: OpCode, callback_func: Callable[[Any], Any], unit_name: str | None = None) -> None: ...
     def stop_on_receive(self, opcode: OpCode, unit_name: str | None = None) -> bool: ...
     def handle_on_connect(self, callback_func: ConnectCallback, unit_name: str | None = None) -> None: ...
     def stop_on_connect(self, unit_name: str | None = None) -> bool: ...
     def interface_for(self, unit_name: str | None = None) -> Interface: ...
-    def periodic_sending(self, data: Outbound, interval: int | float,
+    def periodic_sending(self, message: Outbound, interval: int | float,
                          unit_name: str | None = None) -> None: ...
     def stop_periodic(self, opcode: OpCode,
                       unit_name: str | None = None) -> bool: ...
@@ -513,20 +524,20 @@ class Connection(ABC):
     # ------------------------------------------------------------------ #
     # Public sync API
     # ------------------------------------------------------------------ #
-    def send_message(self, data: Outbound, unit_name: str | None = None) -> None:
+    def send_message(self, message: Outbound, unit_name: str | None = None) -> None:
         """
-        Send `data` to `unit_name`, which may be left out when only one unit is
+        Send `message` to `unit_name`, which may be left out when only one unit is
         configured. A `@Definition` message goes out under its own opcode. On
         DDS the sample names its own topic and goes to every subscriber.
 
         Raises `ValueError` for an unknown unit or a message another unit
-        sends, `TypeError` for an unsupported `data` type, `IRSDataError` if
-        IRS cannot encode `data`, and `ConnectionError` if the unit has no peer
+        sends, `TypeError` for an unsupported `message` type, `IRSDataError` if
+        IRS cannot encode `message`, and `ConnectionError` if the unit has no peer
         yet.
         """
-        key = self._send_key(data)
+        key = self._send_key(message)
         unit = self._send_unit(unit_name, key)
-        payload = self._encode(key, data, unit)
+        payload = self._encode(key, message, unit)
         self._loop_thread.await_coroutine(self._do_send(unit, payload, key))
 
     def wait_for_connected_units(
@@ -592,12 +603,21 @@ class Connection(ABC):
         except asyncio.TimeoutError:
             return False
 
+    @overload
+    def receive_message(self, opcode: type[MessageT], unit_name: str | None = None,
+        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> MessageT: ...
+    @overload
+    def receive_message(self, opcode: int, unit_name: str | None = None,
+        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> Message: ...
     def receive_message(self, opcode: OpCode, unit_name: str | None = None,
-        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> IrsMessage:
+        timeout: float | int | None = None, trigger_function: TriggerFunction | None = None) -> Any:
         """
         Block until a message on (unit, opcode) arrives and return it, parsed
         with the route's class. `opcode` is the message class itself or its
-        int/"0x.." opcode, resolved against that unit's structures.
+        int/"0x.." opcode, resolved against that unit's structures. Passing the
+        message class as `opcode` (e.g. `receive_message(IrsMsg)`) types the
+        return value as that class; passing an int leaves it as `Message`, and
+        the caller may type-hint the assignment themselves.
 
         Nothing is buffered: only an in-flight call receives, and only one may be
         in flight per route. `trigger_function` runs after the route is claimed,
@@ -618,16 +638,24 @@ class Connection(ABC):
                 self._loop_thread.call_on_loop(self._routes.release, route_key, future)
                 raise
         wait_timeout = timeout + 1 if timeout is not None else None
-        message: IrsMessage = self._loop_thread.await_coroutine(
+        message = self._loop_thread.await_coroutine(
             self._await_subscription(route_key, future, timeout), timeout=wait_timeout
         )
         return message
 
+    @overload
+    def handle_on_receive(self, opcode: type[MessageT],
+        callback_func: Callable[[MessageT], Any], unit_name: str | None = None) -> None: ...
+    @overload
+    def handle_on_receive(self, opcode: int,
+        callback_func: Callable[[Message], Any], unit_name: str | None = None) -> None: ...
     def handle_on_receive(self, opcode: OpCode,
-        callback_func: ReceiveCallback, unit_name: str | None = None) -> None:
+        callback_func: Callable[[Any], Any], unit_name: str | None = None) -> None:
         """
         Call `callback_func(message)` for every message on (unit, opcode) until
-        `stop_on_receive()`.
+        `stop_on_receive()`. Passing the message class as `opcode` (e.g.
+        `handle_on_receive(IrsMsg, callback)`) types `callback`'s parameter as
+        that class; passing an int leaves it as `Message`.
 
         Runs on an executor thread, so it may block and call this connection's
         sync API; it may also run concurrently with itself. Exceptions are logged.
@@ -672,13 +700,13 @@ class Connection(ABC):
 
     def periodic_sending(
         self,
-        data: Outbound,
+        message: Outbound,
         interval: int | float,
         unit_name: str | None = None,
     ) -> None:
         """
         `send_message` every `interval` seconds until `stop_periodic`. Calling it
-        again for the same route replaces the schedule. `data` is encoded once,
+        again for the same route replaces the schedule. `message` is encoded once,
         here, so an unencodable message fails now rather than every tick.
 
         A failed tick is logged and retried on the next one. Raises `ValueError`
@@ -688,9 +716,9 @@ class Connection(ABC):
         interval_seconds = float(interval)
         if interval_seconds <= 0:
             raise ValueError(f"interval must be > 0 seconds, got {interval!r}")
-        key = self._send_key(data)
+        key = self._send_key(message)
         unit = self._send_unit(unit_name, key)
-        payload = self._encode(key, data, unit)
+        payload = self._encode(key, message, unit)
         self._loop_thread.await_coroutine(
             self._start_periodic(unit, self._periodic_key(unit, key), payload, key, interval_seconds))
 

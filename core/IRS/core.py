@@ -1,5 +1,5 @@
 # logic/core.py
-from typing import Any, Type
+from typing import Any, Type, TypeVar
 from typing_extensions import dataclass_transform
 from enum import IntEnum
 from beartype.door import is_bearable
@@ -9,6 +9,8 @@ from .buffers import BinaryReader, BinaryWriter
 from .bitfields import BitField, baseType
 from .fields import BaseField, Field, EnumField
 from .constants import *
+
+GenericType = TypeVar("T")
 
 class ArrayField(BaseField):
     __slots__ = ('baseType', 'length',)
@@ -206,10 +208,10 @@ def Definition(unitCode: int, opCode: int):
     Both are plain numbers, written inline: `@Definition(unitCode=0x02, opCode=0x0012)`.
     A structures file names no units; unit names live only in the connection config.
     """
-    def wrapper(msg: type[Message]) -> type[Message]:
-        msg._unitCode = unitCode
-        msg._opCode = opCode
-        return msg
+    def wrapper(message: GenericType) -> GenericType:
+        message._unitCode = unitCode
+        message._opCode = opCode
+        return message
     return wrapper
 
 

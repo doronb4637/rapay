@@ -38,6 +38,11 @@ def baseType(byte_size: int, imposed_endian: str = None) -> T_Enum | BitField:
         fmt = {1: UInt8, 2: UInt16, 4: UInt32, 8: UInt64}.get(byte_size, UInt8) if isinstance(byte_size, int) else byte_size
         if isinstance(cls, BitFieldMeta):
             cls._packer_ = get_packer(endian + fmt)
+            # Safety Enum Configurations
+            allocated_bits = cls._packer_.size * 8
+            actual_bits = sum(bits for _, _, bits in cls._fields_)
+            if actual_bits > allocated_bits:
+                raise ValueError(f"BitField '{cls.__name__}' defines {actual_bits} bits, but its @baseType only allocates {allocated_bits} bits.")
         else:
             cls._baseType_ = endian + fmt
         return cls

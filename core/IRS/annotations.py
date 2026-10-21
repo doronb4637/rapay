@@ -8,7 +8,6 @@ from typing import Iterable, TypeAlias
 
 from .core import Message
 
-
 IrsMessage: TypeAlias = type[Message]
 UnitCode: TypeAlias = int
 OpCode: TypeAlias = int | type[Message]

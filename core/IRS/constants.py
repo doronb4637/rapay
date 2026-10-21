@@ -40,4 +40,8 @@ def module_endian(module_name: str | None) -> str:
         str: `littleEndian` ('<') or `bigEndian` ('>'), ready to prefix a struct format.
     """
     module = _sys.modules.get(module_name) if module_name else None
-    return getattr(module, ENDIAN_ATTRIBUTE, little_endian)
+    endian = getattr(module, ENDIAN_ATTRIBUTE, little_endian)
+    if endian not in (little_endian, big_endian):
+        raise ValueError(f"{module_name}.{ENDIAN_ATTRIBUTE} must be bigEndian ('>') or "
+                         f"littleEndian ('<'), got {endian!r}.")
+    return endian
