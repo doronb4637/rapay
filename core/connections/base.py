@@ -247,7 +247,7 @@ class Connection(ABC):
         """
         if not isinstance(data, Message):
             raise TypeError(f"send_message only takes a IRS message instance, got {type(data).__name__}")
-        return data._unitCode
+        return data._opCode
 
     def _send_unit(self, unit_name: str | None, key: MessageKey) -> UnitName | None:
         """The destination of a send. None only on DDS, where a sample goes to
