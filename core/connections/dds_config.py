@@ -24,10 +24,6 @@ because the Interface imports its topic classes.
 """
 from __future__ import annotations
 
-import hashlib
-import importlib
-import importlib.util
-import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -36,7 +32,7 @@ from typing import Any
 
 from core.annotations import UnitCode
 from core.DDS.interface import DdsUnit
-from core.tools.general import names_a_file
+from core.tools.general import import_modules, names_a_file
 
 DEFAULT_DOMAIN_ID: int = 50
 _CORE_DIR: Path = Path(__file__).resolve().parent.parent
@@ -135,32 +131,16 @@ def load_dds_interface(spec: str | Path) -> ModuleType:
     """
     Import a DDS Interface by `.py` path (the normal case) or dotted name.
 
-    A path is imported under a `sys.modules` name carrying a digest of the
-    RESOLVED path, so one file always comes back as one module object -- the
-    identity its topic classes depend on -- and two files that merely share a
-    stem never collide.
+    Loaded through the same `import_modules` as structures files: a path is
+    imported under a name derived from its RESOLVED path, so one file always
+    comes back as one module object -- the identity its topic classes depend
+    on -- and every real folder is a package, so an Interface kept anywhere on
+    disk can import its topics relatively (`from ..pyIdl.topics import Track`).
     """
     text = str(spec)
-    if not names_a_file(text):
-        return importlib.import_module(text)
-    path = Path(text).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"DDS Interface not found: {path}")
-    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
-    module_name = f"_connmgr_dds_interface_{path.stem}_{digest}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    module_spec = importlib.util.spec_from_file_location(module_name, path)
-    module = importlib.util.module_from_spec(module_spec)
-    # Registered before exec_module so the module can be found by name while
-    # its own body runs; dropped again on failure so a retry re-executes.
-    sys.modules[module_name] = module
-    try:
-        module_spec.loader.exec_module(module)
-    except BaseException:
-        del sys.modules[module_name]
-        raise
-    return module
+    if names_a_file(text) and not Path(text).resolve().is_file():
+        raise FileNotFoundError(f"DDS Interface not found: {Path(text).resolve()}")
+    return import_modules(text)[0]
 
 
 def _direction(publishes: bool, subscribes: bool) -> TopicDirection:

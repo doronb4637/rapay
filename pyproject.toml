@@ -9,6 +9,7 @@ description = "IRS binary parsing engine + connections/tools framework (import n
 requires-python = ">=3.10"
 dependencies = [
     "beartype",
+    "rti.connext"
 ]
 
 [project.optional-dependencies]
@@ -25,12 +26,13 @@ exclude = [
     "core.tests", "core.tests.*",
     "core.IRS.Structures", "core.IRS.Structures.*",
     "core.IRS.benchmark", "core.IRS.benchmark.*",
-    "core.DDS.idl_types", "core.DDS.idl_types.*",
+    "core.DDS.pyIdl", "core.DDS.pyIdl.*",
     "core.DDS.Interfaces", "core.DDS.Interfaces.*"
 ]
 
 [tool.setuptools.package-data]
 "IRS-stubs" = ["*.pyi"]
+
 
 #python -m pip install build
 #python -m build --wheel

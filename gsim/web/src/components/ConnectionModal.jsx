@@ -376,11 +376,13 @@ export default function ConnectionModal({ initial, onSubmit, onClose }) {
       }
     }
 
+    // The form state carries the DDS fields too; IrsConnectionCreate forbids extra keys.
+    const { dds_interface, unit, domain_id, qos_file, qos_profile, ...irsForm } = form;
     setBusy(true);
     setError(null);
     try {
       await onSubmit({
-        ...form,
+        ...irsForm,
         // Pinned rather than asked for once the field is hidden -- core still
         // requires the key, it just never reads it for a listening endpoint.
         ip: remoteIpVisible(form) ? form.ip : HIDDEN_IP_DEFAULT,

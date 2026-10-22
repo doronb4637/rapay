@@ -180,7 +180,7 @@ def test_a_pair_to_a_unit_the_file_does_not_send_is_reported(tmp_path):
 DDS_PREAMBLE = """\
 import rti.types as idl
 from core.DDS import DdsUnit
-from core.DDS.idl_types.Example.example_topics import Status, Track
+from core.DDS.pyIdl.Example.example_topics import Status, Track
 
 @idl.struct
 class Plain:

@@ -47,7 +47,7 @@
 # DTU.send_message(setg, 18)
 # sender, data = Tiful.receive_message(18, timeout=5, trigger_function=send)
 # print(data)
-from core.DDS.idl_types.Example.example_topics import Status, Track   # ABSOLUTE import
+from core.DDS.pyIdl.Example.example_topics import Status, Track   # ABSOLUTE import
 
 INTERFACE_FORMAT = 1           # loader rejects unknown versions
 SYSTEM = "ExampleSystem"       # optional, used in logs

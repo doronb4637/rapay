@@ -39,7 +39,7 @@ from core.connections.dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE,  #
                                          TopicDirection, load_dds_interface, resolve_unit)
 from core.connections.handlers import UnitHandler, route  # noqa: E402
 from core.DDS import DdsUnit  # noqa: E402
-from core.DDS.idl_types.Example.example_topics import SourceId, Status, Track  # noqa: E402
+from core.DDS.pyIdl.Example.example_topics import SourceId, Status, Track  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INTERFACE = str(REPO_ROOT / "core" / "DDS" / "Interfaces" / "Example" / "example_interface.py")
@@ -57,7 +57,7 @@ TEST_DOMAIN = 77
 #: The imports every stand-in Interface starts with -- absolute, as the rule is.
 PREAMBLE = """\
 from core.DDS import DdsUnit
-from core.DDS.idl_types.Example.example_topics import Status, Track
+from core.DDS.pyIdl.Example.example_topics import Status, Track
 """
 
 #: Three units, to have the cases two cannot express:
@@ -391,7 +391,7 @@ def test_an_unknown_topic_lists_the_units_topics(selector):
 def test_a_second_copy_of_a_topic_class_shows_both_modules():
     """The trap a path-loaded module sets: same class name, different object.
     The error names both modules, which is what gives it away."""
-    source = REPO_ROOT / "core" / "DDS" / "idl_types" / "Example" / "example_topics.py"
+    source = REPO_ROOT / "core" / "DDS" / "pyIdl" / "Example" / "example_topics.py"
     spec = importlib.util.spec_from_file_location("_second_copy_of_example_topics", source)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

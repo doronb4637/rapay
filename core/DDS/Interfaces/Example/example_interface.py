@@ -12,8 +12,8 @@ the whole contract `core.connections.dds_config` reads:
   * ABSOLUTE imports. The topic classes must be the very objects the
     application builds samples from, however this file itself gets loaded.
 """
-from core.DDS import DdsUnit
-from core.DDS.idl_types.Example.example_topics import SensorReport, Status, Track
+from DDS import DdsUnit
+from DDS.pyIdl.Example.example_topics import SensorReport, Status, Track
 
 SYSTEM = "ExampleSystem"
 
