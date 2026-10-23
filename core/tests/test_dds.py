@@ -39,11 +39,11 @@ from core.connections.dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE,  #
                                          TopicDirection, load_dds_interface, resolve_unit)
 from core.connections.handlers import UnitHandler, route  # noqa: E402
 from core.DDS import DdsUnit  # noqa: E402
-from core.DDS.pyIdl.Example.example_topics import SourceId, Status, Track  # noqa: E402
+from core.DDS.pyIdl.example_topics import SourceId, Status, Track  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-INTERFACE = str(REPO_ROOT / "core" / "DDS" / "Interfaces" / "Example" / "example_interface.py")
-INTERFACE_DOTTED = "core.DDS.Interfaces.Example.example_interface"
+#: Dotted, spelled like this file's own topic import: the two must be one module.
+INTERFACE = "core.DDS.Interfaces.example_interface"
 #: The tests' own QoS file. DEFAULT_QOS_FILE is the deployment's, so its
 #: contents are not something a test may pin.
 QOS_FILE = str(Path(__file__).resolve().parent / "qos_fixture.xml")
@@ -54,10 +54,11 @@ SENSOR_CODE, CONTROL_CODE = 0x01, 0x02
 #: join a test's domain.
 TEST_DOMAIN = 77
 
-#: The imports every stand-in Interface starts with -- absolute, as the rule is.
+#: The imports every stand-in Interface starts with. Absolute, because a stand-in
+#: in tmp_path has no generated `pyIdl/` sibling and must share this file's classes.
 PREAMBLE = """\
 from core.DDS import DdsUnit
-from core.DDS.pyIdl.Example.example_topics import Status, Track
+from core.DDS.pyIdl.example_topics import Status, Track
 """
 
 #: Three units, to have the cases two cannot express:
@@ -98,7 +99,7 @@ def build(unit: str = SENSOR, interface: str = INTERFACE, **overrides) -> DdsCon
 
 def write_interface(tmp_path: Path, body: str, preamble: bool = True, types: str = "") -> str:
     """A stand-in for a generated Interface, written where a deployment's would
-    be. `body` is dedented; the absolute-import preamble is prepended unless the
+    be. `body` is dedented; the preamble is prepended unless the
     test is about the preamble itself, then `types` (extra type definitions)."""
     path = tmp_path / "dds_interface.py"
     path.write_text((PREAMBLE if preamble else "") + types + textwrap.dedent(body), encoding="utf-8")
@@ -189,19 +190,46 @@ def test_each_unit_gets_its_own_view_of_the_example_interface():
         "SensorReport": TopicDirection.SUBSCRIBE}
 
 
-def test_an_interface_loads_by_dotted_name_too():
-    assert resolve_unit(INTERFACE_DOTTED, SENSOR).unit_code == SENSOR_CODE
-
-
-def test_one_file_is_one_module_object():
-    """The identity the topic classes depend on: loading the same file again --
-    however its path is spelled -- must not mint a second module."""
-    spelled_differently = str(Path(INTERFACE).parent / ".." / "Example" / Path(INTERFACE).name)
-    assert load_dds_interface(INTERFACE) is load_dds_interface(spelled_differently)
+def generated_copy(tmp_path: Path) -> Path:
+    """The repo's generated Interface + pyIdl pair, copied as the generator lays
+    it out (`pyIdl/` beside the Interface's folder) somewhere nothing imports."""
+    for folder, name in (("Interfaces", "example_interface.py"), ("pyIdl", "example_topics.py")):
+        target = tmp_path / "ICD" / folder
+        target.mkdir(parents=True)
+        (target / name).write_text(
+            (REPO_ROOT / "core" / "DDS" / folder / name).read_text(encoding="utf-8"), encoding="utf-8")
+    return tmp_path / "ICD" / "Interfaces" / "example_interface.py"
 
 
 def test_the_interface_classes_are_the_ones_application_code_imports():
+    """Dotted, spelled like the application's import: its relative `..pyIdl`
+    resolves through the real packages to the very classes imported here."""
     assert load_dds_interface(INTERFACE).Track is Track
+
+
+def test_a_path_only_interface_resolves_its_relative_topic_import(tmp_path):
+    """gsim's case: nothing else imports the file, so it loads by path and its
+    `..pyIdl` resolves to the generated sibling folder."""
+    module = load_dds_interface(str(generated_copy(tmp_path)))
+    assert module.Track.__module__.endswith(".ICD.pyIdl.example_topics")
+    assert module.SensorUnit.publish[0] is module.Track
+
+
+def test_one_file_is_one_module_object(tmp_path):
+    """Loading the same file again -- however its path is spelled -- must not
+    mint a second module."""
+    path = generated_copy(tmp_path)
+    spelled_differently = str(path.parent / ".." / "Interfaces" / path.name)
+    assert load_dds_interface(str(path)) is load_dds_interface(spelled_differently)
+
+
+def test_a_path_to_a_file_the_application_imported_is_refused():
+    """The trap the dotted rule closes: one file under two names is two copies
+    of every topic class. Refused, naming the dotted name to use instead."""
+    path = REPO_ROOT / "core" / "DDS" / "Interfaces" / "example_interface.py"
+    load_dds_interface(INTERFACE)
+    with pytest.raises(ImportError, match=f"already imported as '{INTERFACE}'"):
+        load_dds_interface(str(path))
 
 
 def test_an_unknown_unit_lists_the_ones_that_exist():
@@ -391,7 +419,7 @@ def test_an_unknown_topic_lists_the_units_topics(selector):
 def test_a_second_copy_of_a_topic_class_shows_both_modules():
     """The trap a path-loaded module sets: same class name, different object.
     The error names both modules, which is what gives it away."""
-    source = REPO_ROOT / "core" / "DDS" / "pyIdl" / "Example" / "example_topics.py"
+    source = REPO_ROOT / "core" / "DDS" / "pyIdl" / "example_topics.py"
     spec = importlib.util.spec_from_file_location("_second_copy_of_example_topics", source)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

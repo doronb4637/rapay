@@ -190,25 +190,42 @@ def test_the_link_interface_is_ready_when_create_returns(manager, free_port):
 # --------------------------------------------------------------------------- #
 # Module naming: what a config declares must equal what gets imported
 # --------------------------------------------------------------------------- #
-def test_import_modules_loads_the_module_resolve_module_name_predicts():
-    """Config resolution and the actual import go through one function, so a
-    link's declared namespace is always the module it really loaded."""
-    import importlib
+def _copy_of_test_messages(tmp_path):
+    """A structures file at a path nothing has imported, as gsim picks one."""
+    import core.IRS.Structures.Test.test_messages as module
     from pathlib import Path
 
+    copy = tmp_path / "test_messages.py"
+    copy.write_text(Path(module.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    return str(copy)
+
+
+def test_import_modules_loads_the_module_resolve_module_name_predicts(tmp_path):
+    """Config resolution and the actual import go through one function, so a
+    link's declared namespace is always the module it really loaded."""
     from core.tools.general import import_modules, resolve_module_name
 
-    module_file = str(Path(importlib.import_module(TEST_MESSAGES).__file__).resolve())
-    spellings = [TEST_MESSAGES, module_file]
+    spellings = [TEST_MESSAGES, _copy_of_test_messages(tmp_path)]
     names = [module.__name__ for module in import_modules(spellings)]
     assert names == [resolve_module_name(s) for s in spellings]
-    # A dotted entry keeps its own name; a path gets a synthetic one derived
-    # from the path. Two spellings of one file are two modules -- on purpose:
-    # collapsing them is what used to require a folder to be special.
+    # A dotted entry keeps its own name; a path gets a synthetic one derived from the path.
     assert names[0] == TEST_MESSAGES
 
 
-def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
+def test_a_path_to_a_file_already_imported_by_name_is_refused():
+    """Two spellings of one file would be two modules and two copies of every
+    message class, so the path load refuses and names the dotted name to use."""
+    import importlib
+    from pathlib import Path
+
+    from core.tools.general import import_modules
+
+    module_file = str(Path(importlib.import_module(TEST_MESSAGES).__file__).resolve())
+    with pytest.raises(ImportError, match=f"already imported as '{TEST_MESSAGES}'"):
+        import_modules([module_file])
+
+
+def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives(tmp_path):
     """The file named is the file that runs -- location decides nothing.
 
     The namespace is derived from the path itself, under a synthetic root that
@@ -219,10 +236,9 @@ def test_a_picked_path_is_loaded_from_that_path_wherever_it_lives():
 
     from core.IRS.irs_parser import Interface
     from core.tools.general import import_modules, resolve_module_name
-    import core.IRS.Structures.Test.test_messages as module
     from core.IRS.Structures.Test.test_messages import TRACK_OPCODE
 
-    by_path = str(Path(module.__file__).resolve())
+    by_path = _copy_of_test_messages(tmp_path)
     name = resolve_module_name(by_path)
     # <root>.<real folder chain>.<stem> -- nothing in it names a real package.
     assert name.startswith("irs_structures."), name

@@ -101,4 +101,4 @@ Modular, JSON-configured connection library (TCP, UDP, Multicast, RTI Connext DD
 - Handlers: `core/connections/handlers.py`, `core/tests/test_handlers.py`, `core/tests/test_on_connect.py`.
 - Receive/trigger patterns: `core/tests/test_dispatch.py`, `core/tests/test_tcp.py`. Periodic sending: `core/tests/test_periodic.py`. Composites: `core/tests/test_composite.py`.
 - Interfaces and signatures: `core/IRS/irs_parser.py`, `core/connections/base.py`, `core/tests/test_interface.py`.
-- DDS: `core/tests/test_dds.py`, `core/DDS/Interfaces/Example/example_interface.py`.
+- DDS: `core/tests/test_dds.py`, `core/DDS/Interfaces/example_interface.py`.

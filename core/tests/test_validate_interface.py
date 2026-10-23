@@ -26,7 +26,7 @@ def problems_in(tmp_path: Path, body: str) -> str:
 @pytest.mark.parametrize("spec", [
     "core/IRS/Structures/Tiful/tiful_to_dtu.py",
     "core.IRS.Structures.Test.test_messages",
-    "core/tests/_messages.py",
+    "core.tests._messages",
 ])
 def test_the_repos_own_structures_files_are_valid(spec):
     assert validate(str(REPO_ROOT / spec) if spec.endswith(".py") else spec) == []
@@ -180,7 +180,7 @@ def test_a_pair_to_a_unit_the_file_does_not_send_is_reported(tmp_path):
 DDS_PREAMBLE = """\
 import rti.types as idl
 from core.DDS import DdsUnit
-from core.DDS.pyIdl.Example.example_topics import Status, Track
+from core.DDS.pyIdl.example_topics import Status, Track
 
 @idl.struct
 class Plain:
@@ -198,7 +198,7 @@ def dds_problems(tmp_path: Path, body: str) -> str:
 
 def test_the_example_dds_interface_is_valid():
     pytest.importorskip("rti.connextdds", reason="RTI Connext Python API not installed")
-    assert validate(str(REPO_ROOT / "core/DDS/Interfaces/Example/example_interface.py")) == []
+    assert validate("core.DDS.Interfaces.example_interface") == []
 
 
 def test_several_publishers_and_no_source_id_are_reported(tmp_path):
@@ -251,10 +251,10 @@ def test_a_shared_wire_type_name_is_reported(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_main_exits_1_and_names_the_failing_file(tmp_path, capsys):
     bad = write(tmp_path, "Unit = 1\n")
-    assert main([str(REPO_ROOT / "core/tests/_messages.py"), bad]) == 1
+    assert main(["core.tests._messages", bad]) == 1
     out = capsys.readouterr().out
     assert "OK" in out and f"FAIL {bad}" in out
 
 
 def test_main_exits_0_when_everything_is_valid():
-    assert main([str(REPO_ROOT / "core/tests/_messages.py")]) == 0
+    assert main(["core.tests._messages"]) == 0

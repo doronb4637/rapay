@@ -1,6 +1,7 @@
 import importlib
 import importlib.machinery
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -121,6 +122,21 @@ def _ensure_synthetic_package(directory: Path) -> None:
             )
 
 
+def _refuse_second_copy(path: Path) -> None:
+    """Raise if `path` was already imported under a real dotted name.
+
+    Loading it again synthetically would mint a second copy of every class in
+    it, so `isinstance`/`is` against the application's classes would miss.
+    """
+    target = os.path.normcase(str(path))
+    for name, module in list(sys.modules.items()):
+        file = getattr(module, "__file__", None)
+        if file and os.path.normcase(os.path.abspath(file)) == target:
+            raise ImportError(
+                f"{path} is already imported as {name!r}; name it by that dotted "
+                f"name in the config, not by path, so both use one module object.")
+
+
 def _import_from_file(path: Path, module_name: str) -> None:
     """Load the already-resolved `path` as `module_name`."""
     loaded = sys.modules.get(module_name)
@@ -139,6 +155,7 @@ def _import_from_file(path: Path, module_name: str) -> None:
         # Likeliest cause: a config written on another machine. Without this the
         # error surfaces from exec_module and reads as a broken file.
         raise ImportError(f"structures file does not exist: {path}")
+    _refuse_second_copy(path)
     _ensure_synthetic_package(path.parent)
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:

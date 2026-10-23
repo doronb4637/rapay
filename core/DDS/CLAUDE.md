@@ -9,7 +9,7 @@ What a DDS system is *described* in, as opposed to how a connection runs it. Dep
 
 ## Architecture & Tech Stack
 
-- `idl_types/` and `Structures/`: plain modules of `@idl.struct` topic types (RTI Connext Python API).
+- `pyIdl/`: plain modules of `@idl.struct` topic types (RTI Connext Python API).
 - `interface.py`: `DdsUnit`, the vocabulary a generated **DDS Interface** is written in; re-exported by `__init__.py`.
 - `Interfaces/`: reference Interface -- the exact shape the user's system-XML -> Python XSLT must produce.
 - `Configuration/`: `UNIVERSAL_QOS.xml` and the security files it references. Data, not code. The RTI license is `core/rti_license.dat`.
@@ -28,12 +28,12 @@ What a DDS system is *described* in, as opposed to how a connection runs it. Dep
 ## Code Style & Constraints
 
 - Never import `rti` in `__init__.py` or `interface.py`.
-- Interfaces use absolute imports of topic classes; they are loaded by path and have no package to be relative to. Relative imports would load a private second copy of every class.
+- An Interface imports its topics relatively (`from ..pyIdl.x import T`), as the generator emits it. How to name it in a config: root `CLAUDE.md`, "Generated files".
 - Import `DdsUnit` from `core.DDS`.
 - Nested struct members need a default factory, not a bare instance (`@idl.struct` is a dataclass; a bare instance raises at import).
 
 ## Reference Codebases
 
-- Topic types: `core/DDS/idl_types/Example/example_topics.py`.
-- Reference Interface: `core/DDS/Interfaces/Example/example_interface.py`.
+- Topic types: `core/DDS/pyIdl/example_topics.py`.
+- Reference Interface: `core/DDS/Interfaces/example_interface.py`.
 - Runtime behaviour (loader, routing, QoS, lifecycle): `core/connections/dds_config.py`, `core/connections/dds.py`, and `core/connections/CLAUDE.md`.

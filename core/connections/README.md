@@ -152,7 +152,9 @@ would leave those caches describing a configuration that no longer exists.
 
 `Structures` names the IRS structures file(s) a link speaks -- a Python dotted
 name (`"Radar.radar_link"`) or a real filesystem path to a `.py` file kept
-anywhere, either way named by `tools.general.resolve_module_name`. It is
+anywhere, either way named by `tools.general.resolve_module_name`. Use the
+dotted name when the application imports the file too (see §9, *Class
+identity*: the rule is the same for structures files). It is
 **mandatory** on tcp/udp/multicast: a unit that ends up with no list is a
 `ValueError` at load, since without a global registry it could neither send
 nor receive. It can be set at two levels:
@@ -663,9 +665,9 @@ configured with sockets and hand-written routes but as **one unit of a DDS
 Interface** -- the generated Python module that is the system contract:
 
 ```python
-# GENERATED from the system XML -- reference: core/DDS/Interfaces/Example/example_interface.py
+# GENERATED from the system XML -- reference: core/DDS/Interfaces/example_interface.py
 from core.DDS import DdsUnit
-from my_icd.topics import Status, Track      # ABSOLUTE imports
+from ..pyIdl.topics import Status, Track     # generated sibling, relative
 
 SYSTEM = "ExampleSystem"
 
@@ -674,8 +676,11 @@ ControlUnit = DdsUnit(unitCode=0x02, publish=(Status,), subscribe=(Track,))
 ```
 
 ```json
-{"protocol": "dds", "unit": "SensorUnit", "dds_interface": "C:/ICD/generated/dds_interface.py"}
+{"protocol": "dds", "unit": "SensorUnit", "dds_interface": "ICD.Interfaces.dds_interface"}
 ```
+
+Name it dotted when application code imports the topic classes, by path when
+it does not (gsim) -- see *Class identity* below.
 
 Two naming rules keep the Interface that small: a unit's name is the variable
 its `DdsUnit` is bound to, and a topic's name is its class's wire type name
@@ -728,12 +733,28 @@ dropped.
 ### Class identity
 
 The Interface imports the topic classes, and application code builds samples
-from them, so both must hold the SAME class objects. Generated files use
-absolute imports (a path-loaded Interface has no package to be relative to, and
-giving it one would load a private copy of every class); `load_dds_interface`
-keys a path by its resolved location, so one file is one module; and a class
-that is not a topic's own class raises an error naming both classes with
-their modules, which is what gives a second copy away.
+from them, so both must hold the SAME class objects. One file imported two ways
+-- once by the application's `import`, once by the config's path -- is two
+modules and two copies of every class. So a generated file (DDS Interface or
+IRS structures file) is named one way only:
+
+- **rapay as a library** -- the application imports the file itself, so the
+  config names it **dotted, spelled exactly like that import**, and its root
+  folder is on `sys.path` (running the script from that folder does it):
+
+  ```python
+  from ICD.Interfaces.dds_interface import Track      # app's own import
+  config = {"protocol": "dds", "unit": "SensorUnit",
+            "dds_interface": "ICD.Interfaces.dds_interface"}  # same spelling
+  ```
+
+- **gsim** -- nothing but gsim loads the file, so it is named **by path** and
+  imported under a synthetic `irs_structures.*` name.
+
+Either way the generated file's relative imports (`..pyIdl`) resolve. A path
+load of a file already imported under a real name raises `ImportError` naming
+the dotted name to use; an import made *after* the path load cannot be caught,
+but a topic class from that second copy raises an error naming both modules.
 
 ### QoS
 

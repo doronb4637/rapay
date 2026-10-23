@@ -4,10 +4,10 @@ on, which unit it is in it, and the deployment settings (domain, QoS) that are
 not part of the system contract.
 
 A DDS Interface is a generated module written in `core.DDS.interface`'s
-vocabulary (reference instance: `core/DDS/Interfaces/Example/example_interface.py`):
+vocabulary (reference instance: `core/DDS/Interfaces/example_interface.py`):
 
     from core.DDS import DdsUnit
-    from my_icd.topics import Status, Track
+    from ..pyIdl.topics import Status, Track
 
     SYSTEM = "ExampleSystem"            # optional
 
@@ -129,7 +129,12 @@ class DdsUnitConfig:
 
 def load_dds_interface(spec: str | Path) -> ModuleType:
     """
-    Import a DDS Interface by `.py` path (the normal case) or dotted name.
+    Import a DDS Interface by dotted name or `.py` path.
+
+    Name it dotted, spelled like the application's own `import`, when the
+    application imports its topic classes; name it by path only when nothing
+    else imports it (gsim). A path load of a file already imported under a real
+    name raises `ImportError` rather than mint a second copy of every class.
 
     Loaded through the same `import_modules` as structures files: a path is
     imported under a name derived from its RESOLVED path, so one file always
