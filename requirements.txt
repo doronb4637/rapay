@@ -61,7 +61,7 @@ setuptools==83.0.0
 packaging==26.3
 
 # ---- optional, NOT installable from PyPI ---------------------------------------
-# rti.connext==7.7.0
+rti.connext==7.7.0
 #   RTI Connext DDS Python API, only needed for core.connections.dds (DDS
 #   transport). It ships with your RTI SDK installer, not a public package --
 #   on a closed LAN you must copy its wheel/site-packages dir from a machine
