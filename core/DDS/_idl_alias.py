@@ -6,22 +6,19 @@ module object per file.
 
 rtiddsgen writes the includes between its Python files as top-level imports --
 `example_topics.py` says `from example_common import *` -- because it assumes
-the folder it generated into is on `sys.path`. Here it never is: the folder is a
-package (`core.DDS.pyIdl`, or `irs_structures.….pyIdl` when gsim loads an
-Interface by path), so that bare import fails, and the files themselves may not
-be edited or have anything added beside them.
+the folder it generated into is on `sys.path`.
+Since Gsim imports an IDL file that exists out side if the project scope.
+the bare import fails.
 
-Putting the folder on `sys.path` would make it import, but as a second name:
-`example_common` and `core.DDS.pyIdl.example_common` would be two modules with
-two `SourceId` classes, and every `isinstance` against one misses the other --
-the same failure `core/IRS/_alias.py` exists to prevent.
+We also need to be carefull of importing a file under two diffrent 'MRO'
+since then python see them and their inside object's as diffrent
+and not compatebale code.
 
 ## What it does
 
 A DDS Interface calls `register_idl_folder("..pyIdl", __package__)` before
 importing its topics. From then on a bare `import example_common` resolves, via
-a `sys.meta_path` finder, to the module object `<package>.example_common`
-already is (importing it under that real name first if needed).
+a `sys.meta_path` finder
 
 The finder sits at the END of `sys.meta_path`, so it only answers a bare name
 nothing else on `sys.path` provides; it never takes over a stdlib or
