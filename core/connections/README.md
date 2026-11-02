@@ -666,7 +666,8 @@ Interface** -- the generated Python module that is the system contract:
 
 ```python
 # GENERATED from the system XML -- reference: core/DDS/Interfaces/example_interface.py
-from core.DDS import DdsUnit
+from core.DDS import DdsUnit, register_idl_folder
+register_idl_folder("..pyIdl", __package__)  # rtiddsgen bare imports; see core/DDS/CLAUDE.md
 from ..pyIdl.topics import Status, Track     # generated sibling, relative
 
 SYSTEM = "ExampleSystem"

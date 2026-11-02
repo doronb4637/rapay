@@ -13,9 +13,13 @@ the whole contract `core.connections.dds_config` reads:
     puts `pyIdl/` beside the Interface's folder, so a regenerated pair drops in
     unchanged wherever it lives. See the root CLAUDE.md for how to name it in a
     config so the application's topic classes are the same objects.
+  * `register_idl_folder` called with that same relative name BEFORE the topic
+    imports, so rtiddsgen's bare imports between its files resolve
+    (`core/DDS/_idl_alias.py`).
 """
-from core.DDS import DdsUnit
-from ..pyIdl.example_topics import SensorReport, Status, Track
+from core.DDS import DdsUnit, register_idl_folder
+register_idl_folder("..pyIdl", __package__)
+from ..pyIdl.example_topics import SensorReport, Status, Track  # noqa: E402
 
 SYSTEM = "ExampleSystem"
 

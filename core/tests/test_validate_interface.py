@@ -179,6 +179,7 @@ def test_a_pair_to_a_unit_the_file_does_not_send_is_reported(tmp_path):
 # --------------------------------------------------------------------------- #
 DDS_PREAMBLE = """\
 import rti.types as idl
+import core.DDS.Interfaces.example_interface  # registers pyIdl/ before its topics are imported
 from core.DDS import DdsUnit
 from core.DDS.pyIdl.example_topics import Status, Track
 
@@ -258,3 +259,29 @@ def test_main_exits_1_and_names_the_failing_file(tmp_path, capsys):
 
 def test_main_exits_0_when_everything_is_valid():
     assert main(["core.tests._messages"]) == 0
+
+
+@pytest.mark.usefixtures("fresh_idl_registry")
+def test_an_idl_file_shadowed_by_a_stdlib_module_is_reported(tmp_path):
+    """rtiddsgen's bare `import json` would get the stdlib, not the IDL file."""
+    pytest.importorskip("rti.connextdds", reason="RTI Connext Python API not installed")
+    (tmp_path / "Interfaces").mkdir()
+    (tmp_path / "idl").mkdir()
+    (tmp_path / "idl" / "json.py").write_text("", encoding="utf-8")
+    (tmp_path / "idl" / "shadow_topics.py").write_text(textwrap.dedent("""\
+        import rti.types as idl
+
+        @idl.struct
+        class Shadowed:
+            x: idl.int32 = 0
+        """), encoding="utf-8")
+    path = tmp_path / "Interfaces" / "shadow_interface.py"
+    path.write_text(textwrap.dedent("""\
+        from core.DDS import DdsUnit, register_idl_folder
+        register_idl_folder("..idl", __package__)
+        from ..idl.shadow_topics import Shadowed
+        A = DdsUnit(unitCode=1, publish=(Shadowed,))
+        """), encoding="utf-8")
+    problems = "\n".join(validate(str(path)))
+    assert "idl.json is shadowed" in problems
+    assert "shadow_topics" not in problems

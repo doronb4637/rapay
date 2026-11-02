@@ -12,6 +12,7 @@ thread sends).
 from __future__ import annotations
 
 import socket
+import sys
 import threading
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ import pytest
 # This suite's structures file; every test connection names it in `Structures`.
 import core.tests._messages as messages  # noqa: F401
 from core.connections.manager import ConnectionManager
+from core.DDS import _idl_alias
 
 
 # --------------------------------------------------------------------------- #
@@ -114,3 +116,26 @@ def as_bytes(message: Any) -> bytes:
     """Text messages carry `data: list[int]`; tests compare against plain
     `bytes`."""
     return bytes(message.data)
+
+
+# --------------------------------------------------------------------------- #
+# IDL folder registry (core/DDS/_idl_alias.py)
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def fresh_idl_registry():
+    """An empty IDL folder registry with no bare aliases, restored afterwards,
+    so a test may register a copy of the repo's IDL folder without clashing
+    with the real one on its file names."""
+    # Emptied in place: the validator holds `IDL_MODULES` by `from ... import`.
+    packages, names = dict(_idl_alias._packages), dict(_idl_alias.IDL_MODULES)
+    aliases = {bare: sys.modules.pop(bare) for bare in names if bare in sys.modules}
+    _idl_alias._packages.clear()
+    _idl_alias.IDL_MODULES.clear()
+    yield
+    for bare in _idl_alias.IDL_MODULES:
+        sys.modules.pop(bare, None)
+    _idl_alias._packages.clear()
+    _idl_alias._packages.update(packages)
+    _idl_alias.IDL_MODULES.clear()
+    _idl_alias.IDL_MODULES.update(names)
+    sys.modules.update(aliases)

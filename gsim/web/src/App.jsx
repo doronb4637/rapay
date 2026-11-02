@@ -523,6 +523,7 @@ export default function App() {
 
         <span className="mx-1 h-4 w-px shrink-0 bg-slate-800" />
         <IconButton
+          id="theme-toggle-btn"
           icon={theme === 'light' ? Moon : Sun}
           title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
           onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}

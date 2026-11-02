@@ -36,15 +36,19 @@ DDS Interface checks (needs `rti.connextdds`, as loading the Interface does):
   * it imports at all;
   * every unit has its own unit code;
   * no two topic classes share one wire type name;
+  * no file in its IDL folder is named like a module already on `sys.path`
+    (a stdlib one, say), which would win rtiddsgen's bare import of it;
   * a topic a unit subscribes while two or more peers publish it, or while
     that unit publishes it too, has a type carrying `A_sourceID.A_systemId`.
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 import traceback
 from types import ModuleType
 
+from core.DDS._idl_alias import IDL_MODULES
 from core.IRS import BitField, Message, Structure, is_definition
 from core.IRS.constants import ENDIAN_ATTRIBUTE, big_endian, little_endian
 from core.IRS.core import ArrayField
@@ -156,6 +160,16 @@ def _dds_problems(module: ModuleType) -> list[str]:
         owner = type_owner.setdefault(type_name, cls)
         if owner is not cls:
             problems.append(f"{owner.__qualname__} and {cls.__qualname__} share the wire type name {type_name!r}")
+
+    topic_packages = {cls.__module__.rpartition(".")[0] for cls in type_owner.values()}
+    for bare, real in IDL_MODULES.items():
+        if real.rpartition(".")[0] not in topic_packages:
+            continue
+        found = importlib.util.find_spec(bare)
+        # origin None means the IDL finder itself answered, i.e. nothing shadows it.
+        if found.origin not in (None, importlib.util.find_spec(real).origin):
+            problems.append(f"IDL file {real} is shadowed: rtiddsgen's bare `import {bare}` finds "
+                            f"{found.origin} instead; rename the IDL file")
 
     for name, unit in units.items():
         for cls in unit.subscribe:

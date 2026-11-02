@@ -9,7 +9,10 @@ What a DDS system is *described* in, as opposed to how a connection runs it. Dep
 
 ## Architecture & Tech Stack
 
-- `pyIdl/`: plain modules of `@idl.struct` topic types (RTI Connext Python API).
+- `pyIdl/`: plain modules of `@idl.struct` topic types (RTI Connext Python API), rtiddsgen output dropped in untouched. Never add or edit a file in it, not even `__init__.py`.
+- rtiddsgen's files import each other by bare name (`from example_common import *`). `_idl_alias.py` resolves those to the package modules; an Interface arms it with `register_idl_folder("..pyIdl", __package__)` before its topic imports.
+- Import an Interface before anything from its IDL folder; until then the bare imports raise `ModuleNotFoundError`.
+- Bare names are process-wide: two registered IDL folders cannot share a file name, and one folder cannot be loaded under two package names (both raise).
 - `interface.py`: `DdsUnit`, the vocabulary a generated **DDS Interface** is written in; re-exported by `__init__.py`.
 - `Interfaces/`: reference Interface -- the exact shape the user's system-XML -> Python XSLT must produce.
 - `Configuration/`: `UNIVERSAL_QOS.xml` and the security files it references. Data, not code. The RTI license is `core/rti_license.dat`.

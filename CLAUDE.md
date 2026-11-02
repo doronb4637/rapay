@@ -24,7 +24,7 @@ Repo-root umbrella over `core/IRS`, `core/DDS`, `core/connections`+`core/tools`,
 - `gsim` depends on `core` as a whole, only through `gsim/core_gateway/`, and never modifies `core` (see `gsim/CLAUDE.md`).
 - IRS has two spellings, `core.IRS.x` and `IRS.x`; `core/IRS/_alias.py` makes them one module object at every depth. Two copies fail silently (`isinstance`/`is` checks against message classes miss), and `_alias.py` raises on a genuine second copy.
 - Structures files are plugins that consume IRS, not IRS internals.
-- **Generated files** (IRS structures files, DDS Interfaces, `pyIdl` topic files) are regenerated and dropped in unchanged, so they may import generated siblings relatively (`from ..pyIdl.x import T`).
+- **Generated files** (IRS structures files, DDS Interfaces, `pyIdl` topic files) are regenerated and dropped in unchanged, so they may import generated siblings relatively (`from ..pyIdl.x import T`). rtiddsgen's own bare imports between `pyIdl` files: `core/DDS/CLAUDE.md`.
 - A config names a generated file one of two ways (`core.tools.general.import_modules`); never both for one file:
   - **Dotted name** (`"DDS.Interfaces.my_interface"`): a plain `importlib.import_module`. Use it whenever application code also imports the file (rapay as a wheel), spelled exactly like that `import`; its folder root must be on `sys.path`.
   - **`.py` path**: loaded under a synthetic `irs_structures.*` name. Use it only when nothing else imports the file (gsim). A path load of a file already imported under a real name raises `ImportError`.

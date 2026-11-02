@@ -6,7 +6,8 @@ not part of the system contract.
 A DDS Interface is a generated module written in `core.DDS.interface`'s
 vocabulary (reference instance: `core/DDS/Interfaces/example_interface.py`):
 
-    from core.DDS import DdsUnit
+    from core.DDS import DdsUnit, register_idl_folder
+    register_idl_folder("..pyIdl", __package__)   # before the topic imports
     from ..pyIdl.topics import Status, Track
 
     SYSTEM = "ExampleSystem"            # optional

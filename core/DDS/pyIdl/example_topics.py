@@ -33,24 +33,9 @@ from typing import Sequence
 
 import rti.types as idl
 
+from example_common import *
 
-@idl.struct
-class SourceId:
-    """
-    The sender identity every topic carries, always as a member named
-    `A_sourceID`.
-
-    `connections/dds.py` reads `A_systemId` -- the unit code -- off inbound
-    samples to work out which unit sent them (a DataReader serves every
-    publisher on its topic at once, so the sample itself is the only thing that
-    can say), and stamps it on outbound ones.
-    """
-    A_platformId: idl.int32 = 0
-    A_systemId: idl.int16 = 0
-    A_moduleId: idl.int16 = 0
-
-
-@idl.struct
+@idl.struct(type_annotations=[idl.type_name("Example_PSM::Track")])
 class Track:
     A_sourceID: SourceId = field(default_factory=SourceId)
     track_id: idl.uint32 = 0
@@ -61,7 +46,7 @@ class Track:
     timestamp_us: idl.uint64 = 0
 
 
-@idl.struct
+@idl.struct(type_annotations=[idl.type_name("Example_PSM::Status")])
 class Status:
     A_sourceID: SourceId = field(default_factory=SourceId)
     healthy: bool = True
@@ -115,7 +100,7 @@ class Detection:
     "label": [idl.bound(32)],
     "spectrum": [idl.array([256])],
     "detections": [idl.array([100])],
-})
+}, type_annotations=[idl.type_name("Example_PSM::SensorReport")])
 class SensorReport:
     A_sourceID: SourceId = field(default_factory=SourceId)
     header: ReportHeader = field(default_factory=ReportHeader)

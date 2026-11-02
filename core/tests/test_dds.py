@@ -21,6 +21,7 @@ import asyncio
 import dataclasses
 import importlib.util
 import logging
+import subprocess
 import sys
 import textwrap
 import threading
@@ -38,7 +39,10 @@ from core.connections.dds import DdsConnection  # noqa: E402
 from core.connections.dds_config import (DEFAULT_DOMAIN_ID, DEFAULT_QOS_FILE,  # noqa: E402
                                          TopicDirection, load_dds_interface, resolve_unit)
 from core.connections.handlers import UnitHandler, route  # noqa: E402
-from core.DDS import DdsUnit  # noqa: E402
+from core.DDS import DdsUnit, register_idl_folder  # noqa: E402
+# The Interface first: it registers pyIdl/, whose rtiddsgen files import each other by bare name.
+import core.DDS.Interfaces.example_interface  # noqa: E402, F401
+import core.DDS.pyIdl.example_common as example_common  # noqa: E402
 from core.DDS.pyIdl.example_topics import SourceId, Status, Track  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -190,15 +194,18 @@ def test_each_unit_gets_its_own_view_of_the_example_interface():
         "SensorReport": TopicDirection.SUBSCRIBE}
 
 
-def generated_copy(tmp_path: Path) -> Path:
+def generated_copy(tmp_path: Path, idl_folder: str = "pyIdl") -> Path:
     """The repo's generated Interface + pyIdl pair, copied as the generator lays
-    it out (`pyIdl/` beside the Interface's folder) somewhere nothing imports."""
-    for folder, name in (("Interfaces", "example_interface.py"), ("pyIdl", "example_topics.py")):
-        target = tmp_path / "ICD" / folder
-        target.mkdir(parents=True)
-        (target / name).write_text(
-            (REPO_ROOT / "core" / "DDS" / folder / name).read_text(encoding="utf-8"), encoding="utf-8")
-    return tmp_path / "ICD" / "Interfaces" / "example_interface.py"
+    it out (`pyIdl/` beside the Interface's folder) somewhere nothing imports.
+    `idl_folder` renames the IDL folder, as the generator would in both places."""
+    interfaces, idl = tmp_path / "ICD" / "Interfaces", tmp_path / "ICD" / idl_folder
+    interfaces.mkdir(parents=True)
+    idl.mkdir()
+    source = (REPO_ROOT / "core" / "DDS" / "Interfaces" / "example_interface.py").read_text(encoding="utf-8")
+    (interfaces / "example_interface.py").write_text(source.replace("..pyIdl", f"..{idl_folder}"), encoding="utf-8")
+    for file in (REPO_ROOT / "core" / "DDS" / "pyIdl").glob("*.py"):
+        (idl / file.name).write_text(file.read_text(encoding="utf-8"), encoding="utf-8")
+    return interfaces / "example_interface.py"
 
 
 def test_the_interface_classes_are_the_ones_application_code_imports():
@@ -207,14 +214,65 @@ def test_the_interface_classes_are_the_ones_application_code_imports():
     assert load_dds_interface(INTERFACE).Track is Track
 
 
+@pytest.mark.usefixtures("fresh_idl_registry")
 def test_a_path_only_interface_resolves_its_relative_topic_import(tmp_path):
     """gsim's case: nothing else imports the file, so it loads by path and its
     `..pyIdl` resolves to the generated sibling folder."""
     module = load_dds_interface(str(generated_copy(tmp_path)))
     assert module.Track.__module__.endswith(".ICD.pyIdl.example_topics")
     assert module.SensorUnit.publish[0] is module.Track
+    assert sys.modules["example_common"].__name__.endswith(".ICD.pyIdl.example_common")
 
 
+def test_rtiddsgen_bare_imports_are_the_package_modules():
+    """`from example_common import *` inside pyIdl/ reaches the very module the
+    application imports by package name, so there is one `SourceId`."""
+    assert sys.modules["example_common"] is example_common
+    assert example_common.__spec__.name == "core.DDS.pyIdl.example_common"
+    assert type(Track().A_sourceID) is example_common.SourceId
+
+
+def test_a_topic_import_before_any_interface_fails_loudly():
+    """The one ordering rule: nothing registered pyIdl/ yet, so its bare import
+    fails rather than resolving somewhere else."""
+    result = subprocess.run([sys.executable, "-c", "import core.DDS.pyIdl.example_topics"],
+                            cwd=REPO_ROOT, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "No module named 'example_common'" in result.stderr
+
+
+@pytest.mark.usefixtures("fresh_idl_registry")
+def test_a_renamed_idl_folder_needs_no_change_in_core(tmp_path):
+    module = load_dds_interface(str(generated_copy(tmp_path, idl_folder="TopicTypes")))
+    assert module.Track.__module__.endswith(".ICD.TopicTypes.example_topics")
+    assert sys.modules["example_common"].__name__.endswith(".ICD.TopicTypes.example_common")
+
+
+@pytest.mark.usefixtures("fresh_idl_registry")
+def test_one_idl_folder_under_two_package_names_is_refused(tmp_path, monkeypatch):
+    """Imported dotted by the application and path-loaded by a config: two
+    copies of every topic class, so the second registration raises."""
+    path = generated_copy(tmp_path)
+    (path.parent / "second_interface.py").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        importlib.import_module("ICD.Interfaces.example_interface")
+        with pytest.raises(ImportError, match="already imported as 'ICD.pyIdl'"):
+            load_dds_interface(str(path.parent / "second_interface.py"))
+    finally:
+        for name in [name for name in sys.modules if name == "ICD" or name.startswith("ICD.")]:
+            del sys.modules[name]
+
+
+@pytest.mark.usefixtures("fresh_idl_registry")
+def test_two_idl_folders_sharing_a_file_name_are_refused(tmp_path):
+    """rtiddsgen's bare `example_common` could only mean one of them."""
+    register_idl_folder("..pyIdl", "core.DDS.Interfaces")
+    with pytest.raises(ImportError, match=r"both have \['example_common.py', 'example_topics.py'\]"):
+        load_dds_interface(str(generated_copy(tmp_path)))
+
+
+@pytest.mark.usefixtures("fresh_idl_registry")
 def test_one_file_is_one_module_object(tmp_path):
     """Loading the same file again -- however its path is spelled -- must not
     mint a second module."""
